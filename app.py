@@ -12,7 +12,7 @@ import threading
 from datetime import datetime, timezone
 
 import requests as req
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit
 
 try:
@@ -33,6 +33,7 @@ MT5_LOGIN        = int(os.environ.get("MT5_LOGIN", "75611028"))
 MT5_PASSWORD     = os.environ.get("MT5_PASSWORD", "")
 MT5_SERVER       = os.environ.get("MT5_SERVER", "XMTrading-MT5 3")
 SIGNAL_INTERVAL  = int(os.environ.get("SIGNAL_INTERVAL", "1800"))
+PUSH_SECRET      = os.environ.get("PUSH_SECRET", "goldtrader_push_2026")
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -194,6 +195,20 @@ def signal_loop():
         time.sleep(SIGNAL_INTERVAL)
 
 # ==================== REST エンドポイント ====================
+@app.route("/push-signal", methods=["POST"])
+def push_signal():
+    """PCのmt5スクリプトからシグナルを受け取り、スマホに配信する"""
+    if request.headers.get("X-Push-Secret", "") != PUSH_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data"}), 400
+    data['received_at'] = datetime.now(timezone.utc).isoformat()
+    socketio.emit('signal', data)
+    print(f"📡 PCからシグナル受信・配信: {data}")
+    save_signal_to_supabase(data)
+    return jsonify({"status": "ok"})
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
