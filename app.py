@@ -1,8 +1,9 @@
 """
-Render デプロイ用 Flask バックエンド
-- MT5 シグナル計算（GOLD RSI クロスオーバー + Gemini ダマシ判定）
-- WebSocket で Capacitor アプリにリアルタイム送信
-- Supabase REST API にシグナル履歴保存（supabase パッケージ不使用）
+Render デプロイ用 Flask バックエンド（PC不要・24/7稼働版）
+- Yahoo Finance から GOLD 30分足データを自動取得
+- RSI クロスオーバー + Gemini AI ダマシ判定
+- WebSocket でスマホアプリにリアルタイム配信
+- Supabase REST API にシグナル履歴保存
 """
 
 import os
@@ -12,8 +13,9 @@ import threading
 from datetime import datetime, timezone
 
 import requests as req
+import yfinance as yf
 from flask import Flask, jsonify, request
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO
 
 try:
     import MetaTrader5 as mt5
@@ -26,14 +28,11 @@ import pandas as pd
 from google import genai
 
 # ==================== 環境変数 ====================
-GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
-SUPABASE_URL     = os.environ["SUPABASE_URL"]
-SUPABASE_KEY     = os.environ["SUPABASE_KEY"]
-MT5_LOGIN        = int(os.environ.get("MT5_LOGIN", "75611028"))
-MT5_PASSWORD     = os.environ.get("MT5_PASSWORD", "")
-MT5_SERVER       = os.environ.get("MT5_SERVER", "XMTrading-MT5 3")
-SIGNAL_INTERVAL  = int(os.environ.get("SIGNAL_INTERVAL", "1800"))
-PUSH_SECRET      = os.environ.get("PUSH_SECRET", "goldtrader_push_2026")
+GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
+SUPABASE_URL    = os.environ["SUPABASE_URL"]
+SUPABASE_KEY    = os.environ["SUPABASE_KEY"]
+PUSH_SECRET     = os.environ.get("PUSH_SECRET", "goldtrader_push_2026")
+SIGNAL_INTERVAL = int(os.environ.get("SIGNAL_INTERVAL", "1800"))
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -59,25 +58,32 @@ def calculate_rsi(close_prices, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-# ==================== MT5 データ取得 ====================
-def fetch_mt5_data():
-    if not MT5_AVAILABLE:
+# ==================== Yahoo Finance データ取得 ====================
+def fetch_yahoo_data():
+    """Yahoo Finance から GOLD 30分足データを取得（PCもMT5も不要）"""
+    try:
+        ticker = yf.Ticker("GC=F")  # ゴールド先物
+        df = ticker.history(period="5d", interval="30m")
+        if df is None or len(df) < 15:
+            print("⚠️  Yahoo Finance: データ不足")
+            return None
+        df = df.reset_index()
+        # カラム名を統一
+        df.columns = [c.lower() for c in df.columns]
+        for col in ['datetime', 'date']:
+            if col in df.columns:
+                df = df.rename(columns={col: 'time'})
+                break
+        for col in ['open', 'high', 'low', 'close']:
+            df[col] = df[col].astype(float)
+        # タイムゾーン情報を除去して統一
+        if hasattr(df['time'].dtype, 'tz') and df['time'].dtype.tz is not None:
+            df['time'] = df['time'].dt.tz_localize(None)
+        print(f"✓ Yahoo Finance: {len(df)} 本取得 最新={df['time'].iloc[-1]}")
+        return df
+    except Exception as e:
+        print(f"⚠️  Yahoo Finance エラー: {e}")
         return None
-    if not mt5.initialize(login=MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER):
-        print(f"MT5 接続失敗: {mt5.last_error()}")
-        return None
-    time.sleep(2)
-    mt5.symbol_select("GOLD", True)
-    time.sleep(1)
-    rates = mt5.copy_rates_from_pos("GOLD", mt5.TIMEFRAME_M30, 0, 100)
-    mt5.shutdown()
-    if rates is None:
-        return None
-    df = pd.DataFrame(rates)
-    df['time'] = pd.to_datetime(df['time'], unit='s')
-    for col in ['open', 'high', 'low', 'close']:
-        df[col] = df[col].astype(float)
-    return df
 
 # ==================== シグナル計算 ====================
 def compute_signal(df):
@@ -101,7 +107,7 @@ def compute_signal(df):
         'signal_line': round(float(cur_sig), 2),
         'crossover': crossover,
         'latest_close': round(float(df['close'].iloc[-1]), 2),
-        'time': df['time'].iloc[-1].isoformat()
+        'time': str(df['time'].iloc[-1])
     }
 
 # ==================== Gemini ダマシ判定 ====================
@@ -140,7 +146,7 @@ RSI: {signal['rsi']}
         print(f"Gemini エラー: {e}")
         return {'valid': False, 'confidence': 0, 'reason': str(e)[:50]}
 
-# ==================== Supabase 保存（REST API）====================
+# ==================== Supabase 保存 ====================
 def save_signal_to_supabase(signal_data):
     try:
         resp = req.post(
@@ -165,21 +171,27 @@ def save_signal_to_supabase(signal_data):
     except Exception as e:
         print(f"⚠️  Supabase 保存エラー: {e}")
 
-# ==================== シグナルループ ====================
+# ==================== シグナルループ（24/7自動稼働）====================
 def signal_loop():
-    print("🔄 シグナルループ開始")
+    """Yahoo Finance からデータ取得し、30分ごとにシグナルを計算・配信"""
+    print("🔄 シグナルループ開始（Yahoo Finance / PC不要モード）")
     while True:
         try:
-            df = fetch_mt5_data()
+            df = fetch_yahoo_data()
             signal = compute_signal(df)
+
             if signal is None:
                 print("⚠️  シグナル計算失敗。スキップします。")
                 time.sleep(SIGNAL_INTERVAL)
                 continue
+
             if signal['crossover']:
+                print(f"🎯 クロスオーバー検出: {signal['crossover']}")
                 ai = gemini_validate(df, signal)
             else:
                 ai = {'valid': None, 'confidence': None, 'reason': None}
+                print(f"⏸️  クロスオーバーなし RSI={signal['rsi']}")
+
             signal_data = {
                 **signal,
                 'ai_valid': ai['valid'],
@@ -187,17 +199,21 @@ def signal_loop():
                 'ai_reason': ai['reason'],
                 'generated_at': datetime.now(timezone.utc).isoformat()
             }
+
             socketio.emit('signal', signal_data)
-            print(f"📡 シグナル送信: {signal_data}")
+            print(f"📡 シグナル配信完了: close={signal_data['latest_close']}")
+
             save_signal_to_supabase(signal_data)
+
         except Exception as e:
             print(f"❌ シグナルループエラー: {e}")
+
         time.sleep(SIGNAL_INTERVAL)
 
 # ==================== REST エンドポイント ====================
 @app.route("/push-signal", methods=["POST"])
 def push_signal():
-    """PCのmt5スクリプトからシグナルを受け取り、スマホに配信する"""
+    """PCからの手動プッシュ（オプション）"""
     if request.headers.get("X-Push-Secret", "") != PUSH_SECRET:
         return jsonify({"error": "Unauthorized"}), 401
     data = request.get_json()
@@ -205,13 +221,12 @@ def push_signal():
         return jsonify({"error": "No data"}), 400
     data['received_at'] = datetime.now(timezone.utc).isoformat()
     socketio.emit('signal', data)
-    print(f"📡 PCからシグナル受信・配信: {data}")
     save_signal_to_supabase(data)
     return jsonify({"status": "ok"})
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat()})
+    return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat(), "mode": "yahoo-finance"})
 
 @app.route("/latest-signal", methods=["GET"])
 def latest_signal():
