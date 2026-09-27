@@ -26,6 +26,8 @@ except ImportError:
 import numpy as np
 import pandas as pd
 from google import genai
+import firebase_admin
+from firebase_admin import credentials, messaging
 
 # ==================== 環境変数 ====================
 GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
@@ -40,6 +42,19 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "goldtrader_secret")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 gemini_model = genai.Client(api_key=GEMINI_API_KEY)
+
+# Firebase Admin SDK 初期化
+_firebase_cert = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+if _firebase_cert:
+    _cred = credentials.Certificate(json.loads(_firebase_cert))
+    firebase_admin.initialize_app(_cred)
+    FCM_ENABLED = True
+else:
+    FCM_ENABLED = False
+    print("⚠️  FIREBASE_SERVICE_ACCOUNT_JSON 未設定 → FCMプッシュ無効")
+
+# FCMトークン一覧（メモリ保持）
+fcm_tokens: set[str] = set()
 
 def supabase_headers():
     return {
@@ -203,12 +218,48 @@ def signal_loop():
             socketio.emit('signal', signal_data)
             print(f"📡 シグナル配信完了: close={signal_data['latest_close']}")
 
+            # クロスオーバーかつAI有効の場合はFCMプッシュも送信
+            if signal_data.get('crossover') and signal_data.get('ai_valid'):
+                send_fcm_push(signal_data)
+
             save_signal_to_supabase(signal_data)
 
         except Exception as e:
             print(f"❌ シグナルループエラー: {e}")
 
         time.sleep(SIGNAL_INTERVAL)
+
+# ==================== FCM プッシュ送信 ====================
+def send_fcm_push(signal_data):
+    if not FCM_ENABLED or not fcm_tokens:
+        return
+    direction = "📈 買いシグナル" if signal_data.get('crossover') == "UP_CROSS" else "📉 売りシグナル"
+    confidence = signal_data.get('ai_confidence', 0)
+    reason = signal_data.get('ai_reason', '')
+    invalid_tokens = set()
+    for token in list(fcm_tokens):
+        try:
+            msg = messaging.Message(
+                notification=messaging.Notification(
+                    title=f"GOLD {direction}",
+                    body=f"信頼度: {confidence}%  {reason}",
+                ),
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        channel_id="gold-signal",
+                        notification_count=1,
+                    ),
+                ),
+                token=token,
+            )
+            messaging.send(msg)
+            print(f"✓ FCMプッシュ送信完了: {token[:20]}...")
+        except Exception as e:
+            print(f"⚠️  FCM送信エラー ({token[:20]}...): {e}")
+            if "registration-token-not-registered" in str(e) or "invalid-argument" in str(e):
+                invalid_tokens.add(token)
+    fcm_tokens.difference_update(invalid_tokens)
 
 # ==================== REST エンドポイント ====================
 @app.route("/push-signal", methods=["POST"])
@@ -222,6 +273,16 @@ def push_signal():
     data['received_at'] = datetime.now(timezone.utc).isoformat()
     socketio.emit('signal', data)
     save_signal_to_supabase(data)
+    return jsonify({"status": "ok"})
+
+@app.route("/register-token", methods=["POST"])
+def register_token():
+    data = request.get_json()
+    token = data.get("token") if data else None
+    if not token:
+        return jsonify({"error": "No token"}), 400
+    fcm_tokens.add(token)
+    print(f"📱 FCMトークン登録: {token[:20]}... (合計: {len(fcm_tokens)}台)")
     return jsonify({"status": "ok"})
 
 @app.route("/health", methods=["GET"])
