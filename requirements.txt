@@ -1,0 +1,7 @@
+flask==3.0.3
+flask-socketio==5.3.6
+eventlet==0.36.1
+google-generativeai==0.7.2
+supabase==2.5.0
+pandas==2.2.2
+numpy==1.26.4
