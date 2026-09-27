@@ -275,15 +275,23 @@ def push_signal():
     save_signal_to_supabase(data)
     return jsonify({"status": "ok"})
 
-@app.route("/register-token", methods=["POST"])
+@app.route("/register-token", methods=["POST", "OPTIONS"])
 def register_token():
+    if request.method == "OPTIONS":
+        resp = app.make_default_options_response()
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
     data = request.get_json()
     token = data.get("token") if data else None
     if not token:
         return jsonify({"error": "No token"}), 400
     fcm_tokens.add(token)
     print(f"📱 FCMトークン登録: {token[:20]}... (合計: {len(fcm_tokens)}台)")
-    return jsonify({"status": "ok"})
+    resp = jsonify({"status": "ok"})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 @app.route("/health", methods=["GET"])
 def health():
