@@ -24,7 +24,7 @@ except ImportError:
 
 import numpy as np
 import pandas as pd
-import google.generativeai as genai
+from google import genai
 
 # ==================== 環境変数 ====================
 GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
@@ -42,8 +42,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+gemini_model = genai.Client(api_key=GEMINI_API_KEY)
 
 # ==================== RSI 計算 ====================
 def calculate_rsi(close_prices, period=14):
@@ -138,7 +137,7 @@ RSI: {signal['rsi']}
 """
 
     try:
-        response = gemini_model.generate_content(prompt)
+        response = gemini_model.models.generate_content(model="gemini-2.0-flash", contents=prompt)
         text = response.text.strip()
         if "```" in text:
             text = text.split("```")[1].replace("json", "").strip()
