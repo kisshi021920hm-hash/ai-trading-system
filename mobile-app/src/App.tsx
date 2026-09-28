@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { io, Socket } from "socket.io-client";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { PushNotifications } from "@capacitor/push-notifications";
+import { Haptics } from "@capacitor/haptics";
 
 // ==================== 型定義 ====================
 interface CompositeData {
@@ -77,6 +78,14 @@ interface TodayStats {
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
+// ==================== 振動ユーティリティ ====================
+async function doVibrate(duration: number, count: number, gap: number) {
+  for (let i = 0; i < count; i++) {
+    try { await Haptics.vibrate({ duration }); } catch (_) {}
+    if (i < count - 1) await new Promise(r => setTimeout(r, gap));
+  }
+}
+
 // ==================== メインコンポーネント ====================
 export default function App() {
   const [signal, setSignal] = useState<Signal | null>(null);
@@ -111,6 +120,21 @@ export default function App() {
   const [execMsg, setExecMsg] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
+  const [vibDuration, setVibDuration] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("gt_vib_duration") ?? "800"); } catch { return 800; }
+  });
+  const [vibCount, setVibCount] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("gt_vib_count") ?? "3"); } catch { return 3; }
+  });
+  const [vibGap, setVibGap] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("gt_vib_gap") ?? "150"); } catch { return 150; }
+  });
+  const vibDurationRef = useRef(vibDuration);
+  const vibCountRef = useRef(vibCount);
+  const vibGapRef = useRef(vibGap);
+  useEffect(() => { vibDurationRef.current = vibDuration; try { localStorage.setItem("gt_vib_duration", String(vibDuration)); } catch {} }, [vibDuration]);
+  useEffect(() => { vibCountRef.current = vibCount;   try { localStorage.setItem("gt_vib_count",    String(vibCount));    } catch {} }, [vibCount]);
+  useEffect(() => { vibGapRef.current = vibGap;       try { localStorage.setItem("gt_vib_gap",      String(vibGap));      } catch {} }, [vibGap]);
 
   const fetchTrades = async () => {
     try {
@@ -126,24 +150,37 @@ export default function App() {
     } catch (_) {}
   };
 
+  const [fcmStatus, setFcmStatus] = useState<string>("初期化中...");
+
   useEffect(() => {
     // FCMプッシュ通知の登録
     PushNotifications.requestPermissions().then(result => {
-      if (result.receive === "granted") PushNotifications.register();
+      if (result.receive === "granted") {
+        setFcmStatus("登録中...");
+        PushNotifications.register();
+      } else {
+        setFcmStatus("⚠️ 通知許可なし");
+      }
     });
     PushNotifications.addListener("registration", async (token) => {
+      setFcmStatus("✅ FCM登録済");
+      try { localStorage.setItem("gt_fcm_token", token.value); } catch (_) {}
       try {
         await fetch(`${RENDER_URL}/register-token`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token: token.value }),
         });
-      } catch (_) {}
+      } catch (_) { setFcmStatus("⚠️ サーバー送信失敗"); }
+    });
+    PushNotifications.addListener("registrationError", (err) => {
+      setFcmStatus(`❌ FCM失敗: ${err.error}`);
     });
 
     LocalNotifications.requestPermissions();
+    // チャンネルIDをv2に更新（振動設定を確実に反映させるため）
     LocalNotifications.createChannel({
-      id: "gold-signal",
+      id: "gold-signal-v2",
       name: "GOLDシグナル通知",
       importance: 5,
       vibration: true,
@@ -163,6 +200,16 @@ export default function App() {
 
     socket.on("connect", async () => {
       setConnected(true);
+      try {
+        const savedFcmToken = localStorage.getItem("gt_fcm_token");
+        if (savedFcmToken) {
+          fetch(`${RENDER_URL}/register-token`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: savedFcmToken }),
+          }).catch(() => {});
+        }
+      } catch (_) {}
       try {
         const savedTf = parseInt(localStorage.getItem("gt_tf") ?? "30");
         const savedMode = (localStorage.getItem("gt_mode") ?? "PRODUCTION") as "PRODUCTION" | "TEST";
@@ -230,20 +277,26 @@ export default function App() {
       setSignal(data);
       setHistory((prev) => [data, ...prev].slice(0, 50));
 
-      if (data.crossover && data.ai_valid) {
+      if (data.crossover) {
+        // 振動（アプリが前面にある場合）
+        doVibrate(vibDurationRef.current, vibCountRef.current, vibGapRef.current);
+
         const direction = data.crossover === "UP_CROSS" ? "📈 買いシグナル" : "📉 売りシグナル";
         const label = data.test_mode ? "🧪 TEST " : "";
         const notifId = Math.floor(Math.random() * 100000);
         const slTp = data.ai_sl_suggestion && data.ai_tp_suggestion
           ? ` | SL:${data.ai_sl_suggestion} TP:${data.ai_tp_suggestion}`
           : "";
+        const aiBody = data.ai_valid !== null
+          ? `${data.ai_valid ? "✅" : "⚠️"} 信頼度:${data.ai_confidence}% ${data.ai_reason ?? ""}${slTp}`
+          : `シグナル検出${slTp}`;
         LocalNotifications.schedule({
           notifications: [{
             id: notifId,
             title: `${label}GOLD ${direction}`,
-            body: `信頼度: ${data.ai_confidence}%  ${data.ai_reason}${slTp}`,
+            body: aiBody,
             schedule: { at: new Date() },
-            channelId: "gold-signal",
+            channelId: "gold-signal-v2",
             sound: "default",
           }],
         });
@@ -393,6 +446,9 @@ export default function App() {
       <div style={{ ...styles.badge, background: connected ? "#22c55e" : "#ef4444" }}>
         {connected ? "● 接続中" : "○ 切断"}
       </div>
+      <div style={{ fontSize: 11, color: fcmStatus.startsWith("✅") ? "#22c55e" : fcmStatus.startsWith("❌") || fcmStatus.startsWith("⚠️") ? "#f59e0b" : "#64748b", marginLeft: 8 }}>
+        🔔 {fcmStatus}
+      </div>
 
       {/* タブナビゲーション */}
       <div style={styles.tabBar}>
@@ -465,8 +521,28 @@ export default function App() {
               {signal.crossover && (
                 <>
                   <hr style={styles.divider} />
-                  <Row label="AI 判定" value={signal.ai_valid ? "✅ 有効" : "❌ ダマシ"} highlight={signal.ai_valid ? "#22c55e" : "#ef4444"} />
-                  <Row label="信頼度" value={`${signal.ai_confidence}%`} />
+                  <Row
+                    label="AI 判定"
+                    value={
+                      signal.ai_reason?.includes("クールダウン") || signal.ai_reason?.includes("スキップ")
+                        ? "⏸ 保留中"
+                        : signal.ai_valid === null
+                        ? "⏳ 待機中"
+                        : signal.ai_valid
+                        ? "✅ 有効"
+                        : "❌ ダマシ"
+                    }
+                    highlight={
+                      signal.ai_reason?.includes("クールダウン") || signal.ai_reason?.includes("スキップ")
+                        ? "#94a3b8"
+                        : signal.ai_valid === null
+                        ? "#94a3b8"
+                        : signal.ai_valid
+                        ? "#22c55e"
+                        : "#ef4444"
+                    }
+                  />
+                  {signal.ai_confidence != null && <Row label="信頼度" value={`${signal.ai_confidence}%`} />}
                   <Row label="理由" value={signal.ai_reason ?? ""} />
                   {signal.ai_sl_suggestion != null && <Row label="推奨SL" value={String(signal.ai_sl_suggestion)} highlight="#fca5a5" />}
                   {signal.ai_tp_suggestion != null && <Row label="推奨TP" value={String(signal.ai_tp_suggestion)} highlight="#86efac" />}
@@ -806,6 +882,96 @@ export default function App() {
 
 
             {saveMsg && <div style={styles.saveMsg}>{saveMsg}</div>}
+
+            {/* 振動設定 */}
+            <div style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", marginBottom: 10 }}>
+              <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 10 }}>📳 振動カスタム設定</div>
+
+              {/* 振動時間 */}
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#cbd5e1", marginBottom: 4 }}>
+                  <span>振動時間</span><span style={{ color: "#38bdf8", fontWeight: "bold" }}>{vibDuration}ms</span>
+                </div>
+                <input type="range" min={100} max={2000} step={50} value={vibDuration}
+                  onChange={e => setVibDuration(Number(e.target.value))}
+                  style={{ width: "100%", accentColor: "#3b82f6" }} />
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#475569" }}>
+                  <span>100ms</span><span>2000ms</span>
+                </div>
+              </div>
+
+              {/* 回数 */}
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 13, color: "#cbd5e1", marginBottom: 6 }}>回数</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {[1,2,3,4,5].map(n => (
+                    <button key={n} onClick={() => setVibCount(n)}
+                      style={{ flex: 1, padding: "7px 0", border: "none", borderRadius: 8, fontSize: 14, cursor: "pointer",
+                        background: vibCount === n ? "#3b82f6" : "#334155",
+                        color: vibCount === n ? "#fff" : "#94a3b8",
+                        fontWeight: vibCount === n ? "bold" : "normal" }}>
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 間隔（2回以上の場合のみ） */}
+              {vibCount > 1 && (
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "#cbd5e1", marginBottom: 4 }}>
+                    <span>振動の間隔</span><span style={{ color: "#38bdf8", fontWeight: "bold" }}>{vibGap}ms</span>
+                  </div>
+                  <input type="range" min={50} max={500} step={50} value={vibGap}
+                    onChange={e => setVibGap(Number(e.target.value))}
+                    style={{ width: "100%", accentColor: "#3b82f6" }} />
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#475569" }}>
+                    <span>50ms</span><span>500ms</span>
+                  </div>
+                </div>
+              )}
+
+              {/* パターンプレビュー */}
+              <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 10, height: 20 }}>
+                {Array.from({ length: vibCount }).map((_, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <div style={{ height: 16, background: "#f59e0b", borderRadius: 3,
+                      width: Math.max(8, Math.round(vibDuration / 50)) + "px" }} />
+                    {i < vibCount - 1 && <div style={{ height: 16, width: Math.max(4, Math.round(vibGap / 30)) + "px" }} />}
+                  </div>
+                ))}
+              </div>
+
+              {/* テストボタン */}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  style={{ flex: 1, padding: "10px", background: "#0f172a", color: "#7dd3fc", border: "1px solid #334155", borderRadius: 8, fontSize: 13, cursor: "pointer" }}
+                  onClick={() => doVibrate(vibDuration, vibCount, vibGap)}
+                >
+                  📳 振動テスト
+                </button>
+                <button
+                  style={{ flex: 1, padding: "10px", background: "#1e40af", color: "#fff", border: "none", borderRadius: 8, fontSize: 13, cursor: "pointer" }}
+                  onClick={async () => {
+                    doVibrate(vibDuration, vibCount, vibGap);
+                    try {
+                      await LocalNotifications.schedule({
+                        notifications: [{
+                          id: 99999,
+                          title: "🔔 テスト通知",
+                          body: `振動 ${vibDuration}ms × ${vibCount}回`,
+                          schedule: { at: new Date(Date.now() + 300) },
+                          channelId: "gold-signal-v2",
+                          sound: "default",
+                        }],
+                      });
+                    } catch (e) { alert("通知エラー: " + e); }
+                  }}
+                >
+                  🔔 通知テスト
+                </button>
+              </div>
+            </div>
 
             <div style={styles.settingsBtns}>
               <button style={styles.btnSave} onClick={saveSettings} disabled={saving}>
