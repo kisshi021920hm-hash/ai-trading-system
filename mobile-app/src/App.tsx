@@ -29,9 +29,15 @@ export default function App() {
   const [history, setHistory] = useState<Signal[]>([]);
   const [connected, setConnected] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [tf, setTf] = useState(30);
-  const [mode, setMode] = useState<"PRODUCTION" | "TEST">("PRODUCTION");
-  const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD" | "RSI_MACD">("RSI");
+  const [tf, setTf] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("gt_tf") ?? "30"); } catch { return 30; }
+  });
+  const [mode, setMode] = useState<"PRODUCTION" | "TEST">(() => {
+    try { return (localStorage.getItem("gt_mode") as any) ?? "PRODUCTION"; } catch { return "PRODUCTION"; }
+  });
+  const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD" | "RSI_MACD">(() => {
+    try { return (localStorage.getItem("gt_crossover") as any) ?? "RSI"; } catch { return "RSI"; }
+  });
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
 
@@ -74,14 +80,38 @@ export default function App() {
 
     socket.on("disconnect", () => setConnected(false));
 
-    // 接続時に最新シグナルと設定を取得
+    // 接続時に最新シグナル取得 + ローカル保存設定をサーバーへ復元送信
     socket.on("connect", async () => {
       setConnected(true);
       try {
-        const [sigRes, setRes] = await Promise.all([
-          fetch(`${RENDER_URL}/latest-signal`),
-          fetch(`${RENDER_URL}/api/settings/current`),
+        // localStorageから設定を読み込み
+        const savedTf = parseInt(localStorage.getItem("gt_tf") ?? "30");
+        const savedMode = (localStorage.getItem("gt_mode") ?? "PRODUCTION") as "PRODUCTION" | "TEST";
+        const savedCrossover = (localStorage.getItem("gt_crossover") ?? "RSI") as "RSI" | "MACD" | "RSI_MACD";
+
+        // サーバーへ保存済み設定を送信（再起動後もリストア）
+        await Promise.all([
+          fetch(`${RENDER_URL}/api/settings/timeframe`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ timeframe: savedTf }),
+          }),
+          fetch(`${RENDER_URL}/api/settings/mode`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: savedMode }),
+          }),
+          fetch(`${RENDER_URL}/api/settings/crossover`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ crossover_mode: savedCrossover }),
+          }),
         ]);
+
+        // ローカル状態を更新
+        setTf(savedTf);
+        setMode(savedMode);
+        setCrossoverMode(savedCrossover);
+
+        // 最新シグナルを取得
+        const sigRes = await fetch(`${RENDER_URL}/latest-signal`);
         const data = await sigRes.json();
         if (data && data.rsi) {
           const s: Signal = {
@@ -99,10 +129,6 @@ export default function App() {
           setSignal(s);
           setHistory((prev) => [s, ...prev].slice(0, 50));
         }
-        const settings = await setRes.json();
-        if (settings.timeframe) setTf(settings.timeframe);
-        if (settings.mode) setMode(settings.mode);
-        if (settings.crossover_mode) setCrossoverMode(settings.crossover_mode);
       } catch (_) {}
     });
 
@@ -163,6 +189,12 @@ export default function App() {
           body: JSON.stringify({ crossover_mode: crossoverMode }),
         }),
       ]);
+      // localStorageに永続保存
+      try {
+        localStorage.setItem("gt_tf", String(tf));
+        localStorage.setItem("gt_mode", mode);
+        localStorage.setItem("gt_crossover", crossoverMode);
+      } catch (_) {}
       setSaveMsg("✅ 保存しました");
       setTimeout(() => { setSaveMsg(""); setSettingsOpen(false); }, 1500);
     } catch (_) {
