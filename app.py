@@ -161,7 +161,7 @@ RSI: {signal['rsi']}
 {{"valid": true or false, "confidence": 0-100, "reason": "50文字以内"}}
 """
     try:
-        response = gemini_model.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        response = gemini_model.models.generate_content(model="gemini-1.5-flash", contents=prompt)
         text = response.text.strip()
         if "```" in text:
             text = text.split("```")[1].replace("json", "").strip()
