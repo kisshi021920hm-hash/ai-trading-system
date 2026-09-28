@@ -18,6 +18,8 @@ interface Signal {
   test_mode?: boolean;
   crossover_mode?: string;
   db_id?: number;
+  trading_mode?: string;
+  auto_executed?: boolean;
 }
 
 interface Trade {
@@ -75,6 +77,14 @@ export default function App() {
   const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD" | "RSI_MACD">(() => {
     try { return (localStorage.getItem("gt_crossover") as any) ?? "RSI"; } catch { return "RSI"; }
   });
+  const [tradingMode, setTradingMode] = useState<"MANUAL" | "SEMI_AUTO" | "FULL_AUTO">(() => {
+    try { return (localStorage.getItem("gt_trading_mode") as any) ?? "MANUAL"; } catch { return "MANUAL"; }
+  });
+  const [autoThreshold, setAutoThreshold] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("gt_auto_threshold") ?? "70"); } catch { return 70; }
+  });
+  const [executing, setExecuting] = useState(false);
+  const [execMsg, setExecMsg] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
 
@@ -133,6 +143,8 @@ export default function App() {
         const savedTf = parseInt(localStorage.getItem("gt_tf") ?? "30");
         const savedMode = (localStorage.getItem("gt_mode") ?? "PRODUCTION") as "PRODUCTION" | "TEST";
         const savedCrossover = (localStorage.getItem("gt_crossover") ?? "RSI") as "RSI" | "MACD" | "RSI_MACD";
+        const savedTradingMode = (localStorage.getItem("gt_trading_mode") ?? "MANUAL") as "MANUAL" | "SEMI_AUTO" | "FULL_AUTO";
+        const savedThreshold = parseInt(localStorage.getItem("gt_auto_threshold") ?? "70");
 
         await Promise.all([
           fetch(`${RENDER_URL}/api/settings/timeframe`, {
@@ -147,11 +159,21 @@ export default function App() {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ crossover_mode: savedCrossover }),
           }),
+          fetch(`${RENDER_URL}/api/settings/trading-mode`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ trading_mode: savedTradingMode }),
+          }),
+          fetch(`${RENDER_URL}/api/settings/auto-threshold`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ threshold: savedThreshold }),
+          }),
         ]);
 
         setTf(savedTf);
         setMode(savedMode);
         setCrossoverMode(savedCrossover);
+        setTradingMode(savedTradingMode);
+        setAutoThreshold(savedThreshold);
 
         const sigRes = await fetch(`${RENDER_URL}/latest-signal`);
         const data = await sigRes.json();
@@ -234,11 +256,21 @@ export default function App() {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ crossover_mode: crossoverMode }),
         }),
+        fetch(`${RENDER_URL}/api/settings/trading-mode`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ trading_mode: tradingMode }),
+        }),
+        fetch(`${RENDER_URL}/api/settings/auto-threshold`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threshold: autoThreshold }),
+        }),
       ]);
       try {
         localStorage.setItem("gt_tf", String(tf));
         localStorage.setItem("gt_mode", mode);
         localStorage.setItem("gt_crossover", crossoverMode);
+        localStorage.setItem("gt_trading_mode", tradingMode);
+        localStorage.setItem("gt_auto_threshold", String(autoThreshold));
       } catch (_) {}
       setSaveMsg("✅ 保存しました");
       setTimeout(() => { setSaveMsg(""); setSettingsOpen(false); }, 1500);
@@ -246,6 +278,39 @@ export default function App() {
       setSaveMsg("❌ 保存失敗");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // ==================== SEMI_AUTO 実行 ====================
+  const executeSemiAuto = async () => {
+    if (!signal?.crossover || !signal?.ai_valid) return;
+    setExecuting(true);
+    setExecMsg("");
+    const direction = signal.crossover === "UP_CROSS" ? "BUY" : "SELL";
+    try {
+      const r = await fetch(`${RENDER_URL}/api/execute-order`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          signal_id: signal.db_id,
+          direction,
+          entry_price: signal.latest_close,
+          sl_pips: 20,
+          tp_pips: 40,
+        }),
+      });
+      const result = await r.json();
+      if (r.ok && result.success) {
+        setExecMsg(`✅ ${direction}注文完了！`);
+        await fetchTrades();
+        await fetchTodayStats();
+      } else {
+        setExecMsg(`❌ 失敗: ${result.error ?? "不明なエラー"}`);
+      }
+    } catch (_) {
+      setExecMsg("❌ 通信エラー");
+    } finally {
+      setExecuting(false);
+      setTimeout(() => setExecMsg(""), 4000);
     }
   };
 
@@ -350,16 +415,42 @@ export default function App() {
               )}
               <p style={styles.timestamp}>{new Date(signal.generated_at).toLocaleString("ja-JP")}</p>
               {signal.crossover && signal.ai_valid && (
-                <button
-                  style={styles.btnEntry}
-                  onClick={() => {
-                    setEntryDirection(signal.crossover === "UP_CROSS" ? "BUY" : "SELL");
-                    setEntryPrice(signal.latest_close?.toFixed(2) ?? "");
-                    setEntryModalOpen(true);
-                  }}
-                >
-                  {signal.crossover === "UP_CROSS" ? "📈 BUY 注文記録" : "📉 SELL 注文記録"}
-                </button>
+                <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                  {/* SEMI_AUTO: MT5自動注文ボタン */}
+                  {tradingMode === "SEMI_AUTO" && (
+                    <button
+                      style={{ ...styles.btnEntry, background: signal.crossover === "UP_CROSS" ? "#22c55e" : "#ef4444", opacity: executing ? 0.6 : 1 }}
+                      onClick={executeSemiAuto}
+                      disabled={executing}
+                    >
+                      {executing ? "送信中..." : signal.crossover === "UP_CROSS" ? "✅ BUY 実行（MT5自動注文）" : "✅ SELL 実行（MT5自動注文）"}
+                    </button>
+                  )}
+                  {/* 手動記録ボタン（MANUALまたはSEMI_AUTOで記録のみ） */}
+                  {tradingMode !== "FULL_AUTO" && (
+                    <button
+                      style={{ ...styles.btnEntry, background: "#334155", fontSize: 13 }}
+                      onClick={() => {
+                        setEntryDirection(signal.crossover === "UP_CROSS" ? "BUY" : "SELL");
+                        setEntryPrice(signal.latest_close?.toFixed(2) ?? "");
+                        setEntryModalOpen(true);
+                      }}
+                    >
+                      {signal.crossover === "UP_CROSS" ? "📝 BUY 手動記録" : "📝 SELL 手動記録"}
+                    </button>
+                  )}
+                  {execMsg && (
+                    <div style={{ textAlign: "center", fontWeight: "bold", fontSize: 14, color: execMsg.startsWith("✅") ? "#22c55e" : "#ef4444" }}>
+                      {execMsg}
+                    </div>
+                  )}
+                </div>
+              )}
+              {/* FULL_AUTO: 自動実行済みバッジ */}
+              {signal.auto_executed && (
+                <div style={{ ...styles.badge, background: "#14532d", marginTop: 8, display: "block" }}>
+                  🤖 FULL_AUTO 自動実行済み
+                </div>
               )}
             </div>
           ) : (
@@ -613,6 +704,41 @@ export default function App() {
               <p style={{ margin: 0, fontSize: 12 }}>
                 <b>本運用:</b> 30〜60分足推奨。AIが信頼度を判定。
               </p>
+            </div>
+
+            <div style={styles.settingsSection}>
+              <h3 style={styles.settingsSectionTitle}>🤖 自動化モード</h3>
+              <div style={styles.radioGroup}>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="tmode" checked={tradingMode === "MANUAL"} onChange={() => setTradingMode("MANUAL")} />
+                  <span>🔵 手動（シグナル表示のみ）</span>
+                </label>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="tmode" checked={tradingMode === "SEMI_AUTO"} onChange={() => setTradingMode("SEMI_AUTO")} />
+                  <span>🟡 半自動（ボタンでMT5注文）</span>
+                </label>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="tmode" checked={tradingMode === "FULL_AUTO"} onChange={() => setTradingMode("FULL_AUTO")} />
+                  <span>🟢 全自動（信頼度で自動実行）</span>
+                </label>
+              </div>
+              {tradingMode === "FULL_AUTO" && (
+                <div style={{ marginTop: 12 }}>
+                  <label style={styles.inputLabel}>自動実行 信頼度閾値: <b style={{ color: "#22c55e" }}>{autoThreshold}%</b></label>
+                  <input
+                    type="range" min={50} max={95} step={5}
+                    value={autoThreshold}
+                    onChange={e => setAutoThreshold(parseInt(e.target.value))}
+                    style={{ width: "100%", accentColor: "#22c55e" }}
+                  />
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#64748b" }}>
+                    <span>50%（積極的）</span><span>95%（慎重）</span>
+                  </div>
+                  <div style={{ marginTop: 8, padding: "8px 10px", background: "rgba(239,68,68,0.1)", borderRadius: 6, fontSize: 11, color: "#fca5a5" }}>
+                    ⚠️ 全自動はMT5 Webhook設定が必要です。設定なしの場合は注文が実行されません。
+                  </div>
+                </div>
+              )}
             </div>
 
             {saveMsg && <div style={styles.saveMsg}>{saveMsg}</div>}

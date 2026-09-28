@@ -40,6 +40,13 @@ TIMEFRAME_MINUTES = int(os.environ.get("TIMEFRAME_MINUTES", "30"))
 TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
 CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI", "MACD", or "RSI_MACD"
 
+# トレード自動化設定
+TRADING_MODE = os.environ.get("TRADING_MODE", "MANUAL")  # MANUAL / SEMI_AUTO / FULL_AUTO
+AUTO_CONFIDENCE_THRESHOLD = int(os.environ.get("AUTO_CONFIDENCE_THRESHOLD", "70"))
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "goldtrader_webhook_2026")
+MT5_WEBHOOK_URL = os.environ.get("MT5_WEBHOOK_URL", "")
+MT5_WEBHOOK_TIMEOUT = 5
+
 # 設定変更時にシグナルループのスリープを即座に中断するイベント
 settings_changed = threading.Event()
 
@@ -54,7 +61,7 @@ gemini_model = genai.GenerativeModel("gemini-3.8-flash")
 @app.after_request
 def add_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PATCH, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Push-Secret"
     return response
 
@@ -76,6 +83,82 @@ def supabase_headers():
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json"
+    }
+
+# ==================== MT5 Webhook 自動注文 ====================
+def send_mt5_order(signal_id, direction, entry_price, sl_pips=20, tp_pips=40):
+    """MT5 Webhook サーバーに自動注文を送信し、Supabaseにトレードを記録する"""
+    if not MT5_WEBHOOK_URL:
+        print("⚠️  MT5_WEBHOOK_URL 未設定 → 自動注文スキップ")
+        return {"success": False, "error": "Webhook URL not configured"}
+
+    if direction == "BUY":
+        sl_price = round(entry_price - sl_pips * 0.1, 2)
+        tp_price = round(entry_price + tp_pips * 0.1, 2)
+    else:
+        sl_price = round(entry_price + sl_pips * 0.1, 2)
+        tp_price = round(entry_price - tp_pips * 0.1, 2)
+
+    payload = {
+        "signal_id": signal_id,
+        "direction": direction,
+        "entry_price": entry_price,
+        "sl": sl_price,
+        "tp": tp_price,
+        "volume": 0.1,
+        "magic_number": 20260928,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    try:
+        response = req.post(
+            MT5_WEBHOOK_URL,
+            json=payload,
+            timeout=MT5_WEBHOOK_TIMEOUT,
+            headers={"X-Webhook-Secret": WEBHOOK_SECRET}
+        )
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ MT5注文成功: {direction} @{entry_price} SL={sl_price} TP={tp_price}")
+            # Supabase にトレード記録
+            req.post(
+                f"{SUPABASE_URL}/rest/v1/trades",
+                json={
+                    "signal_id": signal_id,
+                    "direction": direction,
+                    "entry_price": entry_price,
+                    "entry_time": datetime.now(timezone.utc).isoformat(),
+                    "status": "OPEN",
+                    "auto_executed": True,
+                    "sl": sl_price,
+                    "tp": tp_price,
+                },
+                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                timeout=10
+            )
+            return {"success": True, **result}
+        else:
+            print(f"❌ MT5 Webhook エラー: {response.status_code} {response.text}")
+            return {"success": False, "error": response.text}
+    except Exception as e:
+        print(f"❌ MT5 注文送信エラー: {e}")
+        return {"success": False, "error": str(e)}
+
+def check_auto_execution(signal_data):
+    """FULL_AUTO モード時に信頼度を確認して自動実行判定"""
+    if TRADING_MODE != "FULL_AUTO":
+        return {"should_execute": False, "reason": f"モード={TRADING_MODE}（FULL_AUTOのみ自動実行）"}
+    if not signal_data.get("crossover"):
+        return {"should_execute": False, "reason": "クロスオーバーなし"}
+    if not signal_data.get("ai_valid"):
+        return {"should_execute": False, "reason": "AI判定=ダマシ"}
+    conf = signal_data.get("ai_confidence") or 0
+    if conf < AUTO_CONFIDENCE_THRESHOLD:
+        return {"should_execute": False, "reason": f"信頼度{conf}% < 閾値{AUTO_CONFIDENCE_THRESHOLD}%"}
+    direction = "BUY" if signal_data["crossover"] == "UP_CROSS" else "SELL"
+    return {
+        "should_execute": True,
+        "direction": direction,
+        "reason": f"信頼度{conf}% ≥ 閾値{AUTO_CONFIDENCE_THRESHOLD}% → 自動実行"
     }
 
 # ==================== RSI 計算 ====================
@@ -289,8 +372,24 @@ def signal_loop():
             if db_id:
                 signal_data['db_id'] = db_id
 
+            # FULL_AUTO モード: 信頼度が閾値以上なら自動実行
+            auto_result = check_auto_execution(signal_data)
+            if auto_result["should_execute"]:
+                print(f"🤖 FULL_AUTO実行: {auto_result['reason']}")
+                mt5_result = send_mt5_order(
+                    signal_id=db_id,
+                    direction=auto_result["direction"],
+                    entry_price=signal_data["latest_close"]
+                )
+                signal_data["auto_executed"] = mt5_result.get("success", False)
+                signal_data["auto_result"] = mt5_result
+            else:
+                signal_data["auto_executed"] = False
+
+            signal_data["trading_mode"] = TRADING_MODE
+
             socketio.emit('signal', signal_data)
-            print(f"📡 シグナル配信完了: close={signal_data['latest_close']} db_id={db_id}")
+            print(f"📡 シグナル配信完了: close={signal_data['latest_close']} db_id={db_id} mode={TRADING_MODE}")
 
             if signal_data.get('crossover') and signal_data.get('ai_valid'):
                 send_fcm_push(signal_data)
@@ -400,13 +499,63 @@ def set_crossover():
     print(f"📊 クロスオーバー方式変更: {mode}（ループ即座再開）")
     return jsonify({"status": "ok", "crossover_mode": mode})
 
+@app.route("/api/settings/trading-mode", methods=["POST", "OPTIONS"])
+def set_trading_mode():
+    global TRADING_MODE
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    mode = data.get("trading_mode", "MANUAL")
+    if mode not in ["MANUAL", "SEMI_AUTO", "FULL_AUTO"]:
+        return jsonify({"error": f"Invalid trading_mode: {mode}"}), 400
+    TRADING_MODE = mode
+    print(f"🔄 トレードモード変更: {mode}")
+    return jsonify({"status": "ok", "trading_mode": mode})
+
+@app.route("/api/settings/auto-threshold", methods=["POST", "OPTIONS"])
+def set_auto_threshold():
+    global AUTO_CONFIDENCE_THRESHOLD
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    threshold = int(data.get("threshold", 70))
+    if not (0 <= threshold <= 100):
+        return jsonify({"error": "threshold must be 0-100"}), 400
+    AUTO_CONFIDENCE_THRESHOLD = threshold
+    print(f"🎯 自動実行閾値変更: {threshold}%")
+    return jsonify({"status": "ok", "threshold": threshold})
+
+@app.route("/api/execute-order", methods=["POST", "OPTIONS"])
+def execute_order():
+    """SEMI_AUTO: スマホのボタンから手動トリガーで MT5 に注文送信"""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    signal_id = data.get("signal_id")
+    direction = data.get("direction", "BUY")
+    entry_price = float(data.get("entry_price", 0))
+    sl_pips = int(data.get("sl_pips", 20))
+    tp_pips = int(data.get("tp_pips", 40))
+
+    if not entry_price:
+        return jsonify({"error": "entry_price required"}), 400
+    if direction not in ["BUY", "SELL"]:
+        return jsonify({"error": "direction must be BUY or SELL"}), 400
+
+    result = send_mt5_order(signal_id, direction, entry_price, sl_pips, tp_pips)
+    status_code = 200 if result.get("success") else 502
+    return jsonify(result), status_code
+
 @app.route("/api/settings/current", methods=["GET"])
 def get_current_settings():
     return jsonify({
         "timeframe": TIMEFRAME_MINUTES,
         "mode": "TEST" if TEST_MODE else "PRODUCTION",
         "test_mode": TEST_MODE,
-        "crossover_mode": CROSSOVER_MODE
+        "crossover_mode": CROSSOVER_MODE,
+        "trading_mode": TRADING_MODE,
+        "auto_confidence_threshold": AUTO_CONFIDENCE_THRESHOLD,
+        "mt5_webhook_configured": bool(MT5_WEBHOOK_URL)
     })
 
 @app.route("/health", methods=["GET"])
