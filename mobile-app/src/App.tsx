@@ -50,6 +50,7 @@ interface TodayStats {
 }
 
 // ==================== 設定 ====================
+// v3B-rebuild
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -650,6 +651,37 @@ export default function App() {
           <div style={styles.settingsPanel}>
             <h2 style={styles.settingsTitle}>⚙️ 設定</h2>
 
+            {/* 自動化モード（最上部に配置） */}
+            <div style={styles.settingsSection}>
+              <h3 style={styles.settingsSectionTitle}>🤖 自動化モード</h3>
+              <div style={styles.radioGroup}>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="tmode2" checked={tradingMode === "MANUAL"} onChange={() => setTradingMode("MANUAL")} />
+                  <span>🔵 手動（シグナル表示のみ）</span>
+                </label>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="tmode2" checked={tradingMode === "SEMI_AUTO"} onChange={() => setTradingMode("SEMI_AUTO")} />
+                  <span>🟡 半自動（ボタンでMT5注文）</span>
+                </label>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="tmode2" checked={tradingMode === "FULL_AUTO"} onChange={() => setTradingMode("FULL_AUTO")} />
+                  <span>🟢 全自動（信頼度で自動実行）</span>
+                </label>
+              </div>
+              {tradingMode === "FULL_AUTO" && (
+                <div style={{ marginTop: 10 }}>
+                  <label style={styles.inputLabel}>自動実行閾値: <b style={{ color: "#22c55e" }}>{autoThreshold}%</b></label>
+                  <input type="range" min={50} max={95} step={5} value={autoThreshold}
+                    onChange={e => setAutoThreshold(parseInt(e.target.value))}
+                    style={{ width: "100%", accentColor: "#22c55e" }} />
+                  <div style={{ fontSize: 11, color: "#fca5a5", marginTop: 6 }}>
+                    ⚠️ MT5 Webhookサーバー起動が必要です
+                  </div>
+                </div>
+              )}
+            </div>
+            <hr style={styles.divider} />
+
             <div style={styles.settingsSection}>
               <h3 style={styles.settingsSectionTitle}>📊 時間足</h3>
               <div style={styles.radioGroup}>
@@ -706,40 +738,6 @@ export default function App() {
               </p>
             </div>
 
-            <div style={styles.settingsSection}>
-              <h3 style={styles.settingsSectionTitle}>🤖 自動化モード</h3>
-              <div style={styles.radioGroup}>
-                <label style={styles.radioLabel}>
-                  <input type="radio" name="tmode" checked={tradingMode === "MANUAL"} onChange={() => setTradingMode("MANUAL")} />
-                  <span>🔵 手動（シグナル表示のみ）</span>
-                </label>
-                <label style={styles.radioLabel}>
-                  <input type="radio" name="tmode" checked={tradingMode === "SEMI_AUTO"} onChange={() => setTradingMode("SEMI_AUTO")} />
-                  <span>🟡 半自動（ボタンでMT5注文）</span>
-                </label>
-                <label style={styles.radioLabel}>
-                  <input type="radio" name="tmode" checked={tradingMode === "FULL_AUTO"} onChange={() => setTradingMode("FULL_AUTO")} />
-                  <span>🟢 全自動（信頼度で自動実行）</span>
-                </label>
-              </div>
-              {tradingMode === "FULL_AUTO" && (
-                <div style={{ marginTop: 12 }}>
-                  <label style={styles.inputLabel}>自動実行 信頼度閾値: <b style={{ color: "#22c55e" }}>{autoThreshold}%</b></label>
-                  <input
-                    type="range" min={50} max={95} step={5}
-                    value={autoThreshold}
-                    onChange={e => setAutoThreshold(parseInt(e.target.value))}
-                    style={{ width: "100%", accentColor: "#22c55e" }}
-                  />
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#64748b" }}>
-                    <span>50%（積極的）</span><span>95%（慎重）</span>
-                  </div>
-                  <div style={{ marginTop: 8, padding: "8px 10px", background: "rgba(239,68,68,0.1)", borderRadius: 6, fontSize: 11, color: "#fca5a5" }}>
-                    ⚠️ 全自動はMT5 Webhook設定が必要です。設定なしの場合は注文が実行されません。
-                  </div>
-                </div>
-              )}
-            </div>
 
             {saveMsg && <div style={styles.saveMsg}>{saveMsg}</div>}
 
