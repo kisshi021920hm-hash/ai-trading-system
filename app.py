@@ -38,6 +38,7 @@ PUSH_SECRET     = os.environ.get("PUSH_SECRET", "goldtrader_push_2026")
 # 動的設定（APIで変更可能）
 TIMEFRAME_MINUTES = int(os.environ.get("TIMEFRAME_MINUTES", "30"))
 TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
+CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI" or "MACD"
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -115,27 +116,49 @@ def fetch_yahoo_data(tf_minutes=None):
         print(f"⚠️  Yahoo Finance エラー: {e}")
         return None
 
+# ==================== MACD 計算 ====================
+def calculate_macd(close_prices, fast=12, slow=26, signal=9):
+    close = pd.Series(close_prices).astype(float)
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
+
 # ==================== シグナル計算 ====================
 def compute_signal(df):
-    if df is None or len(df) < 15:
+    if df is None or len(df) < 35:
         return None
-    rsi = calculate_rsi(df['close'].values)
-    signal_line = pd.Series(rsi).rolling(window=9).mean()
-    rsi_arr = rsi.values
-    sig_arr = signal_line.values
-    cur_rsi, cur_sig = rsi_arr[-1], sig_arr[-1]
-    prv_rsi, prv_sig = rsi_arr[-2], sig_arr[-2]
-    if any(np.isnan(v) for v in [cur_rsi, cur_sig, prv_rsi, prv_sig]):
+    close = df['close'].values
+    cur_rsi = round(float(calculate_rsi(close).iloc[-1]), 2)
+
+    if CROSSOVER_MODE == "MACD":
+        macd_line, sig_line = calculate_macd(close)
+        cur_main, cur_sig = macd_line.iloc[-1], sig_line.iloc[-1]
+        prv_main, prv_sig = macd_line.iloc[-2], sig_line.iloc[-2]
+        label = "MACD"
+    else:
+        rsi_series = calculate_rsi(close)
+        sig_series = pd.Series(rsi_series).rolling(window=9).mean()
+        cur_main, cur_sig = rsi_series.iloc[-1], sig_series.iloc[-1]
+        prv_main, prv_sig = rsi_series.iloc[-2], sig_series.iloc[-2]
+        label = "RSI"
+
+    if any(np.isnan(v) for v in [cur_main, cur_sig, prv_main, prv_sig]):
         return None
+
     crossover = None
-    if prv_rsi < prv_sig and cur_rsi > cur_sig:
+    if prv_main < prv_sig and cur_main > cur_sig:
         crossover = "UP_CROSS"
-    elif prv_rsi > prv_sig and cur_rsi < cur_sig:
+    elif prv_main > prv_sig and cur_main < cur_sig:
         crossover = "DOWN_CROSS"
+
     return {
-        'rsi': round(float(cur_rsi), 2),
-        'signal_line': round(float(cur_sig), 2),
+        'rsi': cur_rsi,
+        'signal_line': round(float(cur_sig), 4),
+        'main_line': round(float(cur_main), 4),
         'crossover': crossover,
+        'crossover_mode': CROSSOVER_MODE,
         'latest_close': round(float(df['close'].iloc[-1]), 2),
         'time': str(df['time'].iloc[-1])
     }
@@ -330,12 +353,26 @@ def set_mode():
     print(f"{'🧪 TEST_MODE ON' if TEST_MODE else '🚀 PRODUCTION ON'}")
     return jsonify({"status": "ok", "mode": mode, "test_mode": TEST_MODE})
 
+@app.route("/api/settings/crossover", methods=["POST", "OPTIONS"])
+def set_crossover():
+    global CROSSOVER_MODE
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    mode = data.get("crossover_mode", "RSI")
+    if mode not in ["RSI", "MACD"]:
+        return jsonify({"error": f"Invalid crossover_mode: {mode}"}), 400
+    CROSSOVER_MODE = mode
+    print(f"📊 クロスオーバー方式変更: {mode}")
+    return jsonify({"status": "ok", "crossover_mode": mode})
+
 @app.route("/api/settings/current", methods=["GET"])
 def get_current_settings():
     return jsonify({
         "timeframe": TIMEFRAME_MINUTES,
         "mode": "TEST" if TEST_MODE else "PRODUCTION",
-        "test_mode": TEST_MODE
+        "test_mode": TEST_MODE,
+        "crossover_mode": CROSSOVER_MODE
     })
 
 @app.route("/health", methods=["GET"])

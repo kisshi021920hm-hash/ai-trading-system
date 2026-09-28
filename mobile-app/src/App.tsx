@@ -8,6 +8,7 @@ interface Signal {
   crossover: "UP_CROSS" | "DOWN_CROSS" | null;
   rsi: number;
   signal_line: number;
+  main_line?: number;
   latest_close: number;
   ai_valid: boolean | null;
   ai_confidence: number | null;
@@ -15,6 +16,7 @@ interface Signal {
   generated_at: string;
   timeframe?: number;
   test_mode?: boolean;
+  crossover_mode?: string;
 }
 
 // ==================== 設定 ====================
@@ -29,6 +31,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tf, setTf] = useState(30);
   const [mode, setMode] = useState<"PRODUCTION" | "TEST">("PRODUCTION");
+  const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD">("RSI");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
 
@@ -99,6 +102,7 @@ export default function App() {
         const settings = await setRes.json();
         if (settings.timeframe) setTf(settings.timeframe);
         if (settings.mode) setMode(settings.mode);
+        if (settings.crossover_mode) setCrossoverMode(settings.crossover_mode);
       } catch (_) {}
     });
 
@@ -153,6 +157,11 @@ export default function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ mode }),
         }),
+        fetch(`${RENDER_URL}/api/settings/crossover`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ crossover_mode: crossoverMode }),
+        }),
       ]);
       setSaveMsg("✅ 保存しました");
       setTimeout(() => { setSaveMsg(""); setSettingsOpen(false); }, 1500);
@@ -183,10 +192,12 @@ export default function App() {
             <h2 style={styles.cardTitle}>最新シグナル</h2>
             {signal.test_mode && <span style={styles.testBadge}>🧪 TEST</span>}
             {signal.timeframe && <span style={styles.tfBadge}>{signal.timeframe}分足</span>}
+            {signal.crossover_mode && <span style={styles.modeBadge}>{signal.crossover_mode}</span>}
           </div>
           <Row label="クロスオーバー" value={signal.crossover ?? "なし"} />
           <Row label="RSI" value={signal.rsi?.toFixed(2)} />
-          <Row label="シグナルライン" value={signal.signal_line?.toFixed(2)} />
+          <Row label={signal.crossover_mode === "MACD" ? "MACDライン" : "RSIライン"} value={signal.main_line?.toFixed(4) ?? signal.rsi?.toFixed(2)} />
+          <Row label={signal.crossover_mode === "MACD" ? "MACDシグナル" : "シグナルライン"} value={signal.signal_line?.toFixed(4)} />
           <Row label="終値" value={signal.latest_close?.toFixed(2)} />
           {signal.crossover && (
             <>
@@ -250,9 +261,26 @@ export default function App() {
               </div>
             </div>
 
+            <div style={styles.settingsSection}>
+              <h3 style={styles.settingsSectionTitle}>📈 クロスオーバー方式</h3>
+              <div style={styles.radioGroup}>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="crossover" checked={crossoverMode === "RSI"} onChange={() => setCrossoverMode("RSI")} />
+                  <span>RSIシグナルクロス（RSIと移動平均）</span>
+                </label>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="crossover" checked={crossoverMode === "MACD"} onChange={() => setCrossoverMode("MACD")} />
+                  <span>MACDクロス（MACDとシグナルライン）</span>
+                </label>
+              </div>
+            </div>
+
             <div style={styles.infoBox}>
               <p style={{ margin: "0 0 6px", fontSize: 12 }}>
-                <b>テスト:</b> 1分足で最速30秒で検証。GeminiAPI不使用。
+                <b>RSI:</b> RSI(14)がその9SMAを上抜け/下抜けを検出。
+              </p>
+              <p style={{ margin: "0 0 6px", fontSize: 12 }}>
+                <b>MACD:</b> チャート下段の赤線(MACD)と青線(シグナル)のクロスを検出。
               </p>
               <p style={{ margin: 0, fontSize: 12 }}>
                 <b>本運用:</b> 30〜60分足推奨。AIが信頼度を判定。
@@ -298,6 +326,7 @@ const styles: Record<string, React.CSSProperties> = {
   cardTitle: { margin: 0, fontSize: 16, color: "#94a3b8" },
   testBadge: { fontSize: 11, background: "#854d0e", color: "#fef08a", padding: "2px 6px", borderRadius: 4 },
   tfBadge: { fontSize: 11, background: "#1e3a5f", color: "#93c5fd", padding: "2px 6px", borderRadius: 4 },
+  modeBadge: { fontSize: 11, background: "#3b1f5f", color: "#c4b5fd", padding: "2px 6px", borderRadius: 4 },
   row: { display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 14 },
   label: { color: "#94a3b8" },
   value: { fontWeight: "bold" },
