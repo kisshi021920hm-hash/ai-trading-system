@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">GOLD AI トレーダー</string>
+    <string name="title_activity_main">GOLD AI トレーダー</string>
+    <string name="package_name">com.goldtrader.app</string>
+    <string name="custom_url_scheme">com.goldtrader.app</string>
+</resources>
