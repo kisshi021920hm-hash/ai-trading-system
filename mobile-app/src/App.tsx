@@ -197,7 +197,7 @@ export default function App() {
           <Row label="クロスオーバー" value={signal.crossover ?? "なし"} />
           <Row label="RSI" value={signal.rsi?.toFixed(2)} />
           <Row
-            label={signal.crossover_mode === "MACD" ? "MACDライン" : "RSI"}
+            label={signal.crossover_mode === "MACD" ? "MACDライン" : "RSIライン"}
             value={signal.main_line?.toFixed(4) ?? signal.rsi?.toFixed(2)}
           />
           <Row
