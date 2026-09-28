@@ -217,11 +217,9 @@ def signal_loop():
 
             if signal['crossover']:
                 print(f"🎯 クロスオーバー検出: {signal['crossover']}")
+                ai = gemini_validate(df, signal)
                 if TEST_MODE:
-                    ai = {'valid': True, 'confidence': 50, 'reason': 'テストモード（AI省略）'}
-                    print(f"🧪 TEST: RSI={signal['rsi']}, TF={tf}m")
-                else:
-                    ai = gemini_validate(df, signal)
+                    print(f"🧪 TEST: RSI={signal['rsi']}, TF={tf}m, AI={ai['valid']}({ai['confidence']}%)")
             else:
                 ai = {'valid': None, 'confidence': None, 'reason': None}
                 print(f"⏸️  クロスオーバーなし RSI={signal['rsi']} TF={tf}m")
