@@ -172,8 +172,8 @@ RSI: {signal['rsi']}
             'reason': str(result.get('reason', ''))
         }
     except Exception as e:
-        print(f"Gemini エラー: {e}")
-        return {'valid': False, 'confidence': 0, 'reason': str(e)[:50]}
+        print(f"❌ Gemini エラー詳細: {e}")
+        return {'valid': False, 'confidence': 0, 'reason': str(e)[:200]}
 
 # ==================== Supabase 保存 ====================
 def save_signal_to_supabase(signal_data):
