@@ -50,6 +50,11 @@ MT5_WEBHOOK_TIMEOUT = 5
 # 設定変更時にシグナルループのスリープを即座に中断するイベント
 settings_changed = threading.Event()
 
+# Gemini API クールダウン（同じシグナルへの重複呼び出し防止）
+_last_gemini_call_time = 0.0
+_last_gemini_signal_key = ""
+GEMINI_COOLDOWN_SEC = 90
+
 # ==================== 初期化 ====================
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "goldtrader_secret")
@@ -442,6 +447,21 @@ def compute_signal(df):
     }
 
 # ==================== Gemini ダマシ判定 ====================
+def _gemini_should_call(signal):
+    """クールダウン中 or 同一シグナルへの重複呼び出しをスキップ"""
+    global _last_gemini_call_time, _last_gemini_signal_key
+    now = time.time()
+    key = f"{signal.get('crossover')}_{signal.get('latest_close')}_{signal.get('time')}"
+    if key == _last_gemini_signal_key:
+        return False
+    if now - _last_gemini_call_time < GEMINI_COOLDOWN_SEC:
+        remaining = int(GEMINI_COOLDOWN_SEC - (now - _last_gemini_call_time))
+        print(f"⏳ Gemini クールダウン中 残り{remaining}秒 → スキップ")
+        return False
+    _last_gemini_call_time = now
+    _last_gemini_signal_key = key
+    return True
+
 def gemini_validate(df, signal):
     if signal['crossover'] is None:
         return {'valid': False, 'confidence': 0, 'reason': 'シグナルなし'}
@@ -574,10 +594,14 @@ def signal_loop():
 
             if signal['crossover']:
                 print(f"🎯 クロスオーバー検出: {signal['crossover']}")
-                if CROSSOVER_MODE == "COMPOSITE":
-                    ai = gemini_composite_analyze(df, signal)
+                if _gemini_should_call(signal):
+                    if CROSSOVER_MODE == "COMPOSITE":
+                        ai = gemini_composite_analyze(df, signal)
+                    else:
+                        ai = gemini_validate(df, signal)
                 else:
-                    ai = gemini_validate(df, signal)
+                    ai = {'valid': None, 'confidence': None, 'reason': 'クールダウン中（重複スキップ）',
+                          'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
                 if TEST_MODE:
                     print(f"🧪 TEST: RSI={signal['rsi']}, TF={tf}m, AI={ai['valid']}({ai['confidence']}%)")
             else:

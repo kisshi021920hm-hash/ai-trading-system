@@ -424,11 +424,11 @@ export default function App() {
               <Row label="クロスオーバー" value={signal.crossover ?? "なし"} />
               <Row label="RSI" value={signal.rsi?.toFixed(2)} />
               <Row
-                label={signal.crossover_mode === "MACD" ? "MACDライン" : "RSIライン"}
+                label={signal.crossover_mode === "MACD" || signal.crossover_mode === "COMPOSITE" ? "MACDライン" : "RSIライン"}
                 value={signal.main_line?.toFixed(4) ?? signal.rsi?.toFixed(2)}
               />
               <Row
-                label={signal.crossover_mode === "MACD" ? "MACDシグナル" : signal.crossover_mode === "RSI_MACD" ? "MACDシグナル(正規化)" : "RSIシグナルSMA"}
+                label={signal.crossover_mode === "MACD" || signal.crossover_mode === "COMPOSITE" ? "MACDシグナル" : signal.crossover_mode === "RSI_MACD" ? "MACDシグナル(正規化)" : "RSIシグナルSMA"}
                 value={signal.signal_line?.toFixed(4)}
               />
               <Row label="終値" value={signal.latest_close?.toFixed(2)} />
