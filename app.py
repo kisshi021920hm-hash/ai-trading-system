@@ -646,7 +646,7 @@ def signal_loop():
             socketio.emit('signal', signal_data)
             print(f"📡 シグナル配信完了: close={signal_data['latest_close']} db_id={db_id} mode={TRADING_MODE}")
 
-            if signal_data.get('crossover') and signal_data.get('ai_valid'):
+            if signal_data.get('crossover'):
                 send_fcm_push(signal_data)
 
         except Exception as e:
@@ -661,21 +661,30 @@ def send_fcm_push(signal_data):
     if not FCM_ENABLED or not fcm_tokens:
         return
     direction = "📈 買いシグナル" if signal_data.get('crossover') == "UP_CROSS" else "📉 売りシグナル"
-    confidence = signal_data.get('ai_confidence', 0)
+    confidence = signal_data.get('ai_confidence')
     reason = signal_data.get('ai_reason', '')
+    sl = signal_data.get('ai_sl_suggestion')
+    tp = signal_data.get('ai_tp_suggestion')
+    sl_tp = f" | SL:{sl} TP:{tp}" if sl and tp else ""
+    if confidence is not None:
+        body = f"{'✅' if signal_data.get('ai_valid') else '⚠️'} 信頼度:{confidence}% {reason}{sl_tp}"
+    else:
+        body = f"シグナル検出{sl_tp}"
     invalid_tokens = set()
     for token in list(fcm_tokens):
         try:
             msg = messaging.Message(
                 notification=messaging.Notification(
                     title=f"GOLD {direction}",
-                    body=f"信頼度: {confidence}%  {reason}",
+                    body=body,
                 ),
                 android=messaging.AndroidConfig(
                     priority="high",
                     notification=messaging.AndroidNotification(
-                        channel_id="gold-signal",
+                        channel_id="gold-signal-v2",
                         notification_count=1,
+                        default_vibrate_timings=False,
+                        vibrate_timings_millis=[0, 800, 150, 800, 150, 800],
                     ),
                 ),
                 token=token,
@@ -701,6 +710,24 @@ def push_signal():
     socketio.emit('signal', data)
     save_signal_to_supabase(data)
     return jsonify({"status": "ok"})
+
+@app.route("/test-fcm", methods=["POST"])
+def test_fcm():
+    """FCMプッシュ通知テスト"""
+    if request.headers.get("X-Push-Secret", "") != PUSH_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    token_count = len(fcm_tokens)
+    if token_count == 0:
+        return jsonify({"status": "no_tokens", "message": "FCMトークン未登録"})
+    send_fcm_push({
+        "crossover": "UP_CROSS",
+        "latest_close": 4153.30,
+        "ai_valid": True,
+        "ai_confidence": 99,
+        "ai_reason": "FCMテスト通知 - 画面オフでも届いてますか？",
+        "test_mode": True,
+    })
+    return jsonify({"status": "sent", "tokens": token_count})
 
 @app.route("/register-token", methods=["POST", "OPTIONS"])
 def register_token():
