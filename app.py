@@ -659,7 +659,7 @@ def signal_loop():
 # ==================== FCM プッシュ送信 ====================
 def send_fcm_push(signal_data):
     if not FCM_ENABLED or not fcm_tokens:
-        return
+        return []
     direction = "📈 買いシグナル" if signal_data.get('crossover') == "UP_CROSS" else "📉 売りシグナル"
     confidence = signal_data.get('ai_confidence')
     reason = signal_data.get('ai_reason', '')
@@ -671,6 +671,7 @@ def send_fcm_push(signal_data):
     else:
         body = f"シグナル検出{sl_tp}"
     invalid_tokens = set()
+    results = []
     for token in list(fcm_tokens):
         try:
             msg = messaging.Message(
@@ -683,19 +684,20 @@ def send_fcm_push(signal_data):
                     notification=messaging.AndroidNotification(
                         channel_id="gold-signal-v2",
                         notification_count=1,
-                        default_vibrate_timings=False,
-                        vibrate_timings_millis=[0, 800, 150, 800, 150, 800],
                     ),
                 ),
                 token=token,
             )
-            messaging.send(msg)
-            print(f"✓ FCMプッシュ送信完了: {token[:20]}...")
+            msg_id = messaging.send(msg)
+            print(f"✓ FCMプッシュ送信完了 msg_id={msg_id}: {token[:20]}...")
+            results.append({"token": token[:20], "status": "ok", "msg_id": msg_id})
         except Exception as e:
             print(f"⚠️  FCM送信エラー ({token[:20]}...): {e}")
+            results.append({"token": token[:20], "status": "error", "error": str(e)})
             if "registration-token-not-registered" in str(e) or "invalid-argument" in str(e):
                 invalid_tokens.add(token)
     fcm_tokens.difference_update(invalid_tokens)
+    return results
 
 # ==================== REST エンドポイント ====================
 @app.route("/push-signal", methods=["POST"])
@@ -719,7 +721,7 @@ def test_fcm():
     token_count = len(fcm_tokens)
     if token_count == 0:
         return jsonify({"status": "no_tokens", "message": "FCMトークン未登録"})
-    send_fcm_push({
+    results = send_fcm_push({
         "crossover": "UP_CROSS",
         "latest_close": 4153.30,
         "ai_valid": True,
@@ -727,7 +729,7 @@ def test_fcm():
         "ai_reason": "FCMテスト通知 - 画面オフでも届いてますか？",
         "test_mode": True,
     })
-    return jsonify({"status": "sent", "tokens": token_count})
+    return jsonify({"status": "sent", "tokens": token_count, "results": results})
 
 @app.route("/register-token", methods=["POST", "OPTIONS"])
 def register_token():
