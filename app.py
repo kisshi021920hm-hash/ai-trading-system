@@ -133,16 +133,28 @@ def compute_signal(df):
     cur_rsi = round(float(calculate_rsi(close).iloc[-1]), 2)
 
     if CROSSOVER_MODE == "MACD":
+        # MACDライン vs MACDシグナルライン のクロス
         macd_line, sig_line = calculate_macd(close)
         cur_main, cur_sig = macd_line.iloc[-1], sig_line.iloc[-1]
         prv_main, prv_sig = macd_line.iloc[-2], sig_line.iloc[-2]
-        label = "MACD"
-    else:
+
+    elif CROSSOVER_MODE == "RSI_MACD":
+        # RSI(青) vs MACDシグナル正規化(赤) のクロス
+        rsi_series = calculate_rsi(close)
+        _, macd_sig = calculate_macd(close)
+        # MACDシグナルを0〜100に正規化（直近100本ベース）
+        rolling_min = macd_sig.rolling(100, min_periods=20).min()
+        rolling_max = macd_sig.rolling(100, min_periods=20).max()
+        macd_sig_norm = (macd_sig - rolling_min) / (rolling_max - rolling_min + 1e-10) * 100
+        cur_main, cur_sig = rsi_series.iloc[-1], macd_sig_norm.iloc[-1]
+        prv_main, prv_sig = rsi_series.iloc[-2], macd_sig_norm.iloc[-2]
+
+    else:  # RSI
+        # RSI vs RSIの9期間移動平均 のクロス
         rsi_series = calculate_rsi(close)
         sig_series = pd.Series(rsi_series).rolling(window=9).mean()
         cur_main, cur_sig = rsi_series.iloc[-1], sig_series.iloc[-1]
         prv_main, prv_sig = rsi_series.iloc[-2], sig_series.iloc[-2]
-        label = "RSI"
 
     if any(np.isnan(v) for v in [cur_main, cur_sig, prv_main, prv_sig]):
         return None
@@ -360,7 +372,7 @@ def set_crossover():
         return jsonify({}), 200
     data = request.get_json()
     mode = data.get("crossover_mode", "RSI")
-    if mode not in ["RSI", "MACD"]:
+    if mode not in ["RSI", "MACD", "RSI_MACD"]:
         return jsonify({"error": f"Invalid crossover_mode: {mode}"}), 400
     CROSSOVER_MODE = mode
     print(f"📊 クロスオーバー方式変更: {mode}")

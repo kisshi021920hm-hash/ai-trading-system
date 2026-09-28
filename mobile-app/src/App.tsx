@@ -31,7 +31,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tf, setTf] = useState(30);
   const [mode, setMode] = useState<"PRODUCTION" | "TEST">("PRODUCTION");
-  const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD">("RSI");
+  const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD" | "RSI_MACD">("RSI");
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
 
@@ -196,8 +196,14 @@ export default function App() {
           </div>
           <Row label="クロスオーバー" value={signal.crossover ?? "なし"} />
           <Row label="RSI" value={signal.rsi?.toFixed(2)} />
-          <Row label={signal.crossover_mode === "MACD" ? "MACDライン" : "RSIライン"} value={signal.main_line?.toFixed(4) ?? signal.rsi?.toFixed(2)} />
-          <Row label={signal.crossover_mode === "MACD" ? "MACDシグナル" : "シグナルライン"} value={signal.signal_line?.toFixed(4)} />
+          <Row
+            label={signal.crossover_mode === "MACD" ? "MACDライン" : "RSI"}
+            value={signal.main_line?.toFixed(4) ?? signal.rsi?.toFixed(2)}
+          />
+          <Row
+            label={signal.crossover_mode === "MACD" ? "MACDシグナル" : signal.crossover_mode === "RSI_MACD" ? "MACDシグナル(正規化)" : "RSIシグナルSMA"}
+            value={signal.signal_line?.toFixed(4)}
+          />
           <Row label="終値" value={signal.latest_close?.toFixed(2)} />
           {signal.crossover && (
             <>
@@ -271,6 +277,10 @@ export default function App() {
                 <label style={styles.radioLabel}>
                   <input type="radio" name="crossover" checked={crossoverMode === "MACD"} onChange={() => setCrossoverMode("MACD")} />
                   <span>MACDクロス（MACDとシグナルライン）</span>
+                </label>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="crossover" checked={crossoverMode === "RSI_MACD"} onChange={() => setCrossoverMode("RSI_MACD")} />
+                  <span>RSI_MACDクロス（RSIがMACDシグナルを上抜け/下抜け）</span>
                 </label>
               </div>
             </div>
