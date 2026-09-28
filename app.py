@@ -34,7 +34,10 @@ GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
 SUPABASE_URL    = os.environ["SUPABASE_URL"]
 SUPABASE_KEY    = os.environ["SUPABASE_KEY"]
 PUSH_SECRET     = os.environ.get("PUSH_SECRET", "goldtrader_push_2026")
-SIGNAL_INTERVAL = int(os.environ.get("SIGNAL_INTERVAL", "1800"))
+
+# 動的設定（APIで変更可能）
+TIMEFRAME_MINUTES = int(os.environ.get("TIMEFRAME_MINUTES", "30"))
+TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -42,6 +45,13 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "goldtrader_secret")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 gemini_model = genai.Client(api_key=GEMINI_API_KEY)
+
+@app.after_request
+def add_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Push-Secret"
+    return response
 
 # Firebase Admin SDK 初期化
 _firebase_cert = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
@@ -74,11 +84,15 @@ def calculate_rsi(close_prices, period=14):
     return rsi
 
 # ==================== Yahoo Finance データ取得 ====================
-def fetch_yahoo_data():
-    """Yahoo Finance から GOLD 30分足データを取得（PCもMT5も不要）"""
+def fetch_yahoo_data(tf_minutes=None):
+    """Yahoo Finance から GOLD データを取得（時間足可変）"""
+    if tf_minutes is None:
+        tf_minutes = TIMEFRAME_MINUTES
+    interval = f"{tf_minutes}m"
+    period = "7d" if tf_minutes <= 1 else "60d"
     try:
         ticker = yf.Ticker("GC=F")  # ゴールド先物
-        df = ticker.history(period="5d", interval="30m")
+        df = ticker.history(period=period, interval=interval)
         if df is None or len(df) < 15:
             print("⚠️  Yahoo Finance: データ不足")
             return None
@@ -94,7 +108,7 @@ def fetch_yahoo_data():
         # タイムゾーン情報を除去して統一
         if hasattr(df['time'].dtype, 'tz') and df['time'].dtype.tz is not None:
             df['time'] = df['time'].dt.tz_localize(None)
-        print(f"✓ Yahoo Finance: {len(df)} 本取得 最新={df['time'].iloc[-1]}")
+        print(f"✓ Yahoo Finance: {len(df)} 本取得 TF={tf_minutes}m 最新={df['time'].iloc[-1]}")
         return df
     except Exception as e:
         print(f"⚠️  Yahoo Finance エラー: {e}")
@@ -188,37 +202,43 @@ def save_signal_to_supabase(signal_data):
 
 # ==================== シグナルループ（24/7自動稼働）====================
 def signal_loop():
-    """Yahoo Finance からデータ取得し、30分ごとにシグナルを計算・配信"""
-    print("🔄 シグナルループ開始（Yahoo Finance / PC不要モード）")
+    """Yahoo Finance からデータ取得し、時間足ごとにシグナルを計算・配信"""
+    print(f"🔄 シグナルループ開始 TF={TIMEFRAME_MINUTES}m MODE={'TEST' if TEST_MODE else 'PROD'}")
     while True:
         try:
-            df = fetch_yahoo_data()
+            tf = TIMEFRAME_MINUTES
+            df = fetch_yahoo_data(tf)
             signal = compute_signal(df)
 
             if signal is None:
                 print("⚠️  シグナル計算失敗。スキップします。")
-                time.sleep(SIGNAL_INTERVAL)
+                time.sleep(tf * 60)
                 continue
 
             if signal['crossover']:
                 print(f"🎯 クロスオーバー検出: {signal['crossover']}")
-                ai = gemini_validate(df, signal)
+                if TEST_MODE:
+                    ai = {'valid': True, 'confidence': 50, 'reason': 'テストモード（AI省略）'}
+                    print(f"🧪 TEST: RSI={signal['rsi']}, TF={tf}m")
+                else:
+                    ai = gemini_validate(df, signal)
             else:
                 ai = {'valid': None, 'confidence': None, 'reason': None}
-                print(f"⏸️  クロスオーバーなし RSI={signal['rsi']}")
+                print(f"⏸️  クロスオーバーなし RSI={signal['rsi']} TF={tf}m")
 
             signal_data = {
                 **signal,
                 'ai_valid': ai['valid'],
                 'ai_confidence': ai['confidence'],
                 'ai_reason': ai['reason'],
+                'timeframe': tf,
+                'test_mode': TEST_MODE,
                 'generated_at': datetime.now(timezone.utc).isoformat()
             }
 
             socketio.emit('signal', signal_data)
             print(f"📡 シグナル配信完了: close={signal_data['latest_close']}")
 
-            # クロスオーバーかつAI有効の場合はFCMプッシュも送信
             if signal_data.get('crossover') and signal_data.get('ai_valid'):
                 send_fcm_push(signal_data)
 
@@ -227,7 +247,7 @@ def signal_loop():
         except Exception as e:
             print(f"❌ シグナルループエラー: {e}")
 
-        time.sleep(SIGNAL_INTERVAL)
+        time.sleep(TIMEFRAME_MINUTES * 60)
 
 # ==================== FCM プッシュ送信 ====================
 def send_fcm_push(signal_data):
@@ -278,20 +298,46 @@ def push_signal():
 @app.route("/register-token", methods=["POST", "OPTIONS"])
 def register_token():
     if request.method == "OPTIONS":
-        resp = app.make_default_options_response()
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        return resp
+        return jsonify({}), 200
     data = request.get_json()
     token = data.get("token") if data else None
     if not token:
         return jsonify({"error": "No token"}), 400
     fcm_tokens.add(token)
     print(f"📱 FCMトークン登録: {token[:20]}... (合計: {len(fcm_tokens)}台)")
-    resp = jsonify({"status": "ok"})
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
+    return jsonify({"status": "ok"})
+
+@app.route("/api/settings/timeframe", methods=["POST", "OPTIONS"])
+def set_timeframe():
+    global TIMEFRAME_MINUTES
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    tf = int(data.get("timeframe", 30))
+    if tf not in [1, 5, 15, 30, 60]:
+        return jsonify({"error": f"Invalid timeframe: {tf}"}), 400
+    TIMEFRAME_MINUTES = tf
+    print(f"📊 時間足変更: {tf}分足")
+    return jsonify({"status": "ok", "timeframe": tf})
+
+@app.route("/api/settings/mode", methods=["POST", "OPTIONS"])
+def set_mode():
+    global TEST_MODE
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    mode = data.get("mode", "PRODUCTION")
+    TEST_MODE = (mode == "TEST")
+    print(f"{'🧪 TEST_MODE ON' if TEST_MODE else '🚀 PRODUCTION ON'}")
+    return jsonify({"status": "ok", "mode": mode, "test_mode": TEST_MODE})
+
+@app.route("/api/settings/current", methods=["GET"])
+def get_current_settings():
+    return jsonify({
+        "timeframe": TIMEFRAME_MINUTES,
+        "mode": "TEST" if TEST_MODE else "PRODUCTION",
+        "test_mode": TEST_MODE
+    })
 
 @app.route("/health", methods=["GET"])
 def health():
