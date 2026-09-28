@@ -45,7 +45,7 @@ app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "goldtrader_secret")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+gemini_model = genai.GenerativeModel("gemini-2.0-flash")
 
 @app.after_request
 def add_cors(response):
