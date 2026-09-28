@@ -441,34 +441,25 @@ export default function App() {
                       <div style={{
                         ...styles.scoreFill,
                         width: `${signal.composite.buy_score / (signal.composite.buy_score + signal.composite.sell_score + 0.01) * 100}%`,
-                        background: signal.crossover === "UP_CROSS" ? "#22c55e" : "#ef4444"
+                        background: signal.crossover === "UP_CROSS" ? "#22c55e" : signal.crossover === "DOWN_CROSS" ? "#ef4444" : "#64748b"
                       }} />
                     </div>
                     <span style={{ color: "#ef4444", minWidth: 56, textAlign: "right" as const }}>売り {signal.composite.sell_score}pt</span>
                   </div>
+                  {!signal.crossover && (
+                    <div style={{ fontSize: 11, color: "#64748b", textAlign: "center" as const, marginBottom: 6 }}>
+                      待機中（5点以上かつ対辺より2点超でシグナル発火）
+                    </div>
+                  )}
                   <div style={styles.reasonTags}>
-                    {(signal.crossover === "UP_CROSS" ? signal.composite.buy_reasons : signal.composite.sell_reasons).map((r, i) => (
-                      <span key={i} style={styles.reasonTag}>{r}</span>
+                    {signal.composite.buy_reasons.map((r, i) => (
+                      <span key={`b${i}`} style={{ ...styles.reasonTag, background: "#14532d", color: "#86efac" }}>{r}</span>
+                    ))}
+                    {signal.composite.sell_reasons.map((r, i) => (
+                      <span key={`s${i}`} style={{ ...styles.reasonTag, background: "#7f1d1d", color: "#fca5a5" }}>{r}</span>
                     ))}
                   </div>
                   <Row label="ADX" value={`${signal.composite.adx} (${signal.composite.is_trending ? "トレンド相場" : "レンジ相場"})`} />
-                </>
-              )}
-              {!signal.crossover && signal.crossover_mode === "COMPOSITE" && signal.composite && (
-                <>
-                  <hr style={styles.divider} />
-                  <div style={styles.scoreBar}>
-                    <span style={{ color: "#22c55e", minWidth: 56 }}>買い {signal.composite.buy_score}pt</span>
-                    <div style={styles.scoreTrack}>
-                      <div style={{
-                        ...styles.scoreFill,
-                        width: `${signal.composite.buy_score / (signal.composite.buy_score + signal.composite.sell_score + 0.01) * 100}%`,
-                        background: "#64748b"
-                      }} />
-                    </div>
-                    <span style={{ color: "#ef4444", minWidth: 56, textAlign: "right" as const }}>売り {signal.composite.sell_score}pt</span>
-                  </div>
-                  <div style={{ fontSize: 11, color: "#64748b", textAlign: "center" as const }}>閾値未達（5点以上でシグナル発火）</div>
                 </>
               )}
               {signal.crossover && (
