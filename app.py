@@ -216,28 +216,38 @@ RSI: {signal['rsi']}
 
 # ==================== Supabase 保存 ====================
 def save_signal_to_supabase(signal_data):
+    """シグナルをSupabaseに保存し、挿入されたIDを返す"""
     try:
+        tf = signal_data.get('timeframe', TIMEFRAME_MINUTES)
         resp = req.post(
             f"{SUPABASE_URL}/rest/v1/signals",
             json={
                 "symbol": "GOLD",
-                "timeframe": "M30",
+                "timeframe": f"M{tf}",
+                "timeframe_minutes": tf,
+                "test_mode": signal_data.get('test_mode', TEST_MODE),
+                "crossover_mode": signal_data.get('crossover_mode', CROSSOVER_MODE),
                 "crossover": signal_data.get('crossover'),
                 "rsi": signal_data.get('rsi'),
                 "signal_line": signal_data.get('signal_line'),
+                "main_line": signal_data.get('main_line'),
                 "latest_close": signal_data.get('latest_close'),
                 "ai_valid": signal_data.get('ai_valid'),
                 "ai_confidence": signal_data.get('ai_confidence'),
                 "ai_reason": signal_data.get('ai_reason'),
-                "created_at": datetime.now(timezone.utc).isoformat()
+                "created_at": signal_data.get('generated_at', datetime.now(timezone.utc).isoformat())
             },
-            headers=supabase_headers(),
+            headers={**supabase_headers(), "Prefer": "return=representation"},
             timeout=10
         )
         resp.raise_for_status()
-        print("✓ Supabase に保存完了")
+        rows = resp.json()
+        db_id = rows[0]['id'] if rows else None
+        print(f"✓ Supabase 保存完了 id={db_id}")
+        return db_id
     except Exception as e:
         print(f"⚠️  Supabase 保存エラー: {e}")
+        return None
 
 # ==================== シグナルループ（24/7自動稼働）====================
 def signal_loop():
@@ -274,13 +284,16 @@ def signal_loop():
                 'generated_at': datetime.now(timezone.utc).isoformat()
             }
 
+            # Supabase保存 → db_id取得後に配信（1回のみ）
+            db_id = save_signal_to_supabase(signal_data)
+            if db_id:
+                signal_data['db_id'] = db_id
+
             socketio.emit('signal', signal_data)
-            print(f"📡 シグナル配信完了: close={signal_data['latest_close']}")
+            print(f"📡 シグナル配信完了: close={signal_data['latest_close']} db_id={db_id}")
 
             if signal_data.get('crossover') and signal_data.get('ai_valid'):
                 send_fcm_push(signal_data)
-
-            save_signal_to_supabase(signal_data)
 
         except Exception as e:
             print(f"❌ シグナルループエラー: {e}")
@@ -426,6 +439,226 @@ def signal_history():
         )
         resp.raise_for_status()
         return jsonify(resp.json())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ==================== トレード管理 API ====================
+
+@app.route("/api/trades", methods=["POST", "OPTIONS"])
+def create_trade():
+    """手動注文を記録"""
+    global CROSSOVER_MODE
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    try:
+        payload = {
+            "signal_id": data.get("signal_id"),
+            "direction": data.get("direction", "BUY"),
+            "entry_price": float(data["entry_price"]),
+            "entry_time": data.get("entry_time", datetime.now(timezone.utc).isoformat()),
+            "status": "OPEN",
+        }
+        resp = req.post(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            json=payload,
+            headers={**supabase_headers(), "Prefer": "return=representation"},
+            timeout=10
+        )
+        resp.raise_for_status()
+        return jsonify(resp.json()[0]), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/trades/<int:trade_id>", methods=["PATCH", "OPTIONS"])
+def close_trade(trade_id):
+    """トレードを決済（PATCH）"""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    try:
+        exit_price = float(data["exit_price"])
+        # 既存トレードを取得してentry_priceを取る
+        existing = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"id": f"eq.{trade_id}", "select": "entry_price,direction"},
+            headers=supabase_headers(), timeout=10
+        ).json()
+        if not existing:
+            return jsonify({"error": "Trade not found"}), 404
+        entry_price = float(existing[0]['entry_price'])
+        direction = existing[0].get('direction', 'BUY')
+        profit_loss = round((exit_price - entry_price) * (1 if direction == 'BUY' else -1), 2)
+        pips = round(profit_loss * 10, 1)  # GOLD: 1$ = 10 pips
+        status = "CLOSED_PROFIT" if profit_loss >= 0 else "CLOSED_LOSS"
+
+        payload = {
+            "exit_price": exit_price,
+            "exit_time": data.get("exit_time", datetime.now(timezone.utc).isoformat()),
+            "profit_loss": profit_loss,
+            "pips": pips,
+            "status": data.get("status", status),
+            "notes": data.get("notes", ""),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        resp = req.patch(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"id": f"eq.{trade_id}"},
+            json=payload,
+            headers={**supabase_headers(), "Prefer": "return=representation"},
+            timeout=10
+        )
+        resp.raise_for_status()
+        return jsonify(resp.json()[0])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/trades", methods=["GET"])
+def get_trades():
+    """トレード一覧取得"""
+    status_filter = request.args.get("status")
+    params = {"select": "*,signals(crossover,rsi,ai_confidence,timeframe_minutes)",
+              "order": "created_at.desc", "limit": "50"}
+    if status_filter:
+        params["status"] = f"eq.{status_filter}"
+    try:
+        resp = req.get(f"{SUPABASE_URL}/rest/v1/trades",
+                       params=params, headers=supabase_headers(), timeout=10)
+        resp.raise_for_status()
+        return jsonify(resp.json())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/stats/today", methods=["GET"])
+def stats_today():
+    """本日の統計"""
+    try:
+        today = datetime.now(timezone.utc).date().isoformat()
+        trades_resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"select": "status,profit_loss,pips,signals(ai_confidence)",
+                    "entry_time": f"gte.{today}T00:00:00Z"},
+            headers=supabase_headers(), timeout=10
+        )
+        trades = trades_resp.json() if trades_resp.ok else []
+        signals_resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/signals",
+            params={"select": "id,crossover", "created_at": f"gte.{today}T00:00:00Z"},
+            headers=supabase_headers(), timeout=10
+        )
+        signals = signals_resp.json() if signals_resp.ok else []
+        closed = [t for t in trades if t['status'] in ('CLOSED_PROFIT', 'CLOSED_LOSS')]
+        wins = [t for t in closed if t['status'] == 'CLOSED_PROFIT']
+        total_pips = sum(t.get('pips') or 0 for t in closed)
+        conf_values = [t['signals']['ai_confidence'] for t in closed
+                       if t.get('signals') and t['signals'].get('ai_confidence')]
+        return jsonify({
+            "date": today,
+            "total_signals": len(signals),
+            "total_trades": len(trades),
+            "open_trades": len([t for t in trades if t['status'] == 'OPEN']),
+            "win_count": len(wins),
+            "loss_count": len(closed) - len(wins),
+            "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else 0,
+            "total_pips": round(total_pips, 1),
+            "avg_profit": round(sum(t.get('profit_loss') or 0 for t in closed) / len(closed), 2) if closed else 0,
+            "confidence_avg": round(sum(conf_values) / len(conf_values), 1) if conf_values else None,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/stats/history", methods=["GET"])
+def stats_history():
+    """過去N日の日別統計"""
+    days = int(request.args.get("days", 30))
+    try:
+        from datetime import timedelta
+        start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        trades_resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"select": "status,profit_loss,pips,entry_time",
+                    "entry_time": f"gte.{start}", "order": "entry_time.asc"},
+            headers=supabase_headers(), timeout=10
+        )
+        trades = trades_resp.json() if trades_resp.ok else []
+        # 日別集計
+        from collections import defaultdict
+        daily: dict = defaultdict(lambda: {"trades": 0, "wins": 0, "pips": 0.0})
+        for t in trades:
+            day = t['entry_time'][:10]
+            daily[day]["trades"] += 1
+            if t['status'] == 'CLOSED_PROFIT':
+                daily[day]["wins"] += 1
+                daily[day]["pips"] += t.get('pips') or 0
+            elif t['status'] == 'CLOSED_LOSS':
+                daily[day]["pips"] += t.get('pips') or 0
+        result = []
+        for day in sorted(daily.keys()):
+            d = daily[day]
+            closed = d["trades"]
+            result.append({
+                "date": day,
+                "total_trades": closed,
+                "win_count": d["wins"],
+                "win_rate": round(d["wins"] / closed * 100, 1) if closed else 0,
+                "total_pips": round(d["pips"], 1),
+            })
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/analysis/correlation", methods=["GET"])
+def correlation_analysis():
+    """信頼度 vs 勝率の相関分析"""
+    try:
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"select": "status,signals(ai_confidence)",
+                    "status": "in.(CLOSED_PROFIT,CLOSED_LOSS)"},
+            headers=supabase_headers(), timeout=10
+        )
+        trades = resp.json() if resp.ok else []
+        from collections import defaultdict
+        buckets: dict = defaultdict(lambda: {"total": 0, "wins": 0})
+        for t in trades:
+            conf = t.get('signals', {}) and t['signals'].get('ai_confidence')
+            if conf is None:
+                continue
+            bucket = (conf // 10) * 10  # 10%刻み
+            buckets[bucket]["total"] += 1
+            if t['status'] == 'CLOSED_PROFIT':
+                buckets[bucket]["wins"] += 1
+        data_points = []
+        for b in sorted(buckets.keys()):
+            total = buckets[b]["total"]
+            wins = buckets[b]["wins"]
+            data_points.append({
+                "confidence": b,
+                "win_rate": round(wins / total * 100, 1) if total else 0,
+                "sample_count": total
+            })
+        # 相関係数（データが十分あれば計算）
+        corr = None
+        if len(data_points) >= 3:
+            xs = [p["confidence"] for p in data_points]
+            ys = [p["win_rate"] for p in data_points]
+            n = len(xs)
+            mean_x = sum(xs) / n
+            mean_y = sum(ys) / n
+            num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+            den = (sum((x - mean_x) ** 2 for x in xs) * sum((y - mean_y) ** 2 for y in ys)) ** 0.5
+            corr = round(num / den, 2) if den else None
+        total_closed = len(trades)
+        recommendation = "データ収集中..." if total_closed < 20 else (
+            f"信頼度{max(data_points, key=lambda p: p['win_rate'])['confidence']}%以上で勝率最高"
+            if data_points else "データ不足"
+        )
+        return jsonify({
+            "correlation_coefficient": corr,
+            "data_points": data_points,
+            "total_samples": total_closed,
+            "recommendation": recommendation
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
