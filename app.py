@@ -25,7 +25,7 @@ except ImportError:
 
 import numpy as np
 import pandas as pd
-import google.generativeai as genai
+from google import genai
 import firebase_admin
 from firebase_admin import credentials, messaging
 
@@ -44,8 +44,7 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "goldtrader_secret")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 @app.after_request
 def add_cors(response):
@@ -162,7 +161,7 @@ RSI: {signal['rsi']}
 {{"valid": true or false, "confidence": 0-100, "reason": "50文字以内"}}
 """
     try:
-        response = gemini_model.generate_content(prompt)
+        response = gemini_client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
         text = response.text.strip()
         if "```" in text:
             text = text.split("```")[1].replace("json", "").strip()
