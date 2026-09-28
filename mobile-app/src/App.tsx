@@ -4,6 +4,25 @@ import { LocalNotifications } from "@capacitor/local-notifications";
 import { PushNotifications } from "@capacitor/push-notifications";
 
 // ==================== 型定義 ====================
+interface CompositeData {
+  buy_score: number;
+  sell_score: number;
+  buy_reasons: string[];
+  sell_reasons: string[];
+  ema20: number;
+  ema50: number;
+  ema_long: number;
+  bb_upper: number;
+  bb_lower: number;
+  stoch_k: number;
+  stoch_d: number;
+  adx: number;
+  di_plus: number;
+  di_minus: number;
+  atr: number;
+  is_trending: boolean;
+}
+
 interface Signal {
   crossover: "UP_CROSS" | "DOWN_CROSS" | null;
   rsi: number;
@@ -13,6 +32,10 @@ interface Signal {
   ai_valid: boolean | null;
   ai_confidence: number | null;
   ai_reason: string | null;
+  ai_sl_suggestion?: number | null;
+  ai_tp_suggestion?: number | null;
+  ai_key_level?: string;
+  composite?: CompositeData;
   generated_at: string;
   timeframe?: number;
   test_mode?: boolean;
@@ -75,7 +98,7 @@ export default function App() {
   const [mode, setMode] = useState<"PRODUCTION" | "TEST">(() => {
     try { return (localStorage.getItem("gt_mode") as any) ?? "PRODUCTION"; } catch { return "PRODUCTION"; }
   });
-  const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD" | "RSI_MACD">(() => {
+  const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD" | "RSI_MACD" | "COMPOSITE">(() => {
     try { return (localStorage.getItem("gt_crossover") as any) ?? "RSI"; } catch { return "RSI"; }
   });
   const [tradingMode, setTradingMode] = useState<"MANUAL" | "SEMI_AUTO" | "FULL_AUTO">(() => {
@@ -143,7 +166,7 @@ export default function App() {
       try {
         const savedTf = parseInt(localStorage.getItem("gt_tf") ?? "30");
         const savedMode = (localStorage.getItem("gt_mode") ?? "PRODUCTION") as "PRODUCTION" | "TEST";
-        const savedCrossover = (localStorage.getItem("gt_crossover") ?? "RSI") as "RSI" | "MACD" | "RSI_MACD";
+        const savedCrossover = (localStorage.getItem("gt_crossover") ?? "RSI") as "RSI" | "MACD" | "RSI_MACD" | "COMPOSITE";
         const savedTradingMode = (localStorage.getItem("gt_trading_mode") ?? "MANUAL") as "MANUAL" | "SEMI_AUTO" | "FULL_AUTO";
         const savedThreshold = parseInt(localStorage.getItem("gt_auto_threshold") ?? "70");
 
@@ -211,11 +234,14 @@ export default function App() {
         const direction = data.crossover === "UP_CROSS" ? "📈 買いシグナル" : "📉 売りシグナル";
         const label = data.test_mode ? "🧪 TEST " : "";
         const notifId = Math.floor(Math.random() * 100000);
+        const slTp = data.ai_sl_suggestion && data.ai_tp_suggestion
+          ? ` | SL:${data.ai_sl_suggestion} TP:${data.ai_tp_suggestion}`
+          : "";
         LocalNotifications.schedule({
           notifications: [{
             id: notifId,
             title: `${label}GOLD ${direction}`,
-            body: `信頼度: ${data.ai_confidence}%  ${data.ai_reason}`,
+            body: `信頼度: ${data.ai_confidence}%  ${data.ai_reason}${slTp}`,
             schedule: { at: new Date() },
             channelId: "gold-signal",
             sound: "default",
@@ -406,12 +432,54 @@ export default function App() {
                 value={signal.signal_line?.toFixed(4)}
               />
               <Row label="終値" value={signal.latest_close?.toFixed(2)} />
+              {signal.crossover_mode === "COMPOSITE" && signal.composite && (
+                <>
+                  <hr style={styles.divider} />
+                  <div style={styles.scoreBar}>
+                    <span style={{ color: "#22c55e", minWidth: 56 }}>買い {signal.composite.buy_score}pt</span>
+                    <div style={styles.scoreTrack}>
+                      <div style={{
+                        ...styles.scoreFill,
+                        width: `${signal.composite.buy_score / (signal.composite.buy_score + signal.composite.sell_score + 0.01) * 100}%`,
+                        background: signal.crossover === "UP_CROSS" ? "#22c55e" : "#ef4444"
+                      }} />
+                    </div>
+                    <span style={{ color: "#ef4444", minWidth: 56, textAlign: "right" as const }}>売り {signal.composite.sell_score}pt</span>
+                  </div>
+                  <div style={styles.reasonTags}>
+                    {(signal.crossover === "UP_CROSS" ? signal.composite.buy_reasons : signal.composite.sell_reasons).map((r, i) => (
+                      <span key={i} style={styles.reasonTag}>{r}</span>
+                    ))}
+                  </div>
+                  <Row label="ADX" value={`${signal.composite.adx} (${signal.composite.is_trending ? "トレンド相場" : "レンジ相場"})`} />
+                </>
+              )}
+              {!signal.crossover && signal.crossover_mode === "COMPOSITE" && signal.composite && (
+                <>
+                  <hr style={styles.divider} />
+                  <div style={styles.scoreBar}>
+                    <span style={{ color: "#22c55e", minWidth: 56 }}>買い {signal.composite.buy_score}pt</span>
+                    <div style={styles.scoreTrack}>
+                      <div style={{
+                        ...styles.scoreFill,
+                        width: `${signal.composite.buy_score / (signal.composite.buy_score + signal.composite.sell_score + 0.01) * 100}%`,
+                        background: "#64748b"
+                      }} />
+                    </div>
+                    <span style={{ color: "#ef4444", minWidth: 56, textAlign: "right" as const }}>売り {signal.composite.sell_score}pt</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#64748b", textAlign: "center" as const }}>閾値未達（5点以上でシグナル発火）</div>
+                </>
+              )}
               {signal.crossover && (
                 <>
                   <hr style={styles.divider} />
                   <Row label="AI 判定" value={signal.ai_valid ? "✅ 有効" : "❌ ダマシ"} highlight={signal.ai_valid ? "#22c55e" : "#ef4444"} />
                   <Row label="信頼度" value={`${signal.ai_confidence}%`} />
                   <Row label="理由" value={signal.ai_reason ?? ""} />
+                  {signal.ai_sl_suggestion != null && <Row label="推奨SL" value={String(signal.ai_sl_suggestion)} highlight="#fca5a5" />}
+                  {signal.ai_tp_suggestion != null && <Row label="推奨TP" value={String(signal.ai_tp_suggestion)} highlight="#86efac" />}
+                  {signal.ai_key_level && <Row label="注目水準" value={signal.ai_key_level} />}
                 </>
               )}
               <p style={styles.timestamp}>{new Date(signal.generated_at).toLocaleString("ja-JP")}</p>
@@ -712,6 +780,10 @@ export default function App() {
               <h3 style={styles.settingsSectionTitle}>📈 クロスオーバー方式</h3>
               <div style={styles.radioGroup}>
                 <label style={styles.radioLabel}>
+                  <input type="radio" name="crossover" checked={crossoverMode === "COMPOSITE"} onChange={() => setCrossoverMode("COMPOSITE")} />
+                  <span>⭐ COMPOSITE（推奨：7指標複合スコア）</span>
+                </label>
+                <label style={styles.radioLabel}>
                   <input type="radio" name="crossover" checked={crossoverMode === "RSI"} onChange={() => setCrossoverMode("RSI")} />
                   <span>RSIシグナルクロス（RSIと移動平均）</span>
                 </label>
@@ -727,6 +799,9 @@ export default function App() {
             </div>
 
             <div style={styles.infoBox}>
+              <p style={{ margin: "0 0 6px", fontSize: 12 }}>
+                <b>⭐ COMPOSITE:</b> EMA×2 + MACD + RSI + ストキャスティクス + BB + ADX の7指標を点数化。5点以上で発火。GeminiがSL/TP提案。
+              </p>
               <p style={{ margin: "0 0 6px", fontSize: 12 }}>
                 <b>RSI:</b> RSI(14)がその9SMAを上抜け/下抜けを検出。
               </p>
@@ -842,4 +917,9 @@ const styles: Record<string, any> = {
   settingsBtns: { display: "flex", gap: 12 },
   btnSave: { flex: 1, padding: "12px", background: "#22c55e", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: "bold", cursor: "pointer" },
   btnCancel: { flex: 1, padding: "12px", background: "#ef4444", color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: "bold", cursor: "pointer" },
+  scoreBar: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, fontWeight: "bold" },
+  scoreTrack: { flex: 1, height: 8, background: "#334155", borderRadius: 4, overflow: "hidden" },
+  scoreFill: { height: "100%", borderRadius: 4 },
+  reasonTags: { display: "flex", flexWrap: "wrap" as const, gap: 4, marginBottom: 8 },
+  reasonTag: { fontSize: 10, background: "#1e3a5f", color: "#93c5fd", padding: "2px 6px", borderRadius: 4 },
 };

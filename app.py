@@ -38,7 +38,7 @@ PUSH_SECRET     = os.environ.get("PUSH_SECRET", "goldtrader_push_2026")
 # 動的設定（APIで変更可能）
 TIMEFRAME_MINUTES = int(os.environ.get("TIMEFRAME_MINUTES", "30"))
 TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
-CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI", "MACD", or "RSI_MACD"
+CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI", "MACD", "RSI_MACD", "COMPOSITE"
 
 # トレード自動化設定
 TRADING_MODE = os.environ.get("TRADING_MODE", "MANUAL")  # MANUAL / SEMI_AUTO / FULL_AUTO
@@ -211,10 +211,190 @@ def calculate_macd(close_prices, fast=12, slow=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return macd_line, signal_line
 
+# ==================== 追加テクニカル指標 ====================
+def calculate_ema(close_prices, period):
+    return pd.Series(close_prices).astype(float).ewm(span=period, adjust=False).mean()
+
+def calculate_bollinger(close_prices, period=20, std_dev=2.0):
+    close = pd.Series(close_prices).astype(float)
+    mid = close.rolling(window=period).mean()
+    std = close.rolling(window=period).std()
+    return mid + std_dev * std, mid, mid - std_dev * std
+
+def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+    h = pd.Series(high).astype(float)
+    l = pd.Series(low).astype(float)
+    c = pd.Series(close).astype(float)
+    lowest = l.rolling(k_period).min()
+    highest = h.rolling(k_period).max()
+    k = 100 * (c - lowest) / (highest - lowest + 1e-10)
+    return k, k.rolling(d_period).mean()
+
+def calculate_adx(high, low, close, period=14):
+    h = pd.Series(high).astype(float)
+    l = pd.Series(low).astype(float)
+    c = pd.Series(close).astype(float)
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    up = h.diff()
+    down = -l.diff()
+    dm_p = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=h.index, dtype=float)
+    dm_m = pd.Series(np.where((down > up) & (down > 0), down, 0.0), index=h.index, dtype=float)
+    atr = tr.ewm(span=period, adjust=False).mean()
+    di_p = 100 * dm_p.ewm(span=period, adjust=False).mean() / (atr + 1e-10)
+    di_m = 100 * dm_m.ewm(span=period, adjust=False).mean() / (atr + 1e-10)
+    dx = 100 * (di_p - di_m).abs() / (di_p + di_m + 1e-10)
+    return dx.ewm(span=period, adjust=False).mean(), di_p, di_m
+
+def calculate_atr(high, low, close, period=14):
+    h = pd.Series(high).astype(float)
+    l = pd.Series(low).astype(float)
+    c = pd.Series(close).astype(float)
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    return tr.ewm(span=period, adjust=False).mean()
+
+# ==================== 複合シグナル計算 ====================
+def compute_signal_composite(df):
+    """EMA/MACD/RSI/Stochastic/BB/ADX の7指標スコアリングによる複合シグナル"""
+    if df is None or len(df) < 60:
+        return None
+
+    close = df['close'].values
+    high = df['high'].values if 'high' in df.columns else close
+    low = df['low'].values if 'low' in df.columns else close
+
+    rsi_s = calculate_rsi(close, 14)
+    macd_line, macd_sig = calculate_macd(close)
+    ema20 = calculate_ema(close, 20)
+    ema50 = calculate_ema(close, 50)
+    long_p = min(200, len(close) - 1)
+    ema_long = calculate_ema(close, long_p)
+    bb_upper, _, bb_lower = calculate_bollinger(close, 20, 2.0)
+    stoch_k, stoch_d = calculate_stochastic(high, low, close, 14, 3)
+    adx_s, di_p, di_m = calculate_adx(high, low, close, 14)
+    atr_s = calculate_atr(high, low, close, 14)
+
+    def safe(s, idx=-1):
+        try:
+            v = float(s.iloc[idx])
+            return v if not np.isnan(v) else 0.0
+        except Exception:
+            return 0.0
+
+    cur_rsi = safe(rsi_s)
+    cur_macd, cur_macd_sig = safe(macd_line), safe(macd_sig)
+    prv_macd, prv_macd_sig = safe(macd_line, -2), safe(macd_sig, -2)
+    cur_ema20, cur_ema50, cur_ema_long = safe(ema20), safe(ema50), safe(ema_long)
+    cur_close = float(df['close'].iloc[-1])
+    cur_bb_upper, cur_bb_lower = safe(bb_upper), safe(bb_lower)
+    cur_stoch_k, cur_stoch_d = safe(stoch_k), safe(stoch_d)
+    prv_stoch_k, prv_stoch_d = safe(stoch_k, -2), safe(stoch_d, -2)
+    cur_adx = safe(adx_s)
+    cur_di_p, cur_di_m = safe(di_p), safe(di_m)
+    cur_atr = safe(atr_s)
+
+    buy_score = 0
+    sell_score = 0
+    buy_reasons: list = []
+    sell_reasons: list = []
+
+    # 1. EMAトレンド
+    if cur_ema20 > cur_ema50:
+        buy_score += 1; buy_reasons.append("短期EMA↑")
+    else:
+        sell_score += 1; sell_reasons.append("短期EMA↓")
+    if cur_close > cur_ema_long:
+        buy_score += 1; buy_reasons.append("長期EMA上方")
+    else:
+        sell_score += 1; sell_reasons.append("長期EMA下方")
+
+    # 2. MACD
+    if prv_macd < prv_macd_sig and cur_macd > cur_macd_sig:
+        buy_score += 2; buy_reasons.append("MACDゴールデンクロス")
+    elif prv_macd > prv_macd_sig and cur_macd < cur_macd_sig:
+        sell_score += 2; sell_reasons.append("MACDデッドクロス")
+    elif cur_macd > cur_macd_sig:
+        buy_score += 1; buy_reasons.append("MACD買い優勢")
+    else:
+        sell_score += 1; sell_reasons.append("MACD売り優勢")
+
+    # 3. RSI
+    if cur_rsi < 30:
+        buy_score += 2; buy_reasons.append(f"RSI売られすぎ({cur_rsi:.0f})")
+    elif 40 <= cur_rsi <= 65:
+        buy_score += 1; buy_reasons.append(f"RSI買い圏({cur_rsi:.0f})")
+    if cur_rsi > 70:
+        sell_score += 2; sell_reasons.append(f"RSI買われすぎ({cur_rsi:.0f})")
+    elif 35 <= cur_rsi < 60:
+        sell_score += 1; sell_reasons.append(f"RSI売り圏({cur_rsi:.0f})")
+
+    # 4. Stochastic
+    if prv_stoch_k < prv_stoch_d and cur_stoch_k > cur_stoch_d:
+        buy_score += 2; buy_reasons.append(f"ストキャスGC({cur_stoch_k:.0f})")
+    elif prv_stoch_k > prv_stoch_d and cur_stoch_k < cur_stoch_d:
+        sell_score += 2; sell_reasons.append(f"ストキャスDC({cur_stoch_k:.0f})")
+    elif cur_stoch_k > cur_stoch_d:
+        buy_score += 1; buy_reasons.append("ストキャス買い優勢")
+    else:
+        sell_score += 1; sell_reasons.append("ストキャス売り優勢")
+
+    # 5. ボリンジャーバンド
+    bb_range = cur_bb_upper - cur_bb_lower
+    if bb_range > 0:
+        bb_pos = (cur_close - cur_bb_lower) / bb_range
+        if bb_pos < 0.25:
+            buy_score += 1; buy_reasons.append("BB下限付近")
+        elif bb_pos > 0.75:
+            sell_score += 1; sell_reasons.append("BB上限付近")
+
+    # 6. ADX方向
+    if cur_di_p > cur_di_m and cur_adx > 20:
+        buy_score += 1; buy_reasons.append(f"DI+優勢(ADX{cur_adx:.0f})")
+    elif cur_di_m > cur_di_p and cur_adx > 20:
+        sell_score += 1; sell_reasons.append(f"DI-優勢(ADX{cur_adx:.0f})")
+
+    THRESHOLD = 5
+    crossover = None
+    if buy_score >= THRESHOLD and buy_score > sell_score + 1:
+        crossover = "UP_CROSS"
+    elif sell_score >= THRESHOLD and sell_score > buy_score + 1:
+        crossover = "DOWN_CROSS"
+
+    return {
+        'rsi': round(cur_rsi, 2),
+        'signal_line': round(cur_macd_sig, 4),
+        'main_line': round(cur_macd, 4),
+        'crossover': crossover,
+        'crossover_mode': 'COMPOSITE',
+        'latest_close': round(cur_close, 2),
+        'time': str(df['time'].iloc[-1]),
+        'composite': {
+            'buy_score': buy_score,
+            'sell_score': sell_score,
+            'buy_reasons': buy_reasons,
+            'sell_reasons': sell_reasons,
+            'ema20': round(cur_ema20, 2),
+            'ema50': round(cur_ema50, 2),
+            'ema_long': round(cur_ema_long, 2),
+            'bb_upper': round(cur_bb_upper, 2),
+            'bb_lower': round(cur_bb_lower, 2),
+            'stoch_k': round(cur_stoch_k, 2),
+            'stoch_d': round(cur_stoch_d, 2),
+            'adx': round(cur_adx, 2),
+            'di_plus': round(cur_di_p, 2),
+            'di_minus': round(cur_di_m, 2),
+            'atr': round(cur_atr, 4),
+            'is_trending': cur_adx > 25,
+        }
+    }
+
 # ==================== シグナル計算 ====================
 def compute_signal(df):
     if df is None or len(df) < 35:
         return None
+
+    if CROSSOVER_MODE == "COMPOSITE":
+        return compute_signal_composite(df)
+
     close = df['close'].values
     cur_rsi = round(float(calculate_rsi(close).iloc[-1]), 2)
 
@@ -297,6 +477,50 @@ RSI: {signal['rsi']}
         print(f"❌ Gemini エラー詳細: {e}")
         return {'valid': False, 'confidence': 0, 'reason': str(e)[:200]}
 
+def gemini_composite_analyze(df, signal):
+    """COMPOSITEモード専用の深層Gemini分析（SL/TP提案付き）"""
+    if signal['crossover'] is None:
+        return {'valid': False, 'confidence': 0, 'reason': 'シグナルなし',
+                'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
+    comp = signal.get('composite', {})
+    direction = "買い（ロング）" if signal['crossover'] == "UP_CROSS" else "売り（ショート）"
+    recent = df.tail(20)[['time', 'open', 'high', 'low', 'close']].copy()
+    recent['time'] = recent['time'].astype(str)
+    prompt = f"""あなたはゴールド（XAUUSD）の上級テクニカルアナリストです。
+複合テクニカル指標を総合分析し、このシグナルの有効性を判定してください。
+
+【シグナル】方向: {direction} / 価格: {signal['latest_close']} / 時刻: {signal['time']}
+【スコア】買い{comp.get('buy_score',0)}点 vs 売り{comp.get('sell_score',0)}点
+買い根拠: {', '.join(comp.get('buy_reasons', []))}
+売り根拠: {', '.join(comp.get('sell_reasons', []))}
+【指標】EMA20={comp.get('ema20')} EMA50={comp.get('ema50')} EMA長={comp.get('ema_long')}
+RSI={signal['rsi']} MACD={signal['main_line']} MACDシグナル={signal['signal_line']}
+ストキャスK={comp.get('stoch_k')} D={comp.get('stoch_d')}
+BB上={comp.get('bb_upper')} BB下={comp.get('bb_lower')}
+ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={comp.get('atr')}
+【直近20本価格（M30）】{json.dumps(recent.to_dict(orient='records'), ensure_ascii=False)}
+
+以下のJSON形式のみで回答:
+{{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "key_level": "注目水準50文字以内"}}"""
+    try:
+        response = gemini_model.generate_content(prompt)
+        text = response.text.strip()
+        if "```" in text:
+            text = text.split("```")[1].replace("json", "").strip()
+        result = json.loads(text)
+        return {
+            'valid': bool(result.get('valid', False)),
+            'confidence': int(result.get('confidence', 0)),
+            'reason': str(result.get('reason', '')),
+            'sl_suggestion': result.get('sl_suggestion'),
+            'tp_suggestion': result.get('tp_suggestion'),
+            'key_level': str(result.get('key_level', '')),
+        }
+    except Exception as e:
+        print(f"❌ Gemini Composite エラー: {e}")
+        return {'valid': False, 'confidence': 0, 'reason': str(e)[:200],
+                'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
+
 # ==================== Supabase 保存 ====================
 def save_signal_to_supabase(signal_data):
     """シグナルをSupabaseに保存し、挿入されたIDを返す"""
@@ -350,11 +574,15 @@ def signal_loop():
 
             if signal['crossover']:
                 print(f"🎯 クロスオーバー検出: {signal['crossover']}")
-                ai = gemini_validate(df, signal)
+                if CROSSOVER_MODE == "COMPOSITE":
+                    ai = gemini_composite_analyze(df, signal)
+                else:
+                    ai = gemini_validate(df, signal)
                 if TEST_MODE:
                     print(f"🧪 TEST: RSI={signal['rsi']}, TF={tf}m, AI={ai['valid']}({ai['confidence']}%)")
             else:
-                ai = {'valid': None, 'confidence': None, 'reason': None}
+                ai = {'valid': None, 'confidence': None, 'reason': None,
+                      'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
                 print(f"⏸️  クロスオーバーなし RSI={signal['rsi']} TF={tf}m")
 
             signal_data = {
@@ -362,6 +590,9 @@ def signal_loop():
                 'ai_valid': ai['valid'],
                 'ai_confidence': ai['confidence'],
                 'ai_reason': ai['reason'],
+                'ai_sl_suggestion': ai.get('sl_suggestion'),
+                'ai_tp_suggestion': ai.get('tp_suggestion'),
+                'ai_key_level': ai.get('key_level', ''),
                 'timeframe': tf,
                 'test_mode': TEST_MODE,
                 'generated_at': datetime.now(timezone.utc).isoformat()
@@ -492,7 +723,7 @@ def set_crossover():
         return jsonify({}), 200
     data = request.get_json()
     mode = data.get("crossover_mode", "RSI")
-    if mode not in ["RSI", "MACD", "RSI_MACD"]:
+    if mode not in ["RSI", "MACD", "RSI_MACD", "COMPOSITE"]:
         return jsonify({"error": f"Invalid crossover_mode: {mode}"}), 400
     CROSSOVER_MODE = mode
     settings_changed.set()
