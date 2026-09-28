@@ -38,7 +38,10 @@ PUSH_SECRET     = os.environ.get("PUSH_SECRET", "goldtrader_push_2026")
 # 動的設定（APIで変更可能）
 TIMEFRAME_MINUTES = int(os.environ.get("TIMEFRAME_MINUTES", "30"))
 TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
-CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI" or "MACD"
+CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI", "MACD", or "RSI_MACD"
+
+# 設定変更時にシグナルループのスリープを即座に中断するイベント
+settings_changed = threading.Event()
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -248,7 +251,8 @@ def signal_loop():
 
             if signal is None:
                 print("⚠️  シグナル計算失敗。スキップします。")
-                time.sleep(tf * 60)
+                settings_changed.wait(timeout=tf * 60)
+                settings_changed.clear()
                 continue
 
             if signal['crossover']:
@@ -281,7 +285,9 @@ def signal_loop():
         except Exception as e:
             print(f"❌ シグナルループエラー: {e}")
 
-        time.sleep(TIMEFRAME_MINUTES * 60)
+        # 設定変更イベントがセットされたら即座にループ再開、なければ通常スリープ
+        settings_changed.wait(timeout=TIMEFRAME_MINUTES * 60)
+        settings_changed.clear()
 
 # ==================== FCM プッシュ送信 ====================
 def send_fcm_push(signal_data):
@@ -351,7 +357,8 @@ def set_timeframe():
     if tf not in [1, 5, 15, 30, 60]:
         return jsonify({"error": f"Invalid timeframe: {tf}"}), 400
     TIMEFRAME_MINUTES = tf
-    print(f"📊 時間足変更: {tf}分足")
+    settings_changed.set()
+    print(f"📊 時間足変更: {tf}分足（ループ即座再開）")
     return jsonify({"status": "ok", "timeframe": tf})
 
 @app.route("/api/settings/mode", methods=["POST", "OPTIONS"])
@@ -362,7 +369,8 @@ def set_mode():
     data = request.get_json()
     mode = data.get("mode", "PRODUCTION")
     TEST_MODE = (mode == "TEST")
-    print(f"{'🧪 TEST_MODE ON' if TEST_MODE else '🚀 PRODUCTION ON'}")
+    settings_changed.set()
+    print(f"{'🧪 TEST_MODE ON' if TEST_MODE else '🚀 PRODUCTION ON'}（ループ即座再開）")
     return jsonify({"status": "ok", "mode": mode, "test_mode": TEST_MODE})
 
 @app.route("/api/settings/crossover", methods=["POST", "OPTIONS"])
@@ -375,7 +383,8 @@ def set_crossover():
     if mode not in ["RSI", "MACD", "RSI_MACD"]:
         return jsonify({"error": f"Invalid crossover_mode: {mode}"}), 400
     CROSSOVER_MODE = mode
-    print(f"📊 クロスオーバー方式変更: {mode}")
+    settings_changed.set()
+    print(f"📊 クロスオーバー方式変更: {mode}（ループ即座再開）")
     return jsonify({"status": "ok", "crossover_mode": mode})
 
 @app.route("/api/settings/current", methods=["GET"])
