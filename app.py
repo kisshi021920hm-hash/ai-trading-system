@@ -53,8 +53,9 @@ settings_changed = threading.Event()
 # Gemini API クールダウン（同じシグナルへの重複呼び出し防止）
 _last_gemini_call_time = 0.0
 _last_gemini_signal_key = ""
-_last_gemini_direction = ""   # 最後にGeminiを呼んだクロス方向
-GEMINI_COOLDOWN_SEC = 300  # 5分クールダウン（同方向の重複呼び出し防止）
+_last_gemini_direction = ""    # 最後にGeminiを呼んだクロス方向
+_last_gemini_approved = False  # 最後のGemini結果が承認だったか
+GEMINI_COOLDOWN_REJECTED = 120  # 却下後の再試行間隔（秒）
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -496,33 +497,42 @@ def compute_signal(df):
 
 # ==================== Gemini ダマシ判定 ====================
 def _gemini_should_call(signal):
-    """方向が変わった場合は必ず呼ぶ。同方向は5分クールダウン"""
-    global _last_gemini_call_time, _last_gemini_signal_key, _last_gemini_direction
+    """
+    ・方向変化     → 必ずGemini呼ぶ
+    ・同方向OK済み → 次の方向変化まで待機（呼ばない）
+    ・同方向NG済み → 2分後に再試行
+    """
+    global _last_gemini_call_time, _last_gemini_signal_key, _last_gemini_direction, _last_gemini_approved
     now = time.time()
     direction = signal.get('crossover', '')
     key = f"{direction}_{signal.get('latest_close')}_{signal.get('time')}"
 
-    # 同一シグナルの重複呼び出しを防ぐ
     if key == _last_gemini_signal_key:
         return False
 
-    # 方向が変わった場合は必ずGeminiを呼ぶ（クールダウン無視）
+    # 方向が変わった → 必ずGemini呼ぶ
     if direction != _last_gemini_direction and direction:
-        print(f"🔄 クロス方向変化({_last_gemini_direction}→{direction}) → Gemini強制実行")
+        print(f"🔄 方向変化({_last_gemini_direction}→{direction}) → Gemini実行")
         _last_gemini_call_time = now
         _last_gemini_signal_key = key
         _last_gemini_direction = direction
+        _last_gemini_approved = False
         return True
 
-    # 同方向は5分クールダウン
-    if now - _last_gemini_call_time < GEMINI_COOLDOWN_SEC:
-        remaining = int(GEMINI_COOLDOWN_SEC - (now - _last_gemini_call_time))
-        print(f"⏳ Gemini クールダウン中 残り{remaining}秒 → スキップ")
+    # 同方向・前回承認済み → ポジション保有中 → 次の方向変化まで待機
+    if _last_gemini_approved:
+        print(f"✅ 承認済みポジション保有中 → Geminiスキップ")
         return False
 
+    # 同方向・前回却下 → 2分後に再試行
+    if now - _last_gemini_call_time < GEMINI_COOLDOWN_REJECTED:
+        remaining = int(GEMINI_COOLDOWN_REJECTED - (now - _last_gemini_call_time))
+        print(f"⏳ Gemini却下後クールダウン 残り{remaining}秒 → スキップ")
+        return False
+
+    print(f"🔁 前回却下 → 再試行")
     _last_gemini_call_time = now
     _last_gemini_signal_key = key
-    _last_gemini_direction = direction
     return True
 
 def _gemini_generate(prompt, max_retries=1):
@@ -678,6 +688,9 @@ def signal_loop():
                         ai = gemini_composite_analyze(df, signal)
                     else:
                         ai = gemini_validate(df, signal)
+                    # Gemini結果を承認状態に反映（次回呼び出し判断に使用）
+                    _last_gemini_approved = bool(ai.get('valid'))
+                    print(f"💡 Gemini結果: {'✅承認' if _last_gemini_approved else '❌却下'} → {'待機モード' if _last_gemini_approved else '2分後再試行'}")
                 else:
                     ai = {'valid': None, 'confidence': None, 'reason': 'クールダウン中（重複スキップ）',
                           'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
