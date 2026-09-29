@@ -404,7 +404,7 @@ def compute_signal_composite(df):
     elif cur_di_m > cur_di_p and cur_adx > 20:
         sell_score += 1; sell_reasons.append(f"DI-優勢(ADX{cur_adx:.0f})")
 
-    THRESHOLD = 5
+    THRESHOLD = 3
     crossover = None
     if buy_score >= THRESHOLD and buy_score > sell_score + 1:
         crossover = "UP_CROSS"
