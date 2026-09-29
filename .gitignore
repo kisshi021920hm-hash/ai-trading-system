@@ -6,6 +6,10 @@ __pycache__/
 
 # 機密ファイル（絶対コミット禁止）
 firebase-service-account.json
+*.keystore
+*.jks
+keystore.properties
+release.keystore
 
 # データログ
 gold_data_log.csv
@@ -22,3 +26,6 @@ mobile-app/android/.gradle/
 # IDE
 .vscode/
 *.iml
+
+# バイナリ・ローカルツール
+ngrok.exe
