@@ -57,6 +57,12 @@ _last_gemini_direction = ""    # 最後にGeminiを呼んだクロス方向
 _last_gemini_approved = False  # 最後のGemini結果が承認だったか
 GEMINI_COOLDOWN_REJECTED = 120  # 却下後の再試行間隔（秒）
 
+# EA 状態追跡（監視用）
+_server_start_time = time.time()
+_ea_last_heartbeat = 0.0
+_ea_last_heartbeat_str = ""
+_ea_trades: list = []  # 直近50件のEA取引レポート
+
 # ==================== 初期化 ====================
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "goldtrader_secret")
@@ -1196,6 +1202,78 @@ def correlation_analysis():
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ==================== 監視・EA報告 API ====================
+
+@app.route("/status", methods=["GET"])
+def get_status():
+    """システム全体の状態（Claude監視・外出先確認用）"""
+    now = time.time()
+    ea_alive = (_ea_last_heartbeat > 0 and now - _ea_last_heartbeat < 90)
+    gemini_ago = round(now - _last_gemini_call_time) if _last_gemini_call_time else None
+    if _last_gemini_approved:
+        gemini_state = f"✅ 承認済み待機中（方向:{_last_gemini_direction}）"
+    elif _last_gemini_call_time and now - _last_gemini_call_time < GEMINI_COOLDOWN_REJECTED:
+        remaining = int(GEMINI_COOLDOWN_REJECTED - (now - _last_gemini_call_time))
+        gemini_state = f"⏳ 却下後クールダウン中（残り{remaining}秒）"
+    else:
+        gemini_state = "🟢 次のクロス待ち（準備完了）"
+    return jsonify({
+        "server": {
+            "alive": True,
+            "uptime_hours": round((now - _server_start_time) / 3600, 1),
+            "time_utc": datetime.now(timezone.utc).isoformat(),
+        },
+        "settings": {
+            "timeframe": TIMEFRAME_MINUTES,
+            "crossover_mode": CROSSOVER_MODE,
+            "trading_mode": TRADING_MODE,
+            "test_mode": TEST_MODE,
+        },
+        "gemini": {
+            "state": gemini_state,
+            "last_direction": _last_gemini_direction or "なし",
+            "approved": _last_gemini_approved,
+            "last_call_ago_sec": gemini_ago,
+        },
+        "ea": {
+            "alive": ea_alive,
+            "status": "🟢 稼働中" if ea_alive else "🔴 未接続（MT5停止の可能性）",
+            "last_heartbeat_utc": _ea_last_heartbeat_str or "未受信",
+            "last_heartbeat_ago_sec": round(now - _ea_last_heartbeat) if _ea_last_heartbeat else None,
+            "recent_trades": _ea_trades[-5:],
+        },
+        "fcm": {
+            "tokens": len(fcm_tokens),
+            "enabled": FCM_ENABLED,
+        },
+    })
+
+@app.route("/ea-heartbeat", methods=["POST"])
+def ea_heartbeat():
+    """MT5 EAからの定期ハートビート（生存確認・1分ごと）"""
+    global _ea_last_heartbeat, _ea_last_heartbeat_str
+    _ea_last_heartbeat = time.time()
+    _ea_last_heartbeat_str = datetime.now(timezone.utc).isoformat()
+    return jsonify({"status": "ok"})
+
+@app.route("/ea-trade", methods=["POST"])
+def ea_trade_report():
+    """MT5 EAが注文・決済したとき内容をサーバーに記録"""
+    global _ea_trades
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No data"}), 400
+    data["reported_at"] = datetime.now(timezone.utc).isoformat()
+    _ea_trades.append(data)
+    if len(_ea_trades) > 50:
+        _ea_trades.pop(0)
+    action = data.get("action", "?")
+    direction = data.get("direction", "?")
+    price = data.get("price", "?")
+    ticket = data.get("ticket", "?")
+    print(f"📊 EA報告: {action} {direction} @{price} ticket={ticket}")
+    return jsonify({"status": "ok"})
 
 # ==================== WebSocket イベント ====================
 @socketio.on("connect")
