@@ -761,11 +761,10 @@ def signal_loop():
             print(f"📡 シグナル配信完了: close={signal_data['latest_close']} db_id={db_id} mode={TRADING_MODE}")
 
             if signal_data.get('crossover'):
-                # Geminiが実際に分析した場合のみFCM送信（0%クォータ通知を排除）
+                # クールダウン中(ai_conf=None)のみFCMスキップ
+                # クォータ制限・実分析結果はどちらも通知する
                 ai_conf = signal_data.get('ai_confidence')
-                ai_reason = signal_data.get('ai_reason', '')
-                gemini_ran = (ai_conf is not None and 'クールダウン' not in ai_reason and 'クォータ' not in ai_reason)
-                if gemini_ran:
+                if ai_conf is not None:
                     send_fcm_push(signal_data)
 
         except Exception as e:
