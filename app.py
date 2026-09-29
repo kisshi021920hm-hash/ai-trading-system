@@ -106,43 +106,48 @@ def _get_firestore():
     return _firestore_db
 
 def load_fcm_tokens():
-    """Firestoreから起動時にFCMトークンを復元"""
-    db = _get_firestore()
-    if not db:
-        print("⚠️  load_fcm_tokens: Firestoreクライアント未初期化 → スキップ")
-        return
+    """Supabaseから起動時にFCMトークンを復元"""
     try:
-        docs = db.collection("fcm_tokens").stream()
-        before = len(fcm_tokens)
-        for doc in docs:
-            fcm_tokens.add(doc.id)
-        added = len(fcm_tokens) - before
-        print(f"✓ FCMトークン復元: Firestore={added}件 / メモリ合計={len(fcm_tokens)}件")
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/fcm_tokens",
+            params={"select": "token"},
+            headers=supabase_headers(),
+            timeout=10
+        )
+        if resp.ok:
+            before = len(fcm_tokens)
+            for row in resp.json():
+                fcm_tokens.add(row["token"])
+            added = len(fcm_tokens) - before
+            print(f"✓ FCMトークン復元: Supabase={added}件 / メモリ合計={len(fcm_tokens)}件")
+        else:
+            print(f"⚠️  FCMトークン読み込みエラー: {resp.status_code} {resp.text}")
     except Exception as e:
-        print(f"⚠️  Firestoreトークン読み込みエラー: {e}")
+        print(f"⚠️  FCMトークン読み込みエラー: {e}")
 
 def persist_fcm_token(token: str):
-    """FCMトークンをFirestoreに保存"""
-    db = _get_firestore()
-    if not db:
-        return
+    """FCMトークンをSupabaseに保存"""
     try:
-        db.collection("fcm_tokens").document(token).set(
-            {"updated_at": datetime.now(timezone.utc).isoformat()},
-            merge=True
+        req.post(
+            f"{SUPABASE_URL}/rest/v1/fcm_tokens",
+            json={"token": token, "updated_at": datetime.now(timezone.utc).isoformat()},
+            headers={**supabase_headers(), "Prefer": "resolution=merge-duplicates"},
+            timeout=10
         )
     except Exception as e:
-        print(f"⚠️  Firestoreトークン保存エラー: {e}")
+        print(f"⚠️  FCMトークン保存エラー: {e}")
 
 def delete_fcm_token(token: str):
-    """無効なFCMトークンをFirestoreから削除"""
-    db = _get_firestore()
-    if not db:
-        return
+    """無効なFCMトークンをSupabaseから削除"""
     try:
-        db.collection("fcm_tokens").document(token).delete()
+        req.delete(
+            f"{SUPABASE_URL}/rest/v1/fcm_tokens",
+            params={"token": f"eq.{token}"},
+            headers=supabase_headers(),
+            timeout=10
+        )
     except Exception as e:
-        print(f"⚠️  Firestoreトークン削除エラー: {e}")
+        print(f"⚠️  FCMトークン削除エラー: {e}")
 
 def supabase_headers():
     return {
@@ -1575,24 +1580,28 @@ def debug_fcm():
     # メモリ上のトークン
     memory_tokens = list(fcm_tokens)
 
-    # Firestoreの実データを直接確認
-    firestore_tokens = []
-    firestore_error = None
+    # Supabaseの実データを直接確認
+    supabase_tokens = []
+    supabase_error = None
     try:
-        db = _get_firestore()
-        if db:
-            docs = db.collection("fcm_tokens").stream()
-            for doc in docs:
-                firestore_tokens.append({
-                    "id": doc.id[:20] + "...",
-                    "data": doc.to_dict()
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/fcm_tokens",
+            params={"select": "token,updated_at"},
+            headers=supabase_headers(),
+            timeout=10
+        )
+        if resp.ok:
+            for row in resp.json():
+                supabase_tokens.append({
+                    "token": row["token"][:20] + "...",
+                    "updated_at": row.get("updated_at")
                 })
         else:
-            firestore_error = "Firestoreクライアント未初期化"
+            supabase_error = f"{resp.status_code} {resp.text}"
     except Exception as e:
-        firestore_error = str(e)
+        supabase_error = str(e)
 
-    # POST の場合はFirestoreからリロードも実行
+    # POST の場合はSupabaseからリロードも実行
     reloaded = False
     if request.method == "POST":
         load_fcm_tokens()
@@ -1604,12 +1613,12 @@ def debug_fcm():
             "count": len(memory_tokens),
             "tokens": [t[:20] + "..." for t in memory_tokens],
         },
-        "firestore": {
-            "count": len(firestore_tokens),
-            "tokens": firestore_tokens,
-            "error": firestore_error,
+        "supabase": {
+            "count": len(supabase_tokens),
+            "tokens": supabase_tokens,
+            "error": supabase_error,
         },
-        "reloaded_from_firestore": reloaded,
+        "reloaded_from_supabase": reloaded,
     })
 
 # ==================== ポジション監視 手動トリガー（Phase 7）====================
