@@ -2,6 +2,7 @@ package com.goldtrader.app;
 
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
+import android.media.AudioAttributes;
 import android.os.Build;
 import android.os.Bundle;
 import com.getcapacitor.BridgeActivity;
@@ -19,16 +20,15 @@ public class MainActivity extends BridgeActivity {
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm == null) return;
 
+            // 音なし・振動ありチャンネル（FCMのchannel_idと一致させる）
             NotificationChannel channel = new NotificationChannel(
-                "gold-signal",
+                "gold-signal-v3",
                 "GOLDシグナル通知",
                 NotificationManager.IMPORTANCE_HIGH
             );
-            channel.setDescription("GOLDトレードシグナルの通知");
-
-            // 電話と全く異なるパターン: ・・・━（短3回→長1回）
-            // [待機, 振動, 停止, 振動, 停止, 振動, 停止, 振動]
-            long[] pattern = {0, 100, 100, 100, 100, 100, 200, 900};
+            channel.setDescription("GOLDトレードシグナル（音なし・振動あり）");
+            channel.setSound(null, null); // 音なし
+            long[] pattern = {0, 800, 200, 800, 200, 800};
             channel.setVibrationPattern(pattern);
             channel.enableVibration(true);
 
