@@ -30,7 +30,7 @@ datetime g_last_trade_time   = 0;   // 最後に注文した時刻
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.1 起動 ===");
+    Print("=== GOLD AI Trader EA v1.21 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
