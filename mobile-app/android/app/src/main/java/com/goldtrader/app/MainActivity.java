@@ -20,14 +20,21 @@ public class MainActivity extends BridgeActivity {
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm == null) return;
 
-            // 音なし・振動ありチャンネル（FCMのchannel_idと一致させる）
+            // 旧チャンネルを削除（振動パターン更新のため）
+            nm.deleteNotificationChannel("gold-signal-v1");
+            nm.deleteNotificationChannel("gold-signal-v2");
+            nm.deleteNotificationChannel("gold-signal-v3");
+            nm.deleteNotificationChannel("gold-signal-v4");
+            nm.deleteNotificationChannel("gold-signal");
+
+            // 固定IDで再作成（マナーモード許可リストに一度登録すればOK）
             NotificationChannel channel = new NotificationChannel(
-                "gold-signal-v4",
+                "gold-signal",
                 "GOLDシグナル通知",
                 NotificationManager.IMPORTANCE_HIGH
             );
             channel.setDescription("GOLDトレードシグナル（音なし・振動あり）");
-            channel.setSound(null, null); // 音なし
+            channel.setSound(null, null);
             long[] pattern = {0, 2000, 300, 2000, 300, 2000, 300, 2000, 300, 2000};
             channel.setVibrationPattern(pattern);
             channel.enableVibration(true);

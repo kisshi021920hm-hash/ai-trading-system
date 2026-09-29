@@ -682,7 +682,7 @@ def send_fcm_push(signal_data):
                 android=messaging.AndroidConfig(
                     priority="high",
                     notification=messaging.AndroidNotification(
-                        channel_id="gold-signal-v4",
+                        channel_id="gold-signal",
                         notification_count=1,
                         default_vibrate_timings=False,
                         vibrate_timings_millis=[0, 2000, 300, 2000, 300, 2000, 300, 2000, 300, 2000],

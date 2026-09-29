@@ -180,7 +180,7 @@ export default function App() {
     LocalNotifications.requestPermissions();
     // チャンネルIDをv2に更新（振動設定を確実に反映させるため）
     LocalNotifications.createChannel({
-      id: "gold-signal-v4",
+      id: "gold-signal",
       name: "GOLDシグナル通知",
       importance: 5,
       vibration: true,
