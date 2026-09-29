@@ -531,6 +531,8 @@ export default function App() {
                     value={
                       signal.ai_reason?.includes("クールダウン") || signal.ai_reason?.includes("スキップ")
                         ? "⏸ 保留中"
+                        : signal.ai_reason?.includes("クォータ")
+                        ? "⚠️ 判定不能"
                         : signal.ai_valid === null
                         ? "⏳ 待機中"
                         : signal.ai_valid
@@ -540,6 +542,8 @@ export default function App() {
                     highlight={
                       signal.ai_reason?.includes("クールダウン") || signal.ai_reason?.includes("スキップ")
                         ? "#94a3b8"
+                        : signal.ai_reason?.includes("クォータ")
+                        ? "#f59e0b"
                         : signal.ai_valid === null
                         ? "#94a3b8"
                         : signal.ai_valid

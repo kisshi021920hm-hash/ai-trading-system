@@ -68,6 +68,12 @@ _ea_trades: list = []  # 直近50件のEA取引レポート
 _position_monitor_last = 0.0  # ポジション監視最終実行時刻
 _last_ea_signal_time = 0.0   # EAから/ea-signalを最後に受信した時刻（signal_loopスキップ判定用）
 _ea_latest_scores: dict = {}  # EAから受信した最新スコア（ハートビート経由）
+_ea_signal_dedup: dict = {}  # 重複防止キャッシュ {crossover: last_time}
+
+# デモ用ルールベースエントリー設定
+DEMO_RULE_BASED = os.environ.get("DEMO_RULE_BASED", "false").lower() == "true"
+DEMO_RULE_MIN_SCORE = int(os.environ.get("DEMO_RULE_MIN_SCORE", "4"))  # ルールベース発動の最低スコア
+DEMO_RULE_MIN_ADX   = float(os.environ.get("DEMO_RULE_MIN_ADX", "20.0"))  # ルールベース発動の最低ADX
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -722,8 +728,14 @@ ADX={ea_data.get('adx')} DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus
             'key_level': str(result.get('key_level', '')),
         }
     except Exception as e:
-        print(f"❌ Gemini EAシグナル分析エラー: {e}")
-        return {'valid': False, 'confidence': 0, 'reason': str(e)[:200],
+        err_str = str(e)
+        print(f"❌ Gemini EAシグナル分析エラー: {err_str[:100]}")
+        is_quota = "クォータ制限中" in err_str or "429" in err_str or "quota" in err_str.lower()
+        if is_quota:
+            # クォータ時: valid=None/confidence=None で「判定不能」扱い（ダマシ扱いしない）
+            return {'valid': None, 'confidence': None, 'reason': 'クォータ制限中 - 数分後に自動回復します',
+                    'sl_suggestion': None, 'tp_suggestion': None, 'key_level': '', 'quota_error': True}
+        return {'valid': False, 'confidence': 0, 'reason': err_str[:200],
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
 
 # ==================== ポジション監視 Gemini 評価（Phase 7）====================
@@ -1583,7 +1595,7 @@ def ea_heartbeat():
 @app.route("/ea-signal", methods=["POST", "OPTIONS"])
 def ea_signal_push():
     """MT5 EAからリアルタイム指標データを受信 → Gemini分析 → Supabase保存 → FCM通知"""
-    global _last_ea_signal_time, _last_gemini_approved, _last_gemini_direction
+    global _last_ea_signal_time, _last_gemini_approved, _last_gemini_direction, _ea_signal_dedup
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
@@ -1595,6 +1607,14 @@ def ea_signal_push():
     if crossover not in ('UP_CROSS', 'DOWN_CROSS'):
         return jsonify({"error": f"Invalid crossover: {crossover}"}), 400
 
+    # ① 重複防止: 60秒以内の同方向シグナルはスキップ（EA複数インスタンス・リトライ対策）
+    now = time.time()
+    last_recv = _ea_signal_dedup.get(crossover, 0)
+    if now - last_recv < 60:
+        print(f"⏭️ /ea-signal 重複スキップ: {crossover} ({int(now - last_recv)}秒前に受信済み)")
+        return jsonify({"status": "skipped", "reason": "duplicate_within_60s"}), 200
+    _ea_signal_dedup[crossover] = now
+
     print(f"📡 EA→サーバー シグナル受信: {crossover} "
           f"close={ea_data.get('latest_close')} "
           f"買い{ea_data.get('buy_score')}点 vs 売り{ea_data.get('sell_score')}点 "
@@ -1604,6 +1624,21 @@ def ea_signal_push():
     ai = gemini_analyze_ea_signal(ea_data)
     _last_gemini_approved = bool(ai.get('valid'))
     _last_gemini_direction = crossover
+
+    # ② デモ用ルールベースエントリー（DEMO_RULE_BASED=true かつ Geminiクォータ時）
+    if ai.get('quota_error') and DEMO_RULE_BASED:
+        buy_score  = int(ea_data.get('buy_score',  0))
+        sell_score = int(ea_data.get('sell_score', 0))
+        adx        = float(ea_data.get('adx', 0))
+        score_ok = (crossover == 'UP_CROSS'   and buy_score  >= DEMO_RULE_MIN_SCORE) or \
+                   (crossover == 'DOWN_CROSS' and sell_score >= DEMO_RULE_MIN_SCORE)
+        if score_ok and adx >= DEMO_RULE_MIN_ADX:
+            ai['valid']      = True
+            ai['confidence'] = 50  # EA の MIN_CONFIDENCE=50 に合わせてエントリーさせる
+            ai['reason']     = f'ルールベース(Gemini制限中) score={buy_score if crossover=="UP_CROSS" else sell_score}pt ADX={adx:.0f}'
+            print(f"🤖 デモルールベースエントリー: {crossover} score={buy_score}/{sell_score} ADX={adx:.1f}")
+        else:
+            print(f"⏸️ デモルールベース: スコア不足 buy={buy_score} sell={sell_score} ADX={adx:.1f}")
 
     # signal_dataをサーバー共通フォーマットで構築
     comp = {
