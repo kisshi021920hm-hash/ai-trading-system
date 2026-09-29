@@ -75,6 +75,7 @@ interface TodayStats {
 
 // ==================== 設定 ====================
 // v3B-rebuild
+const APP_VERSION = "1.11";
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -296,7 +297,7 @@ export default function App() {
             title: `${label}GOLD ${direction}`,
             body: aiBody,
             schedule: { at: new Date() },
-            channelId: "gold-signal-v2",
+            channelId: "gold-trading",
             sound: "default",
           }],
         });
@@ -439,7 +440,10 @@ export default function App() {
   return (
     <div style={styles.container}>
       <div style={styles.header}>
-        <h1 style={styles.title}>GOLD AI トレーダー</h1>
+        <div>
+          <h1 style={styles.title}>GOLD AI トレーダー</h1>
+          <div style={{ fontSize: 11, color: "#475569", marginTop: 2 }}>v{APP_VERSION}</div>
+        </div>
         <button style={styles.settingsBtn} onClick={() => setSettingsOpen(true)}>⚙️</button>
       </div>
 
@@ -961,7 +965,7 @@ export default function App() {
                           title: "🔔 テスト通知",
                           body: `振動 ${vibDuration}ms × ${vibCount}回`,
                           schedule: { at: new Date(Date.now() + 300) },
-                          channelId: "gold-signal-v2",
+                          channelId: "gold-trading",
                           sound: "default",
                         }],
                       });

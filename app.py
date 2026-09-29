@@ -462,6 +462,24 @@ def _gemini_should_call(signal):
     _last_gemini_signal_key = key
     return True
 
+def _gemini_generate(prompt, max_retries=1):
+    """429クォータエラー時にリトライするGemini呼び出しラッパー"""
+    for attempt in range(max_retries + 1):
+        try:
+            return gemini_model.generate_content(prompt).text.strip()
+        except Exception as e:
+            err = str(e)
+            is_quota = "429" in err or "quota" in err.lower() or "Resource has been exhausted" in err
+            if is_quota and attempt < max_retries:
+                wait = 15 * (attempt + 1)
+                print(f"⏳ Gemini 429クォータ制限 → {wait}秒後リトライ ({attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
+            if is_quota:
+                print(f"❌ Gemini クォータ超過（リトライ限界）: {e}")
+                raise Exception("クォータ制限中 - 数分後に自動回復します")
+            raise
+
 def gemini_validate(df, signal):
     if signal['crossover'] is None:
         return {'valid': False, 'confidence': 0, 'reason': 'シグナルなし'}
@@ -483,8 +501,7 @@ RSI: {signal['rsi']}
 {{"valid": true or false, "confidence": 0-100, "reason": "50文字以内"}}
 """
     try:
-        response = gemini_model.generate_content(prompt)
-        text = response.text.strip()
+        text = _gemini_generate(prompt)
         if "```" in text:
             text = text.split("```")[1].replace("json", "").strip()
         result = json.loads(text)
@@ -523,8 +540,7 @@ ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={
 以下のJSON形式のみで回答:
 {{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "key_level": "注目水準50文字以内"}}"""
     try:
-        response = gemini_model.generate_content(prompt)
-        text = response.text.strip()
+        text = _gemini_generate(prompt)
         if "```" in text:
             text = text.split("```")[1].replace("json", "").strip()
         result = json.loads(text)
