@@ -55,7 +55,9 @@ _last_gemini_call_time = 0.0
 _last_gemini_signal_key = ""
 _last_gemini_direction = ""    # 最後にGeminiを呼んだクロス方向
 _last_gemini_approved = False  # 最後のGemini結果が承認だったか
-GEMINI_COOLDOWN_REJECTED = 120  # 却下後の再試行間隔（秒）
+GEMINI_COOLDOWN_REJECTED = 120   # 却下後クールダウン：トレンド相場（秒）
+GEMINI_COOLDOWN_RANGING  = 600   # 却下後クールダウン：レンジ相場 ADX<25（秒）
+ADX_TREND_THRESHOLD      = 25.0  # これ以上でトレンド判定
 
 # EA 状態追跡（監視用）
 _server_start_time = time.time()
@@ -504,9 +506,10 @@ def compute_signal(df):
 # ==================== Gemini ダマシ判定 ====================
 def _gemini_should_call(signal):
     """
-    ・方向変化     → 必ずGemini呼ぶ
-    ・同方向OK済み → 次の方向変化まで待機（呼ばない）
-    ・同方向NG済み → 2分後に再試行
+    ・方向変化              → 必ずGemini呼ぶ
+    ・同方向OK済み          → 次の方向変化まで待機（呼ばない）
+    ・同方向NG + ADX≥25    → クールダウン無視で即実行（トレンド発生）
+    ・同方向NG + ADX<25    → 10分クールダウン（レンジ相場・クォータ節約）
     """
     global _last_gemini_call_time, _last_gemini_signal_key, _last_gemini_direction, _last_gemini_approved
     now = time.time()
@@ -515,6 +518,10 @@ def _gemini_should_call(signal):
 
     if key == _last_gemini_signal_key:
         return False
+
+    # ADX取得（COMPOSITEモードのみ有効。他モードはトレンド扱い）
+    cur_adx = float(signal.get('composite', {}).get('adx', 99.0)) if signal.get('composite') else 99.0
+    is_trending = cur_adx >= ADX_TREND_THRESHOLD
 
     # 方向が変わった → 必ずGemini呼ぶ
     if direction != _last_gemini_direction and direction:
@@ -530,13 +537,20 @@ def _gemini_should_call(signal):
         print(f"✅ 承認済みポジション保有中 → Geminiスキップ")
         return False
 
-    # 同方向・前回却下 → 2分後に再試行
-    if now - _last_gemini_call_time < GEMINI_COOLDOWN_REJECTED:
-        remaining = int(GEMINI_COOLDOWN_REJECTED - (now - _last_gemini_call_time))
-        print(f"⏳ Gemini却下後クールダウン 残り{remaining}秒 → スキップ")
+    # ADX≥25（トレンド発生）→ クールダウン残り無視で即実行
+    if is_trending:
+        print(f"📈 ADX{cur_adx:.0f}≥{ADX_TREND_THRESHOLD:.0f} トレンド発生 → クールダウン無視でGemini実行")
+        _last_gemini_call_time = now
+        _last_gemini_signal_key = key
+        return True
+
+    # ADX<25（レンジ相場）→ 10分クールダウン
+    if now - _last_gemini_call_time < GEMINI_COOLDOWN_RANGING:
+        remaining = int(GEMINI_COOLDOWN_RANGING - (now - _last_gemini_call_time))
+        print(f"⏳ レンジ相場クールダウン中(ADX{cur_adx:.0f}<{ADX_TREND_THRESHOLD:.0f}) 残り{remaining}秒 → スキップ")
         return False
 
-    print(f"🔁 前回却下 → 再試行")
+    print(f"🔁 前回却下 → 再試行（ADX{cur_adx:.0f}）")
     _last_gemini_call_time = now
     _last_gemini_signal_key = key
     return True
@@ -696,7 +710,9 @@ def signal_loop():
                         ai = gemini_validate(df, signal)
                     # Gemini結果を承認状態に反映（次回呼び出し判断に使用）
                     _last_gemini_approved = bool(ai.get('valid'))
-                    print(f"💡 Gemini結果: {'✅承認' if _last_gemini_approved else '❌却下'} → {'待機モード' if _last_gemini_approved else '2分後再試行'}")
+                    cur_adx = signal.get('composite', {}).get('adx', 0) if signal.get('composite') else 0
+                    next_action = '待機モード' if _last_gemini_approved else (f'即時再試行(ADX{cur_adx:.0f}≥{ADX_TREND_THRESHOLD:.0f})' if cur_adx >= ADX_TREND_THRESHOLD else f'10分クールダウン(ADX{cur_adx:.0f}<{ADX_TREND_THRESHOLD:.0f})')
+                    print(f"💡 Gemini結果: {'✅承認' if _last_gemini_approved else '❌却下'} → {next_action}")
                 else:
                     ai = {'valid': None, 'confidence': None, 'reason': 'クールダウン中（重複スキップ）',
                           'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
@@ -1213,9 +1229,14 @@ def get_status():
     gemini_ago = round(now - _last_gemini_call_time) if _last_gemini_call_time else None
     if _last_gemini_approved:
         gemini_state = f"✅ 承認済み待機中（方向:{_last_gemini_direction}）"
-    elif _last_gemini_call_time and now - _last_gemini_call_time < GEMINI_COOLDOWN_REJECTED:
-        remaining = int(GEMINI_COOLDOWN_REJECTED - (now - _last_gemini_call_time))
-        gemini_state = f"⏳ 却下後クールダウン中（残り{remaining}秒）"
+    elif _last_gemini_call_time and now - _last_gemini_call_time < GEMINI_COOLDOWN_RANGING:
+        elapsed = now - _last_gemini_call_time
+        remaining_ranging = int(GEMINI_COOLDOWN_RANGING - elapsed)
+        remaining_trend = max(0, int(GEMINI_COOLDOWN_REJECTED - elapsed))
+        if remaining_trend > 0:
+            gemini_state = f"⏳ クールダウン中（レンジ残り{remaining_ranging}秒 / ADX≥{ADX_TREND_THRESHOLD:.0f}で即時解除）"
+        else:
+            gemini_state = f"⏳ レンジ相場クールダウン中（残り{remaining_ranging}秒 / ADX≥{ADX_TREND_THRESHOLD:.0f}で即時解除）"
     else:
         gemini_state = "🟢 次のクロス待ち（準備完了）"
     return jsonify({
