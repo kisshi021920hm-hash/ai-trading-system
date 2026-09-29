@@ -5,7 +5,7 @@
 //|  決済: 逆クロスでドテン（SL/TPでも決済）                             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.10"
+#property version   "1.20"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -124,7 +124,7 @@ void PollAndTrade()
         Print("⛔ AI非承認スキップ");
         return;
     }
-    if (confidence >= 0 && confidence < MIN_CONFIDENCE)
+    if (confidence < MIN_CONFIDENCE)
     {
         Print("⛔ 信頼度不足: ", confidence, "% < ", MIN_CONFIDENCE, "%");
         return;
@@ -243,22 +243,30 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
         Print("💡 デフォルト SL=", sl, " TP=", tp);
     }
 
-    //--- リスク率からロット自動計算
-    double balance       = AccountInfoDouble(ACCOUNT_BALANCE);
-    double risk_amount   = balance * (RISK_PERCENT / 100.0);
-    double sl_distance   = MathAbs(price - sl);
-    double contract_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-    double lot_size      = 0.01;
-    if (sl_distance > 0.0 && contract_size > 0.0)
-        lot_size = risk_amount / (sl_distance * contract_size);
+    //--- リスク率からロット自動計算（口座通貨を自動考慮）
+    double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
+    double risk_amount = balance * (RISK_PERCENT / 100.0);
+    double sl_distance = MathAbs(price - sl);
+    // SYMBOL_TRADE_TICK_VALUE は口座通貨建てのため JPY/USD どちらでも正しく計算できる
+    double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tick_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    double lot_size   = 0.01;
+    if (sl_distance > 0.0 && tick_value > 0.0 && tick_size > 0.0)
+    {
+        double ticks_in_sl = sl_distance / tick_size;
+        lot_size = risk_amount / (ticks_in_sl * tick_value);
+    }
     double min_lot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double max_lot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
     double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
     lot_size = MathMax(min_lot, MathMin(max_lot,
                    MathFloor(lot_size / lot_step) * lot_step));
     lot_size = NormalizeDouble(lot_size, 2);
-    Print("💰 残高:$", balance, " リスク:$", NormalizeDouble(risk_amount, 2),
-          " SL幅:$", NormalizeDouble(sl_distance, 2),
+    string currency = AccountInfoString(ACCOUNT_CURRENCY);
+    Print("💰 残高:", balance, currency,
+          " リスク:", NormalizeDouble(risk_amount, 2), currency,
+          " SL幅:", NormalizeDouble(sl_distance, 2),
+          " tick_value:", NormalizeDouble(tick_value, 4),
           " → ロット:", lot_size);
 
     MqlTradeRequest req = {};
