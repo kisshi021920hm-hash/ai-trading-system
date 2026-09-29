@@ -58,12 +58,14 @@ _last_gemini_approved = False  # 最後のGemini結果が承認だったか
 GEMINI_COOLDOWN_REJECTED = 120   # 却下後クールダウン：トレンド相場（秒）
 GEMINI_COOLDOWN_RANGING  = 600   # 却下後クールダウン：レンジ相場 ADX<25（秒）
 ADX_TREND_THRESHOLD      = 25.0  # これ以上でトレンド判定
+POSITION_MONITOR_INTERVAL = 1800  # ポジション監視間隔: 30分
 
 # EA 状態追跡（監視用）
 _server_start_time = time.time()
 _ea_last_heartbeat = 0.0
 _ea_last_heartbeat_str = ""
 _ea_trades: list = []  # 直近50件のEA取引レポート
+_position_monitor_last = 0.0  # ポジション監視最終実行時刻
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -661,6 +663,71 @@ ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={
         return {'valid': False, 'confidence': 0, 'reason': str(e)[:200],
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
 
+# ==================== ポジション監視 Gemini 評価（Phase 7）====================
+def gemini_monitor_position(position, df):
+    """保有ポジションの危険度をGeminiが評価する（Phase 7）"""
+    direction = position.get('direction', 'BUY')
+    entry_price = float(position.get('entry_price', 0))
+    sl = position.get('sl')
+    tp = position.get('tp')
+    entry_time = position.get('entry_time', '')
+    current_price = float(df['close'].iloc[-1])
+    unrealized_pl = round(
+        (current_price - entry_price) * (1 if direction == 'BUY' else -1), 2
+    )
+
+    comp = compute_signal_composite(df)
+    comp_data = comp.get('composite', {}) if comp else {}
+    direction_ja = "買い（ロング）" if direction == 'BUY' else "売り（ショート）"
+    recent = df.tail(20)[['time', 'open', 'high', 'low', 'close']].copy()
+    recent['time'] = recent['time'].astype(str)
+
+    prompt = f"""あなたはゴールド（XAUUSD）の上級リスク管理の専門家です。
+現在保有中のポジションを分析し、リスクを評価してください。
+
+【保有ポジション】
+方向: {direction_ja}
+エントリー価格: {entry_price}
+現在価格: {current_price}
+含み損益: {unrealized_pl:+.2f}ドル
+SL: {sl or '未設定'} / TP: {tp or '未設定'}
+エントリー時刻: {entry_time}
+
+【テクニカル指標（最新）】
+RSI={comp.get('rsi') if comp else 'N/A'} / ADX={comp_data.get('adx', 'N/A')}
+EMA20={comp_data.get('ema20', 'N/A')} / EMA50={comp_data.get('ema50', 'N/A')}
+買いスコア: {comp_data.get('buy_score', 'N/A')} vs 売りスコア: {comp_data.get('sell_score', 'N/A')}
+買い根拠: {', '.join(comp_data.get('buy_reasons', []))}
+売り根拠: {', '.join(comp_data.get('sell_reasons', []))}
+【直近20本の価格データ（M15）】{json.dumps(recent.to_dict(orient='records'), ensure_ascii=False)}
+
+以下のJSON形式のみで回答してください:
+{{"risk": "HIGH/MEDIUM/LOW", "action": "CLOSE/HOLD", "reason": "100文字以内"}}
+- HIGH: 即座に決済を強く推奨（逆行リスク大・SLブレイクの危険）
+- MEDIUM: 注意が必要（状況悪化の可能性、監視継続）
+- LOW: ポジション維持問題なし"""
+
+    try:
+        text = _gemini_generate(prompt, max_retries=0)
+        if "```" in text:
+            text = text.split("```")[1].replace("json", "").strip()
+        result = json.loads(text)
+        return {
+            'risk': str(result.get('risk', 'LOW')).upper(),
+            'action': str(result.get('action', 'HOLD')).upper(),
+            'reason': str(result.get('reason', '')),
+            'current_price': current_price,
+            'unrealized_pl': unrealized_pl,
+        }
+    except Exception as e:
+        print(f"❌ Geminiポジション監視エラー: {e}")
+        return {
+            'risk': 'LOW', 'action': 'HOLD',
+            'reason': f"評価エラー: {str(e)[:80]}",
+            'current_price': current_price,
+            'unrealized_pl': unrealized_pl,
+        }
+
 # ==================== 取引実績統計（Geminiプロンプト用） ====================
 def get_recent_trade_stats(limit=20):
     """Supabaseから直近の取引結果を取得して統計を返す"""
@@ -863,6 +930,93 @@ def send_fcm_push(signal_data):
     for t in invalid_tokens:
         delete_fcm_token(t)
     return results
+
+# ==================== ポジション警告FCM ====================
+def send_position_alert_push(title: str, body: str):
+    """ポジション監視専用のFCM通知（カスタムタイトル・本文）"""
+    if not FCM_ENABLED or not fcm_tokens:
+        return []
+    invalid_tokens = set()
+    results = []
+    for token in list(fcm_tokens):
+        try:
+            msg = messaging.Message(
+                notification=messaging.Notification(title=title, body=body),
+                android=messaging.AndroidConfig(
+                    priority="high",
+                    notification=messaging.AndroidNotification(
+                        channel_id="gold-trading",
+                        notification_count=1,
+                        vibrate_timings_millis=[0, 2000, 300, 2000, 300, 2000, 300, 2000, 300, 2000],
+                        default_vibrate_timings=False,
+                    ),
+                ),
+                token=token,
+            )
+            msg_id = messaging.send(msg)
+            print(f"✓ ポジション警告FCM送信完了 msg_id={msg_id}: {token[:20]}...")
+            results.append({"token": token[:20], "status": "ok", "msg_id": msg_id})
+        except Exception as e:
+            print(f"⚠️  ポジション警告FCM送信エラー ({token[:20]}...): {e}")
+            results.append({"token": token[:20], "status": "error", "error": str(e)})
+            if "registration-token-not-registered" in str(e) or "invalid-argument" in str(e):
+                invalid_tokens.add(token)
+    fcm_tokens.difference_update(invalid_tokens)
+    for t in invalid_tokens:
+        delete_fcm_token(t)
+    return results
+
+# ==================== ポジション監視ループ（Phase 7）====================
+def position_monitor_loop():
+    """30分ごとに保有ポジションをGeminiで監視し、危険なら FCM 通知を送る"""
+    global _position_monitor_last
+    print(f"🔍 ポジション監視ループ開始（{POSITION_MONITOR_INTERVAL // 60}分間隔）")
+    # 起動直後は1サイクル待ってから開始
+    time.sleep(POSITION_MONITOR_INTERVAL)
+    while True:
+        try:
+            resp = req.get(
+                f"{SUPABASE_URL}/rest/v1/trades",
+                params={"status": "eq.OPEN", "select": "*", "order": "entry_time.asc"},
+                headers=supabase_headers(),
+                timeout=10
+            )
+            if not resp.ok:
+                print(f"⚠️ ポジション監視: Supabase取得失敗 {resp.status_code}")
+            else:
+                open_positions = resp.json()
+                if not open_positions:
+                    print("🔍 ポジション監視: OPENポジションなし → スキップ")
+                else:
+                    print(f"🔍 ポジション監視: {len(open_positions)}件を分析中...")
+                    df = fetch_yahoo_data(15)
+                    if df is None:
+                        print("⚠️ ポジション監視: 価格データ取得失敗")
+                    else:
+                        for pos in open_positions[:3]:  # 最大3件（クォータ節約）
+                            result = gemini_monitor_position(pos, df)
+                            risk = result['risk']
+                            direction = pos.get('direction', '?')
+                            unrealized_pl = result['unrealized_pl']
+                            print(
+                                f"🔍 監視結果: {direction} @{pos.get('entry_price')} "
+                                f"現在{result['current_price']} 含み損益{unrealized_pl:+.2f}$ "
+                                f"→ リスク[{risk}] {result['reason']}"
+                            )
+                            if risk in ('HIGH', 'MEDIUM'):
+                                direction_icon = "📈" if direction == 'BUY' else "📉"
+                                risk_icon = "🚨" if risk == 'HIGH' else "⚠️"
+                                title = f"{risk_icon} ポジション警告 [{risk}]"
+                                body = (
+                                    f"{direction_icon} {direction} @{pos.get('entry_price')} → "
+                                    f"現在{result['current_price']} 含み損益:{unrealized_pl:+.2f}$ | "
+                                    f"{result['reason']}"
+                                )
+                                send_position_alert_push(title, body)
+            _position_monitor_last = time.time()
+        except Exception as e:
+            print(f"❌ ポジション監視ループエラー: {e}")
+        time.sleep(POSITION_MONITOR_INTERVAL)
 
 # ==================== REST エンドポイント ====================
 @app.route("/push-signal", methods=["POST"])
@@ -1409,6 +1563,62 @@ def ea_trade_report():
 
     return jsonify({"status": "ok"})
 
+# ==================== ポジション監視 手動トリガー（Phase 7）====================
+@app.route("/api/position-monitor/trigger", methods=["POST", "OPTIONS"])
+def trigger_position_monitor():
+    """ポジション監視を手動で即時実行（テスト・デバッグ用）"""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if request.headers.get("X-Push-Secret", "") != PUSH_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"status": "eq.OPEN", "select": "*", "order": "entry_time.asc"},
+            headers=supabase_headers(), timeout=10
+        )
+        if not resp.ok:
+            return jsonify({"error": f"Supabase error: {resp.status_code}"}), 500
+        open_positions = resp.json()
+        if not open_positions:
+            return jsonify({"status": "ok", "message": "OPENポジションなし", "results": []})
+
+        df = fetch_yahoo_data(15)
+        if df is None:
+            return jsonify({"error": "価格データ取得失敗"}), 500
+
+        results = []
+        for pos in open_positions[:3]:
+            result = gemini_monitor_position(pos, df)
+            risk = result['risk']
+            alerted = False
+            if risk in ('HIGH', 'MEDIUM'):
+                direction = pos.get('direction', '?')
+                direction_icon = "📈" if direction == 'BUY' else "📉"
+                risk_icon = "🚨" if risk == 'HIGH' else "⚠️"
+                title = f"{risk_icon} ポジション警告 [{risk}] (手動テスト)"
+                body = (
+                    f"{direction_icon} {direction} @{pos.get('entry_price')} → "
+                    f"現在{result['current_price']} 含み損益:{result['unrealized_pl']:+.2f}$ | "
+                    f"{result['reason']}"
+                )
+                send_position_alert_push(title, body)
+                alerted = True
+            results.append({
+                "trade_id": pos.get("id"),
+                "direction": pos.get("direction"),
+                "entry_price": pos.get("entry_price"),
+                "current_price": result["current_price"],
+                "unrealized_pl": result["unrealized_pl"],
+                "risk": result["risk"],
+                "action": result["action"],
+                "reason": result["reason"],
+                "alerted": alerted,
+            })
+        return jsonify({"status": "ok", "positions_checked": len(results), "results": results})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ==================== WebSocket イベント ====================
 @socketio.on("connect")
 def on_connect():
@@ -1423,5 +1633,7 @@ if __name__ == "__main__":
     load_fcm_tokens()
     t = threading.Thread(target=signal_loop, daemon=True)
     t.start()
+    t2 = threading.Thread(target=position_monitor_loop, daemon=True)
+    t2.start()
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)
