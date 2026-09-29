@@ -1677,6 +1677,151 @@ def trigger_position_monitor():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# ==================== Phase 8: 週次自己分析 ====================
+_weekly_analysis_last_monday = ""  # 最後に実行した月曜日の日付
+
+def gemini_weekly_analysis(trades, signals):
+    """過去7日間の取引データをGeminiが分析して改善提案を返す"""
+    total = len(trades)
+    if total == 0:
+        return None
+    wins   = [t for t in trades if t.get('status') == 'CLOSED_PROFIT']
+    losses = [t for t in trades if t.get('status') == 'CLOSED_LOSS']
+    total_pl   = round(sum(t.get('profit_loss') or 0 for t in trades), 2)
+    win_rate   = round(len(wins) / total * 100, 1) if total else 0
+    avg_conf   = None
+    conf_vals  = [t.get('signals', {}).get('ai_confidence') for t in trades
+                  if t.get('signals') and t['signals'].get('ai_confidence') is not None]
+    if conf_vals:
+        avg_conf = round(sum(conf_vals) / len(conf_vals), 1)
+
+    # 信頼度別勝率
+    buckets: dict = {}
+    for t in trades:
+        conf = (t.get('signals') or {}).get('ai_confidence')
+        if conf is None:
+            continue
+        b = (int(conf) // 10) * 10
+        if b not in buckets:
+            buckets[b] = {"wins": 0, "total": 0}
+        buckets[b]["total"] += 1
+        if t.get('status') == 'CLOSED_PROFIT':
+            buckets[b]["wins"] += 1
+    conf_breakdown = [
+        {"confidence": k, "win_rate": round(v["wins"]/v["total"]*100,1), "count": v["total"]}
+        for k, v in sorted(buckets.items())
+    ]
+
+    recent5 = [{"dir": t.get('direction'), "pl": round(t.get('profit_loss') or 0, 2),
+                "conf": (t.get('signals') or {}).get('ai_confidence')} for t in trades[:5]]
+
+    prompt = f"""あなたはGOLD自動売買システムの上級アナリストです。
+過去7日間の取引実績を分析し、来週に向けた改善提案をしてください。
+
+【週間実績サマリー】
+総取引数: {total}件 / 勝率: {win_rate}% ({len(wins)}勝{len(losses)}敗) / 累計損益: {total_pl:+.2f}$
+平均信頼度: {avg_conf or 'N/A'}%
+
+【信頼度別勝率】
+{json.dumps(conf_breakdown, ensure_ascii=False)}
+
+【直近5件の取引】
+{json.dumps(recent5, ensure_ascii=False)}
+
+【現在の設定】
+MIN_CONFIDENCE=50% / MIN_TRADE_INTERVAL=900秒(15分) / RISK_PERCENT=2%
+
+以下のJSON形式のみで回答してください:
+{{"summary": "週間総評（100文字以内）", "recommended_min_confidence": 推奨最低信頼度(整数0-100), "recommended_interval_minutes": 推奨最小取引間隔(分・整数), "insight": "最重要な気づき（80文字以内）", "action": "来週すべき最優先アクション（60文字以内）"}}"""
+
+    try:
+        text = _gemini_generate(prompt, max_retries=1)
+        if "```" in text:
+            text = text.split("```")[1].replace("json", "").strip()
+        result = json.loads(text)
+        return {
+            "summary": str(result.get("summary", "")),
+            "recommended_min_confidence": int(result.get("recommended_min_confidence", 50)),
+            "recommended_interval_minutes": int(result.get("recommended_interval_minutes", 15)),
+            "insight": str(result.get("insight", "")),
+            "action": str(result.get("action", "")),
+            "stats": {
+                "total": total, "wins": len(wins), "losses": len(losses),
+                "win_rate": win_rate, "total_pl": total_pl, "avg_confidence": avg_conf,
+                "conf_breakdown": conf_breakdown,
+            }
+        }
+    except Exception as e:
+        print(f"❌ Gemini週次分析エラー: {e}")
+        return None
+
+def run_weekly_analysis():
+    """週次分析を実行してFCM通知を送る"""
+    from datetime import timedelta
+    print("📊 週次自己分析 開始...")
+    try:
+        start = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={
+                "select": "direction,profit_loss,pips,status,entry_time,signals(ai_confidence)",
+                "status": "in.(CLOSED_PROFIT,CLOSED_LOSS)",
+                "entry_time": f"gte.{start}",
+                "order": "entry_time.desc",
+                "limit": "100"
+            },
+            headers=supabase_headers(), timeout=10
+        )
+        trades = resp.json() if resp.ok else []
+        signals_resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/signals",
+            params={"select": "id,crossover,ai_confidence,created_at",
+                    "created_at": f"gte.{start}", "limit": "200"},
+            headers=supabase_headers(), timeout=10
+        )
+        signals = signals_resp.json() if signals_resp.ok else []
+
+        result = gemini_weekly_analysis(trades, signals)
+        if result is None:
+            print("📊 週次分析: 取引データなし → スキップ")
+            return None
+
+        print(f"📊 週次分析完了: 勝率{result['stats']['win_rate']}% 推奨信頼度{result['recommended_min_confidence']}%")
+
+        # FCM通知
+        title = f"📊 週次レポート | 勝率{result['stats']['win_rate']}% 損益{result['stats']['total_pl']:+.2f}$"
+        body  = f"{result['summary']} | 推奨MIN_CONFIDENCE:{result['recommended_min_confidence']}% | {result['action']}"
+        send_position_alert_push(title, body)
+        return result
+    except Exception as e:
+        print(f"❌ 週次分析エラー: {e}")
+        return None
+
+def weekly_analysis_loop():
+    """毎週月曜日 9:00 JST（0:00 UTC）に週次分析を実行"""
+    global _weekly_analysis_last_monday
+    print("📅 週次分析ループ開始（月曜日 0:00 UTC に実行）")
+    while True:
+        now = datetime.now(timezone.utc)
+        today_str = now.strftime("%Y-%m-%d")
+        # 月曜日(weekday=0) かつ 当日まだ未実行
+        if now.weekday() == 0 and today_str != _weekly_analysis_last_monday:
+            _weekly_analysis_last_monday = today_str
+            run_weekly_analysis()
+        time.sleep(3600)  # 1時間ごとにチェック
+
+@app.route("/api/weekly-analysis/trigger", methods=["POST", "OPTIONS"])
+def trigger_weekly_analysis():
+    """週次分析を手動で即時実行（テスト用）"""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if request.headers.get("X-Push-Secret", "") != PUSH_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    result = run_weekly_analysis()
+    if result is None:
+        return jsonify({"status": "ok", "message": "取引データなし（分析スキップ）"})
+    return jsonify({"status": "ok", "result": result})
+
 # ==================== WebSocket イベント ====================
 @socketio.on("connect")
 def on_connect():
@@ -1693,5 +1838,7 @@ if __name__ == "__main__":
     t.start()
     t2 = threading.Thread(target=position_monitor_loop, daemon=True)
     t2.start()
+    t3 = threading.Thread(target=weekly_analysis_loop, daemon=True)
+    t3.start()
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)
