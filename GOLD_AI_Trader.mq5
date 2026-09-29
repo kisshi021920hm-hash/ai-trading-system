@@ -1,11 +1,12 @@
 //+------------------------------------------------------------------+
-//|  GOLD AI Trader EA  v1.1                                         |
+//|  GOLD AI Trader EA  v1.22                                        |
 //|  Render API + Gemini AI シグナルによる自動売買                      |
 //|  対象: XAUUSD (GOLD) M15                                         |
 //|  決済: 逆クロスでドテン（SL/TPでも決済）                             |
+//|  v1.22: MT5リアルタイム指標をサーバーにプッシュ（Yahoo Finance廃止）  |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.21"
+#property version   "1.22"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -20,6 +21,7 @@ input bool     USE_AI_SL_TP     = true;  // GeminiのSL/TP提案を使用する
 input bool     FLIP_ON_REVERSE  = true;  // 逆クロスでドテン
 input int      MIN_TRADE_INTERVAL = 900; // 最短取引間隔（秒）= 15分
 input int      MAGIC_NUMBER     = 20260929;
+input int      SIGNAL_PUSH_INTERVAL = 900; // 同方向シグナルの最小プッシュ間隔（秒）
 
 //--- グローバル変数
 int      g_last_signal_id    = -1;
@@ -27,10 +29,25 @@ datetime g_last_poll_time    = 0;
 datetime g_last_heartbeat    = 0;   // 最後にハートビートを送った時刻
 datetime g_last_trade_time   = 0;   // 最後に注文した時刻
 
+//--- 指標ハンドル（v1.22: MT5リアルタイムデータ対応）
+int      g_h_rsi    = INVALID_HANDLE;
+int      g_h_macd   = INVALID_HANDLE;
+int      g_h_ema20  = INVALID_HANDLE;
+int      g_h_ema50  = INVALID_HANDLE;
+int      g_h_ema200 = INVALID_HANDLE;
+int      g_h_bb     = INVALID_HANDLE;
+int      g_h_stoch  = INVALID_HANDLE;
+int      g_h_adx    = INVALID_HANDLE;
+int      g_h_atr    = INVALID_HANDLE;
+
+//--- シグナルプッシュ管理
+string   g_last_pushed_crossover = "";  // 最後にサーバーに送ったクロス方向
+datetime g_last_signal_push_time = 0;   // 最後に/ea-signalにPOSTした時刻
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.21 起動 ===");
+    Print("=== GOLD AI Trader EA v1.22 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
@@ -39,6 +56,24 @@ int OnInit()
           "  通貨: ", AccountInfoString(ACCOUNT_CURRENCY));
     Print("⚠️  ツール→オプション→EA→WebRequest許可URLに追加:");
     Print("   https://ai-trading-system-81jb.onrender.com");
+
+    // 指標ハンドル初期化（M15 リアルタイム）
+    g_h_rsi    = iRSI        (_Symbol, PERIOD_M15, 14, PRICE_CLOSE);
+    g_h_macd   = iMACD       (_Symbol, PERIOD_M15, 12, 26, 9, PRICE_CLOSE);
+    g_h_ema20  = iMA         (_Symbol, PERIOD_M15, 20,  0, MODE_EMA, PRICE_CLOSE);
+    g_h_ema50  = iMA         (_Symbol, PERIOD_M15, 50,  0, MODE_EMA, PRICE_CLOSE);
+    g_h_ema200 = iMA         (_Symbol, PERIOD_M15, 200, 0, MODE_EMA, PRICE_CLOSE);
+    g_h_bb     = iBands      (_Symbol, PERIOD_M15, 20,  0, 2.0, PRICE_CLOSE);
+    g_h_stoch  = iStochastic (_Symbol, PERIOD_M15, 14, 3, 3, MODE_SMA, STO_LOWHIGH);
+    g_h_adx    = iADX        (_Symbol, PERIOD_M15, 14);
+    g_h_atr    = iATR        (_Symbol, PERIOD_M15, 14);
+
+    if (g_h_rsi == INVALID_HANDLE || g_h_macd == INVALID_HANDLE ||
+        g_h_adx == INVALID_HANDLE)
+        Print("⚠️  指標ハンドル初期化失敗 - /ea-signalプッシュが無効になります");
+    else
+        Print("✓ 指標ハンドル初期化完了（MT5リアルタイムモード有効）");
+
     EventSetTimer(POLL_SECONDS);
     return INIT_SUCCEEDED;
 }
@@ -46,11 +81,200 @@ int OnInit()
 void OnDeinit(const int reason)
 {
     EventKillTimer();
+    IndicatorRelease(g_h_rsi);
+    IndicatorRelease(g_h_macd);
+    IndicatorRelease(g_h_ema20);
+    IndicatorRelease(g_h_ema50);
+    IndicatorRelease(g_h_ema200);
+    IndicatorRelease(g_h_bb);
+    IndicatorRelease(g_h_stoch);
+    IndicatorRelease(g_h_adx);
+    IndicatorRelease(g_h_atr);
     Print("GOLD AI Trader EA 停止");
 }
 
-void OnTimer() { PollAndTrade(); }
-void OnTick()  { if (TimeCurrent() - g_last_poll_time >= POLL_SECONDS) PollAndTrade(); }
+void OnTimer()
+{
+    ComputeAndPushSignal();  // MT5指標計算 → /ea-signalにプッシュ
+    PollAndTrade();
+}
+void OnTick()
+{
+    if (TimeCurrent() - g_last_poll_time >= POLL_SECONDS)
+    {
+        ComputeAndPushSignal();
+        PollAndTrade();
+    }
+}
+
+//+------------------------------------------------------------------+
+//  MT5リアルタイム指標計算 → /ea-signal プッシュ（v1.22）
+//+------------------------------------------------------------------+
+void PushSignalToServer(string crossover, double close_price,
+                        double rsi, double macd, double macd_sig,
+                        double ema20, double ema50, double ema200,
+                        double bb_upper, double bb_lower,
+                        double stoch_k, double stoch_d,
+                        double adx, double di_plus, double di_minus,
+                        double atr, int buy_score, int sell_score,
+                        string buy_reasons, string sell_reasons)
+{
+    string json = "{"
+        + "\"crossover\":\""    + crossover                          + "\""
+        + ",\"latest_close\":"  + DoubleToString(close_price, 2)
+        + ",\"rsi\":"           + DoubleToString(rsi,          2)
+        + ",\"macd\":"          + DoubleToString(macd,         4)
+        + ",\"macd_signal\":"   + DoubleToString(macd_sig,     4)
+        + ",\"ema20\":"         + DoubleToString(ema20,        2)
+        + ",\"ema50\":"         + DoubleToString(ema50,        2)
+        + ",\"ema_long\":"      + DoubleToString(ema200,       2)
+        + ",\"bb_upper\":"      + DoubleToString(bb_upper,     2)
+        + ",\"bb_lower\":"      + DoubleToString(bb_lower,     2)
+        + ",\"stoch_k\":"       + DoubleToString(stoch_k,      2)
+        + ",\"stoch_d\":"       + DoubleToString(stoch_d,      2)
+        + ",\"adx\":"           + DoubleToString(adx,          2)
+        + ",\"di_plus\":"       + DoubleToString(di_plus,      2)
+        + ",\"di_minus\":"      + DoubleToString(di_minus,     2)
+        + ",\"atr\":"           + DoubleToString(atr,          4)
+        + ",\"buy_score\":"     + IntegerToString(buy_score)
+        + ",\"sell_score\":"    + IntegerToString(sell_score)
+        + ",\"buy_reasons\":\""  + buy_reasons  + "\""
+        + ",\"sell_reasons\":\"" + sell_reasons + "\""
+        + "}";
+
+    string headers = "Content-Type: application/json\r\n";
+    char   post[], result[];
+    string res_headers;
+    StringToCharArray(json, post, 0, StringLen(json));
+
+    int status = WebRequest("POST", API_BASE + "/ea-signal", headers, 8000, post, result, res_headers);
+    if (status == 200)
+        Print("✅ /ea-signal 送信成功: ", crossover,
+              " close=", close_price, " 買い", buy_score, "点 売り", sell_score, "点");
+    else
+        Print("⚠️  /ea-signal 送信失敗: HTTP ", status, " (EAが稼働中でなければ正常)");
+}
+
+void ComputeAndPushSignal()
+{
+    if (g_h_rsi == INVALID_HANDLE || g_h_adx == INVALID_HANDLE) return;
+
+    double rsi_buf[3], macd_main[3], macd_sig[3];
+    double ema20_buf[2], ema50_buf[2], ema200_buf[2];
+    double bb_upper_buf[2], bb_lower_buf[2];
+    double stoch_k_buf[3], stoch_d_buf[3];
+    double adx_buf[2], di_plus_buf[2], di_minus_buf[2];
+    double atr_buf[2];
+
+    // 指標バッファ取得（失敗したらスキップ）
+    if (CopyBuffer(g_h_rsi,    0, 0, 3, rsi_buf)      < 3) return;
+    if (CopyBuffer(g_h_macd,   0, 0, 3, macd_main)    < 3) return;
+    if (CopyBuffer(g_h_macd,   1, 0, 3, macd_sig)     < 3) return;
+    if (CopyBuffer(g_h_ema20,  0, 0, 2, ema20_buf)    < 2) return;
+    if (CopyBuffer(g_h_ema50,  0, 0, 2, ema50_buf)    < 2) return;
+    if (CopyBuffer(g_h_ema200, 0, 0, 2, ema200_buf)   < 2) return;
+    if (CopyBuffer(g_h_bb,     0, 0, 2, bb_upper_buf) < 2) return;
+    if (CopyBuffer(g_h_bb,     1, 0, 2, bb_lower_buf) < 2) return;
+    if (CopyBuffer(g_h_stoch,  0, 0, 3, stoch_k_buf)  < 3) return;
+    if (CopyBuffer(g_h_stoch,  1, 0, 3, stoch_d_buf)  < 3) return;
+    if (CopyBuffer(g_h_adx,    0, 0, 2, adx_buf)      < 2) return;
+    if (CopyBuffer(g_h_adx,    1, 0, 2, di_plus_buf)  < 2) return;
+    if (CopyBuffer(g_h_adx,    2, 0, 2, di_minus_buf) < 2) return;
+    if (CopyBuffer(g_h_atr,    0, 0, 2, atr_buf)      < 2) return;
+
+    // 現在値（index 0 = 最新足）
+    double cur_close    = iClose(_Symbol, PERIOD_M15, 0);
+    double cur_rsi      = rsi_buf[0];
+    double cur_macd     = macd_main[0],  cur_macd_sig = macd_sig[0];
+    double prv_macd     = macd_main[1],  prv_macd_sig = macd_sig[1];
+    double cur_ema20    = ema20_buf[0],  cur_ema50    = ema50_buf[0];
+    double cur_ema200   = ema200_buf[0];
+    double cur_bb_upper = bb_upper_buf[0], cur_bb_lower = bb_lower_buf[0];
+    double cur_stoch_k  = stoch_k_buf[0], cur_stoch_d  = stoch_d_buf[0];
+    double prv_stoch_k  = stoch_k_buf[1], prv_stoch_d  = stoch_d_buf[1];
+    double cur_adx      = adx_buf[0];
+    double cur_di_plus  = di_plus_buf[0], cur_di_minus = di_minus_buf[0];
+    double cur_atr      = atr_buf[0];
+
+    // --- 7指標スコアリング（サーバーの compute_signal_composite と同一ロジック）---
+    int    buy_score = 0, sell_score = 0;
+    string buy_reasons = "", sell_reasons = "";
+
+    // 1. EMAトレンド
+    if (cur_ema20 > cur_ema50)    { buy_score++;  buy_reasons  += "短期EMA↑,"; }
+    else                          { sell_score++; sell_reasons += "短期EMA↓,"; }
+    if (cur_close > cur_ema200)   { buy_score++;  buy_reasons  += "長期EMA上方,"; }
+    else                          { sell_score++; sell_reasons += "長期EMA下方,"; }
+
+    // 2. MACD
+    if      (prv_macd < prv_macd_sig && cur_macd > cur_macd_sig)
+        { buy_score  += 2; buy_reasons  += "MACDゴールデンクロス,"; }
+    else if (prv_macd > prv_macd_sig && cur_macd < cur_macd_sig)
+        { sell_score += 2; sell_reasons += "MACDデッドクロス,"; }
+    else if (cur_macd > cur_macd_sig)
+        { buy_score++;  buy_reasons  += "MACD買い優勢,"; }
+    else
+        { sell_score++; sell_reasons += "MACD売り優勢,"; }
+
+    // 3. RSI
+    if      (cur_rsi < 30)
+        { buy_score  += 2; buy_reasons  += StringFormat("RSI売られすぎ(%.0f),", cur_rsi); }
+    else if (cur_rsi >= 40 && cur_rsi <= 65)
+        { buy_score++;  buy_reasons  += StringFormat("RSI買い圏(%.0f),", cur_rsi); }
+    if      (cur_rsi > 70)
+        { sell_score += 2; sell_reasons += StringFormat("RSI買われすぎ(%.0f),", cur_rsi); }
+    else if (cur_rsi >= 35 && cur_rsi < 60)
+        { sell_score++; sell_reasons += StringFormat("RSI売り圏(%.0f),", cur_rsi); }
+
+    // 4. Stochastic
+    if      (prv_stoch_k < prv_stoch_d && cur_stoch_k > cur_stoch_d)
+        { buy_score  += 2; buy_reasons  += StringFormat("ストキャスGC(%.0f),", cur_stoch_k); }
+    else if (prv_stoch_k > prv_stoch_d && cur_stoch_k < cur_stoch_d)
+        { sell_score += 2; sell_reasons += StringFormat("ストキャスDC(%.0f),", cur_stoch_k); }
+    else if (cur_stoch_k > cur_stoch_d)
+        { buy_score++;  buy_reasons  += "ストキャス買い優勢,"; }
+    else
+        { sell_score++; sell_reasons += "ストキャス売り優勢,"; }
+
+    // 5. ボリンジャーバンド
+    double bb_range = cur_bb_upper - cur_bb_lower;
+    if (bb_range > 0)
+    {
+        double bb_pos = (cur_close - cur_bb_lower) / bb_range;
+        if      (bb_pos < 0.25) { buy_score++;  buy_reasons  += "BB下限付近,"; }
+        else if (bb_pos > 0.75) { sell_score++; sell_reasons += "BB上限付近,"; }
+    }
+
+    // 6. ADX方向
+    if      (cur_di_plus > cur_di_minus && cur_adx > 20)
+        { buy_score++;  buy_reasons  += StringFormat("DI+優勢(ADX%.0f),", cur_adx); }
+    else if (cur_di_minus > cur_di_plus && cur_adx > 20)
+        { sell_score++; sell_reasons += StringFormat("DI-優勢(ADX%.0f),", cur_adx); }
+
+    // --- クロスオーバー判定 ---
+    int    THRESHOLD = 3;
+    string crossover = "";
+    if      (buy_score  >= THRESHOLD && buy_score  > sell_score + 1) crossover = "UP_CROSS";
+    else if (sell_score >= THRESHOLD && sell_score > buy_score  + 1) crossover = "DOWN_CROSS";
+
+    if (crossover == "") return;  // シグナルなし
+
+    // 同方向かつプッシュ間隔未満 → スキップ
+    if (crossover == g_last_pushed_crossover &&
+        TimeCurrent() - g_last_signal_push_time < SIGNAL_PUSH_INTERVAL) return;
+
+    // サーバーにプッシュ
+    PushSignalToServer(crossover, cur_close,
+                       cur_rsi, cur_macd, cur_macd_sig,
+                       cur_ema20, cur_ema50, cur_ema200,
+                       cur_bb_upper, cur_bb_lower,
+                       cur_stoch_k, cur_stoch_d,
+                       cur_adx, cur_di_plus, cur_di_minus, cur_atr,
+                       buy_score, sell_score, buy_reasons, sell_reasons);
+
+    g_last_pushed_crossover = crossover;
+    g_last_signal_push_time = TimeCurrent();
+}
 
 //+------------------------------------------------------------------+
 void SendHeartbeat()

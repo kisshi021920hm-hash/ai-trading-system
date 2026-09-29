@@ -66,6 +66,7 @@ _ea_last_heartbeat = 0.0
 _ea_last_heartbeat_str = ""
 _ea_trades: list = []  # 直近50件のEA取引レポート
 _position_monitor_last = 0.0  # ポジション監視最終実行時刻
+_last_ea_signal_time = 0.0   # EAから/ea-signalを最後に受信した時刻（signal_loopスキップ判定用）
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -670,6 +671,60 @@ ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={
         return {'valid': False, 'confidence': 0, 'reason': str(e)[:200],
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
 
+# ==================== EA リアルタイムシグナル Gemini 分析（Phase 9）====================
+def gemini_analyze_ea_signal(ea_data):
+    """EAからのMT5リアルタイム指標データをGemini分析（Yahoo Finance不要）"""
+    crossover = ea_data.get('crossover', '')
+    if not crossover:
+        return {'valid': False, 'confidence': 0, 'reason': 'シグナルなし',
+                'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
+    direction = "買い（ロング）" if crossover == "UP_CROSS" else "売り（ショート）"
+
+    # 過去取引実績をプロンプトに追加
+    stats = get_recent_trade_stats()
+    trade_context = ""
+    if stats and stats['total'] > 0:
+        trade_context = f"""
+【過去{stats['total']}件の取引実績】
+勝率: {stats['win_rate']}%（{stats['wins']}勝{stats['losses']}敗）/ 累計損益: {stats['total_pl']:+.0f}$
+直近5件: {stats['recent5']}
+※ 負けが続いている場合は特に慎重に判定してください。"""
+
+    prompt = f"""あなたはゴールド（XAUUSD）の上級テクニカルアナリストです。
+MT5のリアルタイムデータから計算された複合テクニカル指標を総合分析し、このシグナルの有効性を判定してください。
+
+【シグナル】方向: {direction} / 価格: {ea_data.get('latest_close')}
+【スコア】買い{ea_data.get('buy_score', 0)}点 vs 売り{ea_data.get('sell_score', 0)}点
+買い根拠: {ea_data.get('buy_reasons', '')}
+売り根拠: {ea_data.get('sell_reasons', '')}
+【指標（MT5リアルタイム）】
+EMA20={ea_data.get('ema20')} EMA50={ea_data.get('ema50')} EMA200={ea_data.get('ema_long')}
+RSI={ea_data.get('rsi')} MACD={ea_data.get('macd')} MACDシグナル={ea_data.get('macd_signal')}
+ストキャスK={ea_data.get('stoch_k')} D={ea_data.get('stoch_d')}
+BB上={ea_data.get('bb_upper')} BB下={ea_data.get('bb_lower')}
+ADX={ea_data.get('adx')} DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr')}{trade_context}
+
+以下のJSON形式のみで回答:
+{{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "key_level": "注目水準50文字以内"}}"""
+
+    try:
+        text = _gemini_generate(prompt)
+        if "```" in text:
+            text = text.split("```")[1].replace("json", "").strip()
+        result = json.loads(text)
+        return {
+            'valid': bool(result.get('valid', False)),
+            'confidence': int(result.get('confidence', 0)),
+            'reason': str(result.get('reason', '')),
+            'sl_suggestion': result.get('sl_suggestion'),
+            'tp_suggestion': result.get('tp_suggestion'),
+            'key_level': str(result.get('key_level', '')),
+        }
+    except Exception as e:
+        print(f"❌ Gemini EAシグナル分析エラー: {e}")
+        return {'valid': False, 'confidence': 0, 'reason': str(e)[:200],
+                'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
+
 # ==================== ポジション監視 Gemini 評価（Phase 7）====================
 def gemini_monitor_position(position, df):
     """保有ポジションの危険度をGeminiが評価する（Phase 7）"""
@@ -804,9 +859,16 @@ def save_signal_to_supabase(signal_data):
 
 # ==================== シグナルループ（24/7自動稼働）====================
 def signal_loop():
-    """Yahoo Finance からデータ取得し、時間足ごとにシグナルを計算・配信"""
+    """Yahoo Finance からデータ取得し、時間足ごとにシグナルを計算・配信
+    EA稼働中（ハートビートあり）はスキップ → EAが/ea-signalでリアルタイムプッシュ"""
     print(f"🔄 シグナルループ開始 TF={TIMEFRAME_MINUTES}m MODE={'TEST' if TEST_MODE else 'PROD'}")
     while True:
+        # EA稼働中はYahoo Finance処理をスキップ（EAがMT5リアルタイムデータをプッシュするため）
+        if _ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 90:
+            print("⏸️  EA稼働中 → Yahoo Financeシグナルループをスキップ（EAからのプッシュ待機）")
+            settings_changed.wait(timeout=TIMEFRAME_MINUTES * 60)
+            settings_changed.clear()
+            continue
         try:
             tf = TIMEFRAME_MINUTES
             df = fetch_yahoo_data(tf)
@@ -1469,6 +1531,8 @@ def get_status():
             "status": "🟢 稼働中" if ea_alive else "🔴 未接続（MT5停止の可能性）",
             "last_heartbeat_utc": _ea_last_heartbeat_str or "未受信",
             "last_heartbeat_ago_sec": round(now - _ea_last_heartbeat) if _ea_last_heartbeat else None,
+            "last_signal_push_ago_sec": round(now - _last_ea_signal_time) if _last_ea_signal_time else None,
+            "signal_loop_mode": "EA_PUSH（Yahoo Finance停止中）" if ea_alive else "Yahoo Finance（EA未接続）",
             "recent_trades": _ea_trades[-5:],
         },
         "fcm": {
@@ -1484,6 +1548,100 @@ def ea_heartbeat():
     _ea_last_heartbeat = time.time()
     _ea_last_heartbeat_str = datetime.now(timezone.utc).isoformat()
     return jsonify({"status": "ok"})
+
+# ==================== EA リアルタイムシグナル受信（Phase 9）====================
+@app.route("/ea-signal", methods=["POST", "OPTIONS"])
+def ea_signal_push():
+    """MT5 EAからリアルタイム指標データを受信 → Gemini分析 → Supabase保存 → FCM通知"""
+    global _last_ea_signal_time, _last_gemini_approved, _last_gemini_direction
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    ea_data = request.get_json()
+    if not ea_data:
+        return jsonify({"error": "No data"}), 400
+
+    crossover = ea_data.get('crossover', '')
+    if crossover not in ('UP_CROSS', 'DOWN_CROSS'):
+        return jsonify({"error": f"Invalid crossover: {crossover}"}), 400
+
+    print(f"📡 EA→サーバー シグナル受信: {crossover} "
+          f"close={ea_data.get('latest_close')} "
+          f"買い{ea_data.get('buy_score')}点 vs 売り{ea_data.get('sell_score')}点 "
+          f"ADX={ea_data.get('adx')}")
+
+    # Gemini判断（_gemini_should_callをバイパスしてEAプッシュは必ず実行）
+    ai = gemini_analyze_ea_signal(ea_data)
+    _last_gemini_approved = bool(ai.get('valid'))
+    _last_gemini_direction = crossover
+
+    # signal_dataをサーバー共通フォーマットで構築
+    comp = {
+        'buy_score':    ea_data.get('buy_score',  0),
+        'sell_score':   ea_data.get('sell_score', 0),
+        'buy_reasons':  [r for r in ea_data.get('buy_reasons',  '').split(',') if r],
+        'sell_reasons': [r for r in ea_data.get('sell_reasons', '').split(',') if r],
+        'ema20':        ea_data.get('ema20'),
+        'ema50':        ea_data.get('ema50'),
+        'ema_long':     ea_data.get('ema_long'),
+        'bb_upper':     ea_data.get('bb_upper'),
+        'bb_lower':     ea_data.get('bb_lower'),
+        'stoch_k':      ea_data.get('stoch_k'),
+        'stoch_d':      ea_data.get('stoch_d'),
+        'adx':          ea_data.get('adx'),
+        'di_plus':      ea_data.get('di_plus'),
+        'di_minus':     ea_data.get('di_minus'),
+        'atr':          ea_data.get('atr'),
+        'is_trending':  float(ea_data.get('adx', 0)) > 25,
+    }
+    signal_data = {
+        'crossover':        crossover,
+        'crossover_mode':   'COMPOSITE',
+        'rsi':              ea_data.get('rsi'),
+        'main_line':        ea_data.get('macd'),
+        'signal_line':      ea_data.get('macd_signal'),
+        'latest_close':     ea_data.get('latest_close'),
+        'time':             datetime.now(timezone.utc).isoformat(),
+        'composite':        comp,
+        'ai_valid':         ai['valid'],
+        'ai_confidence':    ai['confidence'],
+        'ai_reason':        ai['reason'],
+        'ai_sl_suggestion': ai.get('sl_suggestion'),
+        'ai_tp_suggestion': ai.get('tp_suggestion'),
+        'ai_key_level':     ai.get('key_level', ''),
+        'timeframe':        15,
+        'test_mode':        TEST_MODE,
+        'source':           'EA_PUSH',
+        'generated_at':     datetime.now(timezone.utc).isoformat(),
+    }
+
+    _last_ea_signal_time = time.time()
+
+    # Supabase保存 → db_id取得
+    db_id = save_signal_to_supabase(signal_data)
+    if db_id:
+        signal_data['db_id'] = db_id
+
+    # FCM通知（クールダウン中 = confidence=None のみスキップ）
+    if ai['confidence'] is not None:
+        send_fcm_push(signal_data)
+
+    # WebSocket配信（スマホアプリ向け）
+    socketio.emit('signal', signal_data)
+
+    print(f"✅ EAシグナル処理完了: {crossover} "
+          f"AI={'✅承認' if ai['valid'] else '❌却下'} {ai['confidence']}% "
+          f"db_id={db_id}")
+
+    return jsonify({
+        "status":           "ok",
+        "db_id":            db_id,
+        "ai_valid":         ai['valid'],
+        "ai_confidence":    ai['confidence'],
+        "ai_reason":        ai['reason'],
+        "ai_sl_suggestion": ai.get('sl_suggestion'),
+        "ai_tp_suggestion": ai.get('tp_suggestion'),
+    })
 
 @app.route("/ea-trade", methods=["POST"])
 def ea_trade_report():
