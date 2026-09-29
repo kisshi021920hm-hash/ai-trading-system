@@ -109,13 +109,15 @@ def load_fcm_tokens():
     """Firestoreから起動時にFCMトークンを復元"""
     db = _get_firestore()
     if not db:
+        print("⚠️  load_fcm_tokens: Firestoreクライアント未初期化 → スキップ")
         return
     try:
         docs = db.collection("fcm_tokens").stream()
+        before = len(fcm_tokens)
         for doc in docs:
             fcm_tokens.add(doc.id)
-        if fcm_tokens:
-            print(f"✓ FCMトークン復元: {len(fcm_tokens)}件")
+        added = len(fcm_tokens) - before
+        print(f"✓ FCMトークン復元: Firestore={added}件 / メモリ合計={len(fcm_tokens)}件")
     except Exception as e:
         print(f"⚠️  Firestoreトークン読み込みエラー: {e}")
 
@@ -1562,6 +1564,53 @@ def ea_trade_report():
         print(f"⚠️  EA取引Supabase保存エラー: {e}")
 
     return jsonify({"status": "ok"})
+
+# ==================== FCM診断・トークンリロード ====================
+@app.route("/debug/fcm", methods=["GET", "POST"])
+def debug_fcm():
+    """FCMトークンの状態診断（メモリ vs Firestore）"""
+    if request.headers.get("X-Push-Secret", "") != PUSH_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # メモリ上のトークン
+    memory_tokens = list(fcm_tokens)
+
+    # Firestoreの実データを直接確認
+    firestore_tokens = []
+    firestore_error = None
+    try:
+        db = _get_firestore()
+        if db:
+            docs = db.collection("fcm_tokens").stream()
+            for doc in docs:
+                firestore_tokens.append({
+                    "id": doc.id[:20] + "...",
+                    "data": doc.to_dict()
+                })
+        else:
+            firestore_error = "Firestoreクライアント未初期化"
+    except Exception as e:
+        firestore_error = str(e)
+
+    # POST の場合はFirestoreからリロードも実行
+    reloaded = False
+    if request.method == "POST":
+        load_fcm_tokens()
+        reloaded = True
+
+    return jsonify({
+        "fcm_enabled": FCM_ENABLED,
+        "memory": {
+            "count": len(memory_tokens),
+            "tokens": [t[:20] + "..." for t in memory_tokens],
+        },
+        "firestore": {
+            "count": len(firestore_tokens),
+            "tokens": firestore_tokens,
+            "error": firestore_error,
+        },
+        "reloaded_from_firestore": reloaded,
+    })
 
 # ==================== ポジション監視 手動トリガー（Phase 7）====================
 @app.route("/api/position-monitor/trigger", methods=["POST", "OPTIONS"])
