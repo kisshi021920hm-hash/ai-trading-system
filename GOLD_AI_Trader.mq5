@@ -6,7 +6,7 @@
 //|  v1.22: MT5リアルタイム指標をサーバーにプッシュ（Yahoo Finance廃止）  |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.22"
+#property version   "1.23"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -44,10 +44,18 @@ int      g_h_atr    = INVALID_HANDLE;
 string   g_last_pushed_crossover = "";  // 最後にサーバーに送ったクロス方向
 datetime g_last_signal_push_time = 0;   // 最後に/ea-signalにPOSTした時刻
 
+//--- 最新スコア（ハートビートでサーバーに送るためグローバル保存）
+int    g_latest_buy_score  = 0;
+int    g_latest_sell_score = 0;
+double g_latest_rsi        = 0.0;
+double g_latest_adx        = 0.0;
+double g_latest_close      = 0.0;
+string g_latest_crossover  = "なし";  // 最新のクロスオーバー方向（なし/UP_CROSS/DOWN_CROSS）
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.22 起動 ===");
+    Print("=== GOLD AI Trader EA v1.23 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
@@ -257,6 +265,26 @@ void ComputeAndPushSignal()
     if      (buy_score  >= THRESHOLD && buy_score  > sell_score + 1) crossover = "UP_CROSS";
     else if (sell_score >= THRESHOLD && sell_score > buy_score  + 1) crossover = "DOWN_CROSS";
 
+    // 最新スコアを常に保存（ハートビート経由でサーバーに送るため）
+    g_latest_buy_score  = buy_score;
+    g_latest_sell_score = sell_score;
+    g_latest_rsi        = cur_rsi;
+    g_latest_adx        = cur_adx;
+    g_latest_close      = cur_close;
+    g_latest_crossover  = (crossover != "") ? crossover : "なし";
+
+    // MT5 エキスパートログに1分ごとに表示
+    static datetime s_last_log_time = 0;
+    if (TimeCurrent() - s_last_log_time >= 60)
+    {
+        s_last_log_time = TimeCurrent();
+        Print("📊 スコア: 買い", buy_score, "点 vs 売り", sell_score, "点",
+              " | RSI=", DoubleToString(cur_rsi, 1),
+              " ADX=", DoubleToString(cur_adx, 1),
+              " close=", DoubleToString(cur_close, 2),
+              " | ", (crossover != "" ? crossover : "クロスなし"));
+    }
+
     if (crossover == "") return;  // シグナルなし
 
     // 同方向かつプッシュ間隔未満 → スキップ
@@ -281,9 +309,21 @@ void SendHeartbeat()
 {
     if (TimeCurrent() - g_last_heartbeat < 60) return;
     g_last_heartbeat = TimeCurrent();
+
+    // 最新スコアをハートビートに乗せてサーバーへ送る（v1.23）
+    string hb_json = "{"
+        + "\"buy_score\":"    + IntegerToString(g_latest_buy_score)
+        + ",\"sell_score\":"  + IntegerToString(g_latest_sell_score)
+        + ",\"rsi\":"         + DoubleToString(g_latest_rsi,   1)
+        + ",\"adx\":"         + DoubleToString(g_latest_adx,   1)
+        + ",\"close\":"       + DoubleToString(g_latest_close, 2)
+        + ",\"crossover\":\"" + g_latest_crossover + "\""
+        + "}";
+
     string hb_headers = "Content-Type: application/json\r\n";
     char   hb_post[], hb_result[];
     string hb_resp_headers;
+    StringToCharArray(hb_json, hb_post, 0, StringLen(hb_json));
     WebRequest("POST", API_BASE + "/ea-heartbeat", hb_headers, 3000, hb_post, hb_result, hb_resp_headers);
 }
 

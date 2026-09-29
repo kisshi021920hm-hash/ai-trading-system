@@ -67,6 +67,7 @@ _ea_last_heartbeat_str = ""
 _ea_trades: list = []  # 直近50件のEA取引レポート
 _position_monitor_last = 0.0  # ポジション監視最終実行時刻
 _last_ea_signal_time = 0.0   # EAから/ea-signalを最後に受信した時刻（signal_loopスキップ判定用）
+_ea_latest_scores: dict = {}  # EAから受信した最新スコア（ハートビート経由）
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -1533,6 +1534,7 @@ def get_status():
             "last_heartbeat_ago_sec": round(now - _ea_last_heartbeat) if _ea_last_heartbeat else None,
             "last_signal_push_ago_sec": round(now - _last_ea_signal_time) if _last_ea_signal_time else None,
             "signal_loop_mode": "EA_PUSH（Yahoo Finance停止中）" if ea_alive else "Yahoo Finance（EA未接続）",
+            "latest_scores": _ea_latest_scores or None,
             "recent_trades": _ea_trades[-5:],
         },
         "fcm": {
@@ -1543,10 +1545,21 @@ def get_status():
 
 @app.route("/ea-heartbeat", methods=["POST"])
 def ea_heartbeat():
-    """MT5 EAからの定期ハートビート（生存確認・1分ごと）"""
-    global _ea_last_heartbeat, _ea_last_heartbeat_str
+    """MT5 EAからの定期ハートビート（生存確認・1分ごと）+ 最新スコア受信（v1.23）"""
+    global _ea_last_heartbeat, _ea_last_heartbeat_str, _ea_latest_scores
     _ea_last_heartbeat = time.time()
     _ea_last_heartbeat_str = datetime.now(timezone.utc).isoformat()
+    data = request.get_json(silent=True)
+    if data:
+        _ea_latest_scores = {
+            "buy_score":  data.get("buy_score",  0),
+            "sell_score": data.get("sell_score", 0),
+            "rsi":        data.get("rsi",   0.0),
+            "adx":        data.get("adx",   0.0),
+            "close":      data.get("close", 0.0),
+            "crossover":  data.get("crossover", "なし"),
+            "updated_at": _ea_last_heartbeat_str,
+        }
     return jsonify({"status": "ok"})
 
 # ==================== EA リアルタイムシグナル受信（Phase 9）====================
