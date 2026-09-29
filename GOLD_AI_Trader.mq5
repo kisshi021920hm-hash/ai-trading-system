@@ -154,7 +154,7 @@ void PushSignalToServer(string crossover, double close_price,
     string res_headers;
     StringToCharArray(json, post, 0, StringLen(json));
 
-    int status = WebRequest("POST", API_BASE + "/ea-signal", headers, 8000, post, result, res_headers);
+    int status = WebRequest("POST", API_BASE + "/ea-signal", headers, 30000, post, result, res_headers);
     if (status == 200)
         Print("✅ /ea-signal 送信成功: ", crossover,
               " close=", close_price, " 買い", buy_score, "点 売り", sell_score, "点");
