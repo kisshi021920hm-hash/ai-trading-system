@@ -861,7 +861,12 @@ def save_signal_to_supabase(signal_data):
 # ==================== シグナルループ（24/7自動稼働）====================
 def signal_loop():
     """Yahoo Finance からデータ取得し、時間足ごとにシグナルを計算・配信
-    EA稼働中（ハートビートあり）はスキップ → EAが/ea-signalでリアルタイムプッシュ"""
+    EA稼働中（ハートビートあり）はスキップ → EAが/ea-signalでリアルタイムプッシュ
+    YAHOO_FINANCE_ENABLED=false の場合は完全停止（EA運用時）"""
+    yahoo_enabled = os.environ.get("YAHOO_FINANCE_ENABLED", "true").lower() == "true"
+    if not yahoo_enabled:
+        print("⏸️  YAHOO_FINANCE_ENABLED=false → Yahoo Financeシグナルループを無効化")
+        return  # スレッドを終了（コードは残したまま）
     print(f"🔄 シグナルループ開始 TF={TIMEFRAME_MINUTES}m MODE={'TEST' if TEST_MODE else 'PROD'}")
     # サーバー起動直後: EAが再接続する猶予を120秒与える（Renderデプロイ後の競合防止）
     print("⏳ 起動待機: EA接続猶予120秒（Yahoo Finance開始を遅延）")
