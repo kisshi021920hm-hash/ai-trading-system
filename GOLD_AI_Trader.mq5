@@ -5,7 +5,7 @@
 //|  決済: 逆クロスでドテン（SL/TPでも決済）                             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.20"
+#property version   "1.21"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -18,12 +18,14 @@ input double   DEFAULT_SL_USD   = 20.0;  // デフォルトSL（価格幅ドル�
 input double   DEFAULT_TP_USD   = 40.0;  // デフォルトTP（価格幅ドル）
 input bool     USE_AI_SL_TP     = true;  // GeminiのSL/TP提案を使用する
 input bool     FLIP_ON_REVERSE  = true;  // 逆クロスでドテン
+input int      MIN_TRADE_INTERVAL = 900; // 最短取引間隔（秒）= 15分
 input int      MAGIC_NUMBER     = 20260929;
 
 //--- グローバル変数
 int      g_last_signal_id    = -1;
 datetime g_last_poll_time    = 0;
 datetime g_last_heartbeat    = 0;   // 最後にハートビートを送った時刻
+datetime g_last_trade_time   = 0;   // 最後に注文した時刻
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -218,6 +220,14 @@ void ClosePositions(ENUM_POSITION_TYPE pos_type)
 //+------------------------------------------------------------------+
 void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
 {
+    //--- 最小取引間隔チェック（チョッピー相場のノイズシグナル排除）
+    if (g_last_trade_time > 0 && TimeCurrent() - g_last_trade_time < MIN_TRADE_INTERVAL)
+    {
+        int remaining = (int)(MIN_TRADE_INTERVAL - (TimeCurrent() - g_last_trade_time));
+        Print("⏳ 最小取引間隔中: あと", remaining, "秒 スキップ");
+        return;
+    }
+
     double ask    = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double bid    = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double price  = (order_type == ORDER_TYPE_BUY) ? ask : bid;
@@ -294,6 +304,7 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
         Print("✅ 注文成功: ", EnumToString(order_type),
               " price=", price, " SL=", sl, " TP=", tp,
               " ticket=", res.order);
+        g_last_trade_time = TimeCurrent();
         string dir = (order_type == ORDER_TYPE_BUY) ? "BUY" : "SELL";
         ReportTrade("ORDER", dir, price, sl, tp, lot_size, res.order);
     }
