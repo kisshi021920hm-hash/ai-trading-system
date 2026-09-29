@@ -863,9 +863,14 @@ def signal_loop():
     """Yahoo Finance からデータ取得し、時間足ごとにシグナルを計算・配信
     EA稼働中（ハートビートあり）はスキップ → EAが/ea-signalでリアルタイムプッシュ"""
     print(f"🔄 シグナルループ開始 TF={TIMEFRAME_MINUTES}m MODE={'TEST' if TEST_MODE else 'PROD'}")
+    # サーバー起動直後: EAが再接続する猶予を120秒与える（Renderデプロイ後の競合防止）
+    print("⏳ 起動待機: EA接続猶予120秒（Yahoo Finance開始を遅延）")
+    settings_changed.wait(timeout=120)
+    settings_changed.clear()
+    print("🔄 EA接続猶予終了 → シグナルループ本処理開始")
     while True:
         # EA稼働中はYahoo Finance処理をスキップ（EAがMT5リアルタイムデータをプッシュするため）
-        if _ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 90:
+        if _ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 300:
             print("⏸️  EA稼働中 → Yahoo Financeシグナルループをスキップ（EAからのプッシュ待機）")
             settings_changed.wait(timeout=TIMEFRAME_MINUTES * 60)
             settings_changed.clear()
@@ -917,7 +922,7 @@ def signal_loop():
             }
 
             # EA稼働中は保存・配信をスキップ（Yahoo Finance計算中にEAが接続した場合の対策）
-            if _ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 90:
+            if _ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 300:
                 print("⏸️  EA稼働中（保存前チェック）→ Yahoo Financeシグナルの保存・配信をスキップ")
                 settings_changed.wait(timeout=TIMEFRAME_MINUTES * 60)
                 settings_changed.clear()
