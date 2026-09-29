@@ -876,9 +876,10 @@ def set_timeframe():
     tf = int(data.get("timeframe", 30))
     if tf not in [1, 5, 15, 30, 60]:
         return jsonify({"error": f"Invalid timeframe: {tf}"}), 400
-    TIMEFRAME_MINUTES = tf
-    settings_changed.set()
-    print(f"📊 時間足変更: {tf}分足（ループ即座再開）")
+    if tf != TIMEFRAME_MINUTES:
+        TIMEFRAME_MINUTES = tf
+        settings_changed.set()
+        print(f"📊 時間足変更: {tf}分足（ループ即座再開）")
     return jsonify({"status": "ok", "timeframe": tf})
 
 @app.route("/api/settings/mode", methods=["POST", "OPTIONS"])
@@ -888,9 +889,11 @@ def set_mode():
         return jsonify({}), 200
     data = request.get_json()
     mode = data.get("mode", "PRODUCTION")
-    TEST_MODE = (mode == "TEST")
-    settings_changed.set()
-    print(f"{'🧪 TEST_MODE ON' if TEST_MODE else '🚀 PRODUCTION ON'}（ループ即座再開）")
+    new_test = (mode == "TEST")
+    if new_test != TEST_MODE:
+        TEST_MODE = new_test
+        settings_changed.set()
+        print(f"{'🧪 TEST_MODE ON' if TEST_MODE else '🚀 PRODUCTION ON'}（ループ即座再開）")
     return jsonify({"status": "ok", "mode": mode, "test_mode": TEST_MODE})
 
 @app.route("/api/settings/crossover", methods=["POST", "OPTIONS"])
@@ -902,9 +905,10 @@ def set_crossover():
     mode = data.get("crossover_mode", "RSI")
     if mode not in ["RSI", "MACD", "RSI_MACD", "COMPOSITE"]:
         return jsonify({"error": f"Invalid crossover_mode: {mode}"}), 400
-    CROSSOVER_MODE = mode
-    settings_changed.set()
-    print(f"📊 クロスオーバー方式変更: {mode}（ループ即座再開）")
+    if mode != CROSSOVER_MODE:
+        CROSSOVER_MODE = mode
+        settings_changed.set()
+        print(f"📊 クロスオーバー方式変更: {mode}（ループ即座再開）")
     return jsonify({"status": "ok", "crossover_mode": mode})
 
 @app.route("/api/settings/trading-mode", methods=["POST", "OPTIONS"])
