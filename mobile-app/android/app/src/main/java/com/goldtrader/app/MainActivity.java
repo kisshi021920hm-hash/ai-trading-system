@@ -22,13 +22,13 @@ public class MainActivity extends BridgeActivity {
 
             // 音なし・振動ありチャンネル（FCMのchannel_idと一致させる）
             NotificationChannel channel = new NotificationChannel(
-                "gold-signal-v3",
+                "gold-signal-v4",
                 "GOLDシグナル通知",
                 NotificationManager.IMPORTANCE_HIGH
             );
             channel.setDescription("GOLDトレードシグナル（音なし・振動あり）");
             channel.setSound(null, null); // 音なし
-            long[] pattern = {0, 1500, 300, 1500, 300, 1500, 300, 1500, 300, 1500};
+            long[] pattern = {0, 2000, 300, 2000, 300, 2000, 300, 2000, 300, 2000};
             channel.setVibrationPattern(pattern);
             channel.enableVibration(true);
 
