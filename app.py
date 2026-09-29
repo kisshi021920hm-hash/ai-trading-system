@@ -916,6 +916,13 @@ def signal_loop():
                 'generated_at': datetime.now(timezone.utc).isoformat()
             }
 
+            # EA稼働中は保存・配信をスキップ（Yahoo Finance計算中にEAが接続した場合の対策）
+            if _ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 90:
+                print("⏸️  EA稼働中（保存前チェック）→ Yahoo Financeシグナルの保存・配信をスキップ")
+                settings_changed.wait(timeout=TIMEFRAME_MINUTES * 60)
+                settings_changed.clear()
+                continue
+
             # Supabase保存 → db_id取得後に配信（1回のみ）
             db_id = save_signal_to_supabase(signal_data)
             if db_id:
