@@ -747,6 +747,8 @@ def send_fcm_push(signal_data):
                     notification=messaging.AndroidNotification(
                         channel_id="gold-trading",
                         notification_count=1,
+                        vibrate_timings_millis=[0, 2000, 300, 2000, 300, 2000, 300, 2000, 300, 2000],
+                        default_vibrate_timings=False,
                     ),
                 ),
                 token=token,
