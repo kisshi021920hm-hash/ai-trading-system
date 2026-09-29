@@ -616,6 +616,17 @@ def gemini_composite_analyze(df, signal):
     direction = "買い（ロング）" if signal['crossover'] == "UP_CROSS" else "売り（ショート）"
     recent = df.tail(20)[['time', 'open', 'high', 'low', 'close']].copy()
     recent['time'] = recent['time'].astype(str)
+
+    # 過去取引実績をプロンプトに追加
+    stats = get_recent_trade_stats()
+    trade_context = ""
+    if stats and stats['total'] > 0:
+        trade_context = f"""
+【過去{stats['total']}件の取引実績】
+勝率: {stats['win_rate']}%（{stats['wins']}勝{stats['losses']}敗）/ 累計損益: {stats['total_pl']:+.0f}円
+直近5件: {stats['recent5']}
+※ 負けが続いている場合は特に慎重に判定してください。"""
+
     prompt = f"""あなたはゴールド（XAUUSD）の上級テクニカルアナリストです。
 複合テクニカル指標を総合分析し、このシグナルの有効性を判定してください。
 
@@ -628,7 +639,7 @@ RSI={signal['rsi']} MACD={signal['main_line']} MACDシグナル={signal['signal_
 ストキャスK={comp.get('stoch_k')} D={comp.get('stoch_d')}
 BB上={comp.get('bb_upper')} BB下={comp.get('bb_lower')}
 ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={comp.get('atr')}
-【直近20本価格（M30）】{json.dumps(recent.to_dict(orient='records'), ensure_ascii=False)}
+【直近20本価格（M15）】{json.dumps(recent.to_dict(orient='records'), ensure_ascii=False)}{trade_context}
 
 以下のJSON形式のみで回答:
 {{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "key_level": "注目水準50文字以内"}}"""
@@ -649,6 +660,38 @@ ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={
         print(f"❌ Gemini Composite エラー: {e}")
         return {'valid': False, 'confidence': 0, 'reason': str(e)[:200],
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
+
+# ==================== 取引実績統計（Geminiプロンプト用） ====================
+def get_recent_trade_stats(limit=20):
+    """Supabaseから直近の取引結果を取得して統計を返す"""
+    try:
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={
+                "status": "neq.OPEN",
+                "order": "entry_time.desc",
+                "limit": limit,
+                "select": "direction,profit_loss,pips,status,entry_time"
+            },
+            headers=supabase_headers(),
+            timeout=5
+        )
+        if resp.status_code != 200 or not resp.json():
+            return None
+        trades = resp.json()
+        wins   = [t for t in trades if (t.get('profit_loss') or 0) > 0]
+        losses = [t for t in trades if (t.get('profit_loss') or 0) <= 0]
+        total_pl   = sum(t.get('profit_loss') or 0 for t in trades)
+        win_rate   = round(len(wins) / len(trades) * 100, 1) if trades else 0
+        recent5    = [{"dir": t.get('direction',''), "pl": round(t.get('profit_loss') or 0, 0),
+                       "pips": round(t.get('pips') or 0, 1)} for t in trades[:5]]
+        return {
+            "total": len(trades), "wins": len(wins), "losses": len(losses),
+            "win_rate": win_rate, "total_pl": round(total_pl, 0), "recent5": recent5
+        }
+    except Exception as e:
+        print(f"⚠️ 取引統計取得エラー: {e}")
+        return None
 
 # ==================== Supabase 保存 ====================
 def save_signal_to_supabase(signal_data):
