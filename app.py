@@ -1259,7 +1259,7 @@ def ea_heartbeat():
 
 @app.route("/ea-trade", methods=["POST"])
 def ea_trade_report():
-    """MT5 EAが注文・決済したとき内容をサーバーに記録"""
+    """MT5 EAが注文・決済したとき内容をサーバーに記録 + Supabase保存"""
     global _ea_trades
     data = request.get_json()
     if not data:
@@ -1273,6 +1273,73 @@ def ea_trade_report():
     price = data.get("price", "?")
     ticket = data.get("ticket", "?")
     print(f"📊 EA報告: {action} {direction} @{price} ticket={ticket}")
+
+    # Supabase に保存
+    try:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if action == "ORDER":
+            # 新規注文 → trades テーブルに INSERT
+            payload = {
+                "direction": direction,
+                "entry_price": float(price),
+                "entry_time": now_iso,
+                "status": "OPEN",
+                "auto_executed": True,
+                "sl": data.get("sl"),
+                "tp": data.get("tp"),
+                "notes": f"EA ticket={ticket} lot={data.get('lot')} balance={data.get('balance')}",
+            }
+            resp = req.post(
+                f"{SUPABASE_URL}/rest/v1/trades",
+                json=payload,
+                headers={**supabase_headers(), "Prefer": "return=representation"},
+                timeout=10
+            )
+            if resp.ok:
+                row = resp.json()
+                db_id = row[0]["id"] if row else None
+                print(f"✅ EA注文 Supabase保存完了 trade_id={db_id}")
+            else:
+                print(f"⚠️  EA注文 Supabase保存失敗: {resp.text}")
+
+        elif action == "CLOSE":
+            # 決済 → ticket でマッチする OPEN レコードを更新
+            close_dir = direction.replace("_CLOSE", "")
+            existing = req.get(
+                f"{SUPABASE_URL}/rest/v1/trades",
+                params={"status": "eq.OPEN", "direction": f"eq.{close_dir}",
+                        "order": "entry_time.desc", "limit": "1"},
+                headers=supabase_headers(), timeout=10
+            ).json()
+            if existing:
+                trade_id = existing[0]["id"]
+                entry_price = float(existing[0]["entry_price"])
+                profit_loss = round(
+                    (float(price) - entry_price) * (1 if close_dir == "BUY" else -1), 2
+                )
+                pips = round(profit_loss * 10, 1)
+                status = "CLOSED_PROFIT" if profit_loss >= 0 else "CLOSED_LOSS"
+                patch = {
+                    "exit_price": float(price),
+                    "exit_time": now_iso,
+                    "profit_loss": profit_loss,
+                    "pips": pips,
+                    "status": status,
+                    "updated_at": now_iso,
+                }
+                resp = req.patch(
+                    f"{SUPABASE_URL}/rest/v1/trades",
+                    params={"id": f"eq.{trade_id}"},
+                    json=patch,
+                    headers={**supabase_headers(), "Prefer": "return=minimal"},
+                    timeout=10
+                )
+                print(f"✅ EA決済 Supabase更新完了 trade_id={trade_id} P/L={profit_loss} ({status})")
+            else:
+                print("⚠️  EA決済: 対応するOPENトレードが見つかりません")
+    except Exception as e:
+        print(f"⚠️  EA取引Supabase保存エラー: {e}")
+
     return jsonify({"status": "ok"})
 
 # ==================== WebSocket イベント ====================
