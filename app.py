@@ -53,7 +53,8 @@ settings_changed = threading.Event()
 # Gemini API クールダウン（同じシグナルへの重複呼び出し防止）
 _last_gemini_call_time = 0.0
 _last_gemini_signal_key = ""
-GEMINI_COOLDOWN_SEC = 300  # 5分クールダウン（クォータ節約）
+_last_gemini_direction = ""   # 最後にGeminiを呼んだクロス方向
+GEMINI_COOLDOWN_SEC = 300  # 5分クールダウン（同方向の重複呼び出し防止）
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -495,18 +496,33 @@ def compute_signal(df):
 
 # ==================== Gemini ダマシ判定 ====================
 def _gemini_should_call(signal):
-    """クールダウン中 or 同一シグナルへの重複呼び出しをスキップ"""
-    global _last_gemini_call_time, _last_gemini_signal_key
+    """方向が変わった場合は必ず呼ぶ。同方向は5分クールダウン"""
+    global _last_gemini_call_time, _last_gemini_signal_key, _last_gemini_direction
     now = time.time()
-    key = f"{signal.get('crossover')}_{signal.get('latest_close')}_{signal.get('time')}"
+    direction = signal.get('crossover', '')
+    key = f"{direction}_{signal.get('latest_close')}_{signal.get('time')}"
+
+    # 同一シグナルの重複呼び出しを防ぐ
     if key == _last_gemini_signal_key:
         return False
+
+    # 方向が変わった場合は必ずGeminiを呼ぶ（クールダウン無視）
+    if direction != _last_gemini_direction and direction:
+        print(f"🔄 クロス方向変化({_last_gemini_direction}→{direction}) → Gemini強制実行")
+        _last_gemini_call_time = now
+        _last_gemini_signal_key = key
+        _last_gemini_direction = direction
+        return True
+
+    # 同方向は5分クールダウン
     if now - _last_gemini_call_time < GEMINI_COOLDOWN_SEC:
         remaining = int(GEMINI_COOLDOWN_SEC - (now - _last_gemini_call_time))
         print(f"⏳ Gemini クールダウン中 残り{remaining}秒 → スキップ")
         return False
+
     _last_gemini_call_time = now
     _last_gemini_signal_key = key
+    _last_gemini_direction = direction
     return True
 
 def _gemini_generate(prompt, max_retries=1):
