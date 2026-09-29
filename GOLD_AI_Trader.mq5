@@ -249,9 +249,15 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
     double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
     double risk_amount = balance * (RISK_PERCENT / 100.0);
     double sl_distance = MathAbs(price - sl);
-    // SYMBOL_TRADE_TICK_VALUE は口座通貨建てのため JPY/USD どちらでも正しく計算できる
     double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
     double tick_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    string currency   = AccountInfoString(ACCOUNT_CURRENCY);
+    // XM JPY口座ではSYMBOL_TRADE_TICK_VALUEがUSD建て(≈1.0)で返るためUSJPYで換算
+    if (currency == "JPY" && tick_value < 50.0)
+    {
+        double usdjpy = SymbolInfoDouble("USDJPY", SYMBOL_BID);
+        if (usdjpy > 100.0) tick_value *= usdjpy;
+    }
     double lot_size   = 0.01;
     if (sl_distance > 0.0 && tick_value > 0.0 && tick_size > 0.0)
     {
@@ -264,7 +270,6 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
     lot_size = MathMax(min_lot, MathMin(max_lot,
                    MathFloor(lot_size / lot_step) * lot_step));
     lot_size = NormalizeDouble(lot_size, 2);
-    string currency = AccountInfoString(ACCOUNT_CURRENCY);
     Print("💰 残高:", balance, currency,
           " リスク:", NormalizeDouble(risk_amount, 2), currency,
           " SL幅:", NormalizeDouble(sl_distance, 2),
