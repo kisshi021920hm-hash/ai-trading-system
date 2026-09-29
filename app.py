@@ -53,7 +53,7 @@ settings_changed = threading.Event()
 # Gemini API クールダウン（同じシグナルへの重複呼び出し防止）
 _last_gemini_call_time = 0.0
 _last_gemini_signal_key = ""
-GEMINI_COOLDOWN_SEC = 90
+GEMINI_COOLDOWN_SEC = 300  # 5分クールダウン（クォータ節約）
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -710,7 +710,12 @@ def signal_loop():
             print(f"📡 シグナル配信完了: close={signal_data['latest_close']} db_id={db_id} mode={TRADING_MODE}")
 
             if signal_data.get('crossover'):
-                send_fcm_push(signal_data)
+                # Geminiが実際に分析した場合のみFCM送信（0%クォータ通知を排除）
+                ai_conf = signal_data.get('ai_confidence')
+                ai_reason = signal_data.get('ai_reason', '')
+                gemini_ran = (ai_conf is not None and 'クールダウン' not in ai_reason and 'クォータ' not in ai_reason)
+                if gemini_ran:
+                    send_fcm_push(signal_data)
 
         except Exception as e:
             print(f"❌ シグナルループエラー: {e}")
