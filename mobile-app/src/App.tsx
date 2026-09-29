@@ -180,12 +180,12 @@ export default function App() {
     LocalNotifications.requestPermissions();
     // チャンネルIDをv2に更新（振動設定を確実に反映させるため）
     LocalNotifications.createChannel({
-      id: "gold-signal-v2",
+      id: "gold-signal-v3",
       name: "GOLDシグナル通知",
       importance: 5,
       vibration: true,
-      sound: "default",
-      description: "GOLDトレードシグナルの通知",
+      lights: true,
+      description: "GOLDトレードシグナルの通知（振動あり）",
     });
 
     const socket: Socket = io(RENDER_URL, {
