@@ -127,6 +127,7 @@ void PushSignalToServer(string crossover, double close_price,
                         double atr, int buy_score, int sell_score,
                         string buy_reasons, string sell_reasons)
 {
+    // buy_reasons/sell_reasons は日本語のためJSON送信から除外（スコアと数値指標で代替）
     string json = "{"
         + "\"crossover\":\""    + crossover                          + "\""
         + ",\"latest_close\":"  + DoubleToString(close_price, 2)
@@ -146,8 +147,6 @@ void PushSignalToServer(string crossover, double close_price,
         + ",\"atr\":"           + DoubleToString(atr,          4)
         + ",\"buy_score\":"     + IntegerToString(buy_score)
         + ",\"sell_score\":"    + IntegerToString(sell_score)
-        + ",\"buy_reasons\":\""  + buy_reasons  + "\""
-        + ",\"sell_reasons\":\"" + sell_reasons + "\""
         + "}";
 
     string headers = "Content-Type: application/json\r\n";
