@@ -201,10 +201,11 @@ export default function App() {
 
     socket.on("connect", async () => {
       setConnected(true);
+      // FCMトークンを先に登録してから設定送信（競合防止）
       try {
         const savedFcmToken = localStorage.getItem("gt_fcm_token");
         if (savedFcmToken) {
-          fetch(`${RENDER_URL}/register-token`, {
+          await fetch(`${RENDER_URL}/register-token`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ token: savedFcmToken }),

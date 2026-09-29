@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 import google.generativeai as genai
 import firebase_admin
-from firebase_admin import credentials, messaging
+from firebase_admin import credentials, messaging, firestore as fb_firestore
 
 # ==================== 環境変数 ====================
 GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
@@ -80,8 +80,55 @@ else:
     FCM_ENABLED = False
     print("⚠️  FIREBASE_SERVICE_ACCOUNT_JSON 未設定 → FCMプッシュ無効")
 
-# FCMトークン一覧（メモリ保持）
+# FCMトークン一覧（メモリ + Firestore永続化）
 fcm_tokens: set[str] = set()
+_firestore_db = None
+
+def _get_firestore():
+    global _firestore_db
+    if _firestore_db is None and FCM_ENABLED:
+        try:
+            _firestore_db = fb_firestore.client()
+        except Exception as e:
+            print(f"⚠️  Firestore初期化エラー: {e}")
+    return _firestore_db
+
+def load_fcm_tokens():
+    """Firestoreから起動時にFCMトークンを復元"""
+    db = _get_firestore()
+    if not db:
+        return
+    try:
+        docs = db.collection("fcm_tokens").stream()
+        for doc in docs:
+            fcm_tokens.add(doc.id)
+        if fcm_tokens:
+            print(f"✓ FCMトークン復元: {len(fcm_tokens)}件")
+    except Exception as e:
+        print(f"⚠️  Firestoreトークン読み込みエラー: {e}")
+
+def persist_fcm_token(token: str):
+    """FCMトークンをFirestoreに保存"""
+    db = _get_firestore()
+    if not db:
+        return
+    try:
+        db.collection("fcm_tokens").document(token).set(
+            {"updated_at": datetime.now(timezone.utc).isoformat()},
+            merge=True
+        )
+    except Exception as e:
+        print(f"⚠️  Firestoreトークン保存エラー: {e}")
+
+def delete_fcm_token(token: str):
+    """無効なFCMトークンをFirestoreから削除"""
+    db = _get_firestore()
+    if not db:
+        return
+    try:
+        db.collection("fcm_tokens").document(token).delete()
+    except Exception as e:
+        print(f"⚠️  Firestoreトークン削除エラー: {e}")
 
 def supabase_headers():
     return {
@@ -713,6 +760,8 @@ def send_fcm_push(signal_data):
             if "registration-token-not-registered" in str(e) or "invalid-argument" in str(e):
                 invalid_tokens.add(token)
     fcm_tokens.difference_update(invalid_tokens)
+    for t in invalid_tokens:
+        delete_fcm_token(t)
     return results
 
 # ==================== REST エンドポイント ====================
@@ -756,6 +805,7 @@ def register_token():
     if not token:
         return jsonify({"error": "No token"}), 400
     fcm_tokens.add(token)
+    persist_fcm_token(token)
     print(f"📱 FCMトークン登録: {token[:20]}... (合計: {len(fcm_tokens)}台)")
     return jsonify({"status": "ok"})
 
@@ -1122,6 +1172,7 @@ def on_disconnect():
 
 # ==================== 起動 ====================
 if __name__ == "__main__":
+    load_fcm_tokens()
     t = threading.Thread(target=signal_loop, daemon=True)
     t.start()
     port = int(os.environ.get("PORT", 5000))
