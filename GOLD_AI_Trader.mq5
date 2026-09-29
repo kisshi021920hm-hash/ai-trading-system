@@ -124,7 +124,9 @@ void PollAndTrade()
         Print("⛔ AI非承認スキップ");
         return;
     }
-    if (confidence < MIN_CONFIDENCE)
+    // Geminiが実際に動いた場合(confidence>=0)のみ信頼度チェック
+    // クールダウン中(confidence=-1)はREQUIRE_AI_VALIDに従う
+    if (confidence >= 0 && confidence < MIN_CONFIDENCE)
     {
         Print("⛔ 信頼度不足: ", confidence, "% < ", MIN_CONFIDENCE, "%");
         return;
