@@ -50,7 +50,7 @@ int    g_latest_sell_score = 0;
 double g_latest_rsi        = 0.0;
 double g_latest_adx        = 0.0;
 double g_latest_close      = 0.0;
-string g_latest_crossover  = "なし";  // 最新のクロスオーバー方向（なし/UP_CROSS/DOWN_CROSS）
+string g_latest_crossover  = "NONE";  // 最新のクロスオーバー方向（NONE/UP_CROSS/DOWN_CROSS）
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -271,7 +271,7 @@ void ComputeAndPushSignal()
     g_latest_rsi        = cur_rsi;
     g_latest_adx        = cur_adx;
     g_latest_close      = cur_close;
-    g_latest_crossover  = (crossover != "") ? crossover : "なし";
+    g_latest_crossover  = (crossover != "") ? crossover : "NONE";
 
     // MT5 エキスパートログに1分ごとに表示
     static datetime s_last_log_time = 0;

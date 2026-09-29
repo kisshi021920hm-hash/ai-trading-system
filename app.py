@@ -1557,7 +1557,7 @@ def ea_heartbeat():
             "rsi":        data.get("rsi",   0.0),
             "adx":        data.get("adx",   0.0),
             "close":      data.get("close", 0.0),
-            "crossover":  data.get("crossover", "なし"),
+            "crossover":  data.get("crossover", "NONE"),
             "updated_at": _ea_last_heartbeat_str,
         }
     return jsonify({"status": "ok"})
