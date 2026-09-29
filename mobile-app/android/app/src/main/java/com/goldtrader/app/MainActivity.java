@@ -28,7 +28,7 @@ public class MainActivity extends BridgeActivity {
             );
             channel.setDescription("GOLDトレードシグナル（音なし・振動あり）");
             channel.setSound(null, null); // 音なし
-            long[] pattern = {0, 800, 200, 800, 200, 800};
+            long[] pattern = {0, 1500, 300, 1500, 300, 1500, 300, 1500, 300, 1500};
             channel.setVibrationPattern(pattern);
             channel.enableVibration(true);
 

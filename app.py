@@ -685,7 +685,7 @@ def send_fcm_push(signal_data):
                         channel_id="gold-signal-v3",
                         notification_count=1,
                         default_vibrate_timings=False,
-                        vibrate_timings_millis=[0, 800, 200, 800, 200, 800],
+                        vibrate_timings_millis=[0, 1500, 300, 1500, 300, 1500, 300, 1500, 300, 1500],
                     ),
                 ),
                 token=token,
