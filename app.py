@@ -41,8 +41,14 @@ TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
 CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI", "MACD", "RSI_MACD", "COMPOSITE"
 
 # トレード自動化設定
-TRADING_MODE = os.environ.get("TRADING_MODE", "MANUAL")  # MANUAL / SEMI_AUTO / FULL_AUTO
+# MANUAL: スマホのみ配信（ユーザー判断）
+# SEMI_AUTO: スマホのボタンで MT5 注文
+# FULL_AUTO: Gemini 信頼度で自動エントリー（レガシー）
+# AI_CLOSE_MODE: エントリーは信頼度判定 + ポジション監視で決済判定を実行
+TRADING_MODE = os.environ.get("TRADING_MODE", "MANUAL")
 AUTO_CONFIDENCE_THRESHOLD = int(os.environ.get("AUTO_CONFIDENCE_THRESHOLD", "70"))
+ENTRY_CONFIDENCE_THRESHOLD = int(os.environ.get("ENTRY_CONFIDENCE_THRESHOLD", "60"))
+CLOSE_CONFIDENCE_THRESHOLD = int(os.environ.get("CLOSE_CONFIDENCE_THRESHOLD", "70"))
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "goldtrader_webhook_2026")
 MT5_WEBHOOK_URL = os.environ.get("MT5_WEBHOOK_URL", "")
 MT5_WEBHOOK_TIMEOUT = 5
@@ -227,21 +233,35 @@ def send_mt5_order(signal_id, direction, entry_price, sl_pips=20, tp_pips=40):
         return {"success": False, "error": str(e)}
 
 def check_auto_execution(signal_data):
-    """FULL_AUTO モード時に信頼度を確認して自動実行判定"""
-    if TRADING_MODE != "FULL_AUTO":
-        return {"should_execute": False, "reason": f"モード={TRADING_MODE}（FULL_AUTOのみ自動実行）"}
+    """
+    FULL_AUTO / AI_CLOSE_MODE 時に信頼度を確認して自動実行判定
+    ❌ダマシシグナル（ai_valid=False）は絶対に実行しない
+    """
+    if TRADING_MODE not in ["FULL_AUTO", "AI_CLOSE_MODE"]:
+        return {"should_execute": False, "reason": f"モード={TRADING_MODE}（自動実行対象外）"}
     if not signal_data.get("crossover"):
         return {"should_execute": False, "reason": "クロスオーバーなし"}
+
+    # ❌ ダマシシグナルは絶対に実行しない
     if not signal_data.get("ai_valid"):
-        return {"should_execute": False, "reason": "AI判定=ダマシ"}
-    conf = signal_data.get("ai_confidence") or 0
-    if conf < AUTO_CONFIDENCE_THRESHOLD:
-        return {"should_execute": False, "reason": f"信頼度{conf}% < 閾値{AUTO_CONFIDENCE_THRESHOLD}%"}
+        print(f"🛑 ダマシシグナル検出: ai_valid=False → 自動実行禁止")
+        return {"should_execute": False, "reason": "AI判定=ダマシ（自動実行禁止）"}
+
+    conf = signal_data.get("ai_confidence")
+    if conf is None:
+        return {"should_execute": False, "reason": "信頼度なし（クールダウン中）"}
+
+    # 信頼度が低すぎる場合は実行しない
+    threshold = ENTRY_CONFIDENCE_THRESHOLD if TRADING_MODE == "AI_CLOSE_MODE" else AUTO_CONFIDENCE_THRESHOLD
+    if conf < threshold:
+        print(f"⚠️ 信頼度不足: {conf}% < 閾値{threshold}%（実行禁止）")
+        return {"should_execute": False, "reason": f"信頼度{conf}% < 閾値{threshold}%"}
+
     direction = "BUY" if signal_data["crossover"] == "UP_CROSS" else "SELL"
     return {
         "should_execute": True,
         "direction": direction,
-        "reason": f"信頼度{conf}% ≥ 閾値{AUTO_CONFIDENCE_THRESHOLD}% → 自動実行"
+        "reason": f"信頼度{conf}% ≥ 閾値{threshold}% → 自動実行"
     }
 
 # ==================== RSI 計算 ====================
@@ -742,6 +762,81 @@ ADX={ea_data.get('adx')} DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus
         return {'valid': False, 'confidence': 0, 'reason': err_str[:200],
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
 
+# ==================== ポジション決済判定 Gemini 分析（AI_CLOSE_MODE用）====================
+def gemini_position_close_decision(position, current_scores):
+    """
+    OPEN ポジションの決済判定を Gemini で実施（AI_CLOSE_MODE 専用）
+
+    Args:
+        position: Supabase trades テーブルの OPEN ポジション
+        current_scores: 最新の EA スコア {buy_score, sell_score, adx, rsi, ...}
+
+    Returns:
+        {
+            "should_close": bool,
+            "confidence": 0-100,  # 決済信頼度
+            "reason": str
+        }
+    """
+    direction = position.get('direction', 'BUY')
+    entry_price = float(position.get('entry_price', 0))
+    direction_ja = "買いポジション（ロング）" if direction == 'BUY' else "売りポジション（ショート）"
+
+    prompt = f"""あなたはゴールド（XAUUSD）の上級テクニカルアナリストです。
+保有中のポジションについて、今このタイミングで決済（損切・利確）すべきかを判定してください。
+
+【保有ポジション】
+方向: {direction_ja}
+エントリー価格: {entry_price}
+
+【最新テクニカル指標】
+買いスコア: {current_scores.get('buy_score', 0)}点
+売りスコア: {current_scores.get('sell_score', 0)}点
+ADX: {current_scores.get('adx', 0):.1f}（トレンド強度）
+RSI: {current_scores.get('rsi', 50):.1f}（過買売）
+現在価格: {current_scores.get('close', entry_price):.2f}
+
+【判定基準】
+- {direction_ja}を持っている
+- 「決済すべき」と判定する場合は以下のいずれかに該当:
+  1. 逆方向のスコアが圧倒的に高い（例: BUY持ちなのに売りスコア≥5）
+  2. ADX が極端に低下した（トレンド終了の可能性）
+  3. RSI が極端な過買売状態（RSI≥85 or RSI≤15）
+
+【JSON回答形式（以下のみ）】
+{{"should_close": true/false, "confidence": 0-100, "reason": "50文字以内"}}
+
+決済信頼度:
+- 100: 即座に決済すべき（逆方向がきわめて強い）
+- 70-90: 決済を強く推奨（シグナルが反転）
+- 50-69: 決済を検討（リスク警告）
+- 30-49: 監視継続推奨（まだホールド）
+- 0-29: 継続保有推奨（トレンド継続）
+"""
+
+    try:
+        text = _gemini_generate(prompt, max_retries=1)
+        if "```" in text:
+            text = text.split("```")[1].replace("json", "").strip()
+        result = json.loads(text)
+        should_close = bool(result.get('should_close', False))
+        confidence = int(result.get('confidence', 0))
+        reason = str(result.get('reason', ''))
+
+        print(f"🔍 決済判定: {direction}ポジション → {'🔴決済' if should_close else '🟢保持'} (信頼度{confidence}%)")
+        return {
+            'should_close': should_close,
+            'confidence': confidence,
+            'reason': reason,
+        }
+    except Exception as e:
+        err_str = str(e)
+        print(f"⚠️ Gemini決済判定エラー: {err_str[:100]}")
+        is_quota = "クォータ制限中" in err_str or "429" in err_str or "quota" in err_str.lower()
+        if is_quota:
+            return {'should_close': False, 'confidence': None, 'reason': 'Geminiクォータ制限中'}
+        return {'should_close': False, 'confidence': 0, 'reason': f'判定エラー: {err_str[:80]}'}
+
 # ==================== ポジション監視 Gemini 評価（Phase 7）====================
 def gemini_monitor_position(position, df):
     """保有ポジションの危険度をGeminiが評価する（Phase 7）"""
@@ -938,12 +1033,91 @@ def save_status_log(status_data):
         print(f"⚠️  Status log save error: {e}")
         return False
 
+def position_monitor_loop():
+    """
+    AI_CLOSE_MODE 用: ポジション監視＆決済判定ループ
+    15分ごと（ローソク足確定時）に OPEN ポジションを監視して Gemini で決済判定
+    """
+    global _position_monitor_last
+    print("🔄 ポジション監視ループ開始（AI_CLOSE_MODE用）")
+
+    while True:
+        try:
+            if TRADING_MODE != "AI_CLOSE_MODE":
+                settings_changed.wait(timeout=60)
+                settings_changed.clear()
+                continue
+
+            now = time.time()
+            if now - _position_monitor_last < 900:  # 15分（900秒）未満ならスキップ
+                settings_changed.wait(timeout=60)
+                settings_changed.clear()
+                continue
+
+            _position_monitor_last = now
+
+            # OPEN ポジション取得
+            resp = req.get(
+                f"{SUPABASE_URL}/rest/v1/trades",
+                params={"status": "eq.OPEN"},
+                headers=supabase_headers(),
+                timeout=10
+            )
+            open_positions = resp.json() if resp.ok else []
+
+            if not open_positions:
+                print("✅ OPEN ポジションなし")
+                settings_changed.wait(timeout=60)
+                settings_changed.clear()
+                continue
+
+            print(f"📊 ポジション監視: {len(open_positions)}件の OPEN ポジション")
+
+            # 各ポジションに対して決済判定を実施
+            for pos in open_positions:
+                if not _ea_latest_scores:
+                    print("⏳ 最新スコア待機中...")
+                    continue
+
+                # Gemini で決済判定
+                close_decision = gemini_position_close_decision(pos, _ea_latest_scores)
+
+                # 決済信頼度が閾値以上なら自動決済
+                if close_decision['should_close'] and close_decision['confidence'] is not None:
+                    if close_decision['confidence'] >= CLOSE_CONFIDENCE_THRESHOLD:
+                        print(f"🔴 決済実行: ポジションID={pos.get('id')} "
+                              f"信頼度={close_decision['confidence']}%")
+                        # Supabase で status を CLOSED に更新
+                        req.patch(
+                            f"{SUPABASE_URL}/rest/v1/trades",
+                            params={"id": f"eq.{pos.get('id')}"},
+                            json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
+                            headers={**supabase_headers(), "Prefer": "return=minimal"},
+                            timeout=10
+                        )
+                    else:
+                        print(f"⚠️ 監視継続: ポジションID={pos.get('id')} "
+                              f"信頼度={close_decision['confidence']}%（閾値{CLOSE_CONFIDENCE_THRESHOLD}%未満）")
+
+            settings_changed.wait(timeout=60)
+            settings_changed.clear()
+
+        except Exception as e:
+            print(f"❌ ポジション監視エラー: {e}")
+            settings_changed.wait(timeout=60)
+            settings_changed.clear()
+
 def start_background_jobs():
     """バックグラウンドジョブ開始"""
     global _status_log_thread
     _status_log_thread = threading.Thread(target=status_logging_loop, daemon=True)
     _status_log_thread.start()
     print("✅ Status logging thread started")
+
+    # AI_CLOSE_MODE 用ポジション監視ループ
+    position_monitor_thread = threading.Thread(target=position_monitor_loop, daemon=True)
+    position_monitor_thread.start()
+    print("✅ Position monitor thread started")
 
 # ==================== Status Dashboard API ====================
 @app.route("/api/status-logs/latest", methods=["GET"])
@@ -1307,11 +1481,22 @@ def set_trading_mode():
         return jsonify({}), 200
     data = request.get_json()
     mode = data.get("trading_mode", "MANUAL")
-    if mode not in ["MANUAL", "SEMI_AUTO", "FULL_AUTO"]:
-        return jsonify({"error": f"Invalid trading_mode: {mode}"}), 400
+    valid_modes = ["MANUAL", "SEMI_AUTO", "FULL_AUTO", "AI_CLOSE_MODE"]
+    if mode not in valid_modes:
+        return jsonify({"error": f"Invalid trading_mode: {mode}. Valid: {valid_modes}"}), 400
     TRADING_MODE = mode
     print(f"🔄 トレードモード変更: {mode}")
-    return jsonify({"status": "ok", "trading_mode": mode})
+    settings_changed.set()  # signal_loop の即座再開を通知
+    return jsonify({
+        "status": "ok",
+        "trading_mode": mode,
+        "description": {
+            "MANUAL": "シグナル配信のみ（ユーザーが手動判断）",
+            "SEMI_AUTO": "シグナル配信 + スマホボタンで注文",
+            "FULL_AUTO": "Gemini信頼度で自動エントリー",
+            "AI_CLOSE_MODE": "信頼度でエントリー + 定期監視で決済判定"
+        }.get(mode, "")
+    })
 
 @app.route("/api/settings/auto-threshold", methods=["POST", "OPTIONS"])
 def set_auto_threshold():
@@ -1712,11 +1897,18 @@ def ea_signal_push():
     print(f"📡 EA→サーバー シグナル受信: {crossover} "
           f"close={ea_data.get('latest_close')} "
           f"買い{ea_data.get('buy_score')}点 vs 売り{ea_data.get('sell_score')}点 "
-          f"ADX={ea_data.get('adx')}")
+          f"ADX={ea_data.get('adx')} mode={TRADING_MODE}")
 
-    # Gemini判断（_gemini_should_callをバイパスしてEAプッシュは必ず実行）
-    ai = gemini_analyze_ea_signal(ea_data)
-    _last_gemini_approved = bool(ai.get('valid'))
+    # TRADING_MODE に応じた Gemini 呼び出し判定
+    if TRADING_MODE in ["MANUAL", "SEMI_AUTO"]:
+        # 手動・半自動モード: Gemini 分析スキップ（ユーザー判断に委ねる）
+        print(f"⏭️ {TRADING_MODE}モード: Gemini分析スキップ（ユーザー判断）")
+        ai = {"valid": None, "confidence": None, "reason": f"{TRADING_MODE}モード"}
+        _last_gemini_approved = False
+    else:
+        # FULL_AUTO / AI_CLOSE_MODE: Gemini分析実行
+        ai = gemini_analyze_ea_signal(ea_data)
+        _last_gemini_approved = bool(ai.get('valid'))
     _last_gemini_direction = crossover
 
     # ② デモ用ルールベースエントリー（DEMO_RULE_BASED=true かつ Geminiクォータ時）

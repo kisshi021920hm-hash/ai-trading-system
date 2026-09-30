@@ -112,7 +112,7 @@ export default function App() {
   const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD" | "RSI_MACD" | "COMPOSITE">(() => {
     try { return (localStorage.getItem("gt_crossover") as any) ?? "RSI"; } catch { return "RSI"; }
   });
-  const [tradingMode, setTradingMode] = useState<"MANUAL" | "SEMI_AUTO" | "FULL_AUTO">(() => {
+  const [tradingMode, setTradingMode] = useState<"MANUAL" | "SEMI_AUTO" | "FULL_AUTO" | "AI_CLOSE_MODE">(() => {
     try { return (localStorage.getItem("gt_trading_mode") as any) ?? "MANUAL"; } catch { return "MANUAL"; }
   });
   const [autoThreshold, setAutoThreshold] = useState<number>(() => {
@@ -823,6 +823,10 @@ export default function App() {
                   <input type="radio" name="tmode2" checked={tradingMode === "FULL_AUTO"} onChange={() => setTradingMode("FULL_AUTO")} />
                   <span>🟢 全自動（信頼度で自動実行）</span>
                 </label>
+                <label style={styles.radioLabel}>
+                  <input type="radio" name="tmode2" checked={tradingMode === "AI_CLOSE_MODE"} onChange={() => setTradingMode("AI_CLOSE_MODE")} />
+                  <span>🔷 AI決済判定（エントリー+定期監視決済）</span>
+                </label>
               </div>
               {tradingMode === "FULL_AUTO" && (
                 <div style={{ marginTop: 10 }}>
@@ -833,6 +837,13 @@ export default function App() {
                   <div style={{ fontSize: 11, color: "#fca5a5", marginTop: 6 }}>
                     ⚠️ MT5 Webhookサーバー起動が必要です
                   </div>
+                </div>
+              )}
+              {tradingMode === "AI_CLOSE_MODE" && (
+                <div style={{ marginTop: 10, padding: "8px 12px", background: "#1e3a8a", borderRadius: 6, fontSize: 12, color: "#93c5fd" }}>
+                  ✨ <b>エントリー信頼度 60%</b> で自動エントリー<br/>
+                  ✨ <b>15分ごと監視</b>、決済信頼度 70% で自動決済<br/>
+                  ✨ ドテン廃止、決済ベースの安定運用
                 </div>
               )}
             </div>
