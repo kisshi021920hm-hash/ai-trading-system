@@ -132,7 +132,7 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             {latest.gemini_last_direction || "なし"}
           </p>
           <p style={{ margin: "6px 0 0 0", fontSize: "10px", color: "#000", fontWeight: "bold" }}>
-            🤖 {latest.gemini_model}
+            🤖 {latest.gemini_model || "モデル取得中..."}
           </p>
           {latest.gemini_model_fallback_count > 0 && (
             <p style={{ margin: "2px 0 0 0", fontSize: "10px", color: "#c41e3a" }}>
