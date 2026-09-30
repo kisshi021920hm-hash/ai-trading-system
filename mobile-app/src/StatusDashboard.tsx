@@ -102,12 +102,12 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             borderLeft: `4px solid ${latest.ea_alive ? "#28a745" : "#c41e3a"}`,
           }}
         >
-          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#666" }}>EA稼働</p>
-          <p style={{ margin: "0", fontSize: "18px", fontWeight: "bold" }}>
+          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#000" }}>EA稼働</p>
+          <p style={{ margin: "0", fontSize: "18px", fontWeight: "bold", color: "#000" }}>
             {latest.ea_alive ? "🟢 稼働中" : "🔴 停止"}
           </p>
           {latest.ea_last_heartbeat_ago_sec !== null && (
-            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#666" }}>
+            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#000" }}>
               {latest.ea_last_heartbeat_ago_sec}秒前
             </p>
           )}
@@ -122,11 +122,11 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             borderLeft: `4px solid ${latest.gemini_approved ? "#28a745" : "#ffc107"}`,
           }}
         >
-          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#666" }}>Gemini</p>
-          <p style={{ margin: "0", fontSize: "16px", fontWeight: "bold" }}>
+          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#000" }}>Gemini</p>
+          <p style={{ margin: "0", fontSize: "16px", fontWeight: "bold", color: "#000" }}>
             {latest.gemini_approved ? "✅ 承認済み" : "⏳ 待機中"}
           </p>
-          <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#666" }}>
+          <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#000" }}>
             {latest.gemini_last_direction || "なし"}
           </p>
         </div>
@@ -140,11 +140,11 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             borderLeft: "4px solid #0066cc",
           }}
         >
-          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#666" }}>最新スコア</p>
-          <p style={{ margin: "0", fontSize: "14px", fontWeight: "bold" }}>
+          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#000" }}>最新スコア</p>
+          <p style={{ margin: "0", fontSize: "14px", fontWeight: "bold", color: "#000" }}>
             買:{latest.ea_buy_score ?? "-"} / 売:{latest.ea_sell_score ?? "-"}
           </p>
-          <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#666" }}>
+          <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#000" }}>
             ADX: {latest.ea_adx ? latest.ea_adx.toFixed(1) : "-"}
           </p>
         </div>
@@ -158,11 +158,11 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             borderLeft: "4px solid #6c5ce7",
           }}
         >
-          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#666" }}>FCM登録</p>
-          <p style={{ margin: "0", fontSize: "18px", fontWeight: "bold" }}>
+          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#000" }}>FCM登録</p>
+          <p style={{ margin: "0", fontSize: "18px", fontWeight: "bold", color: "#000" }}>
             {latest.fcm_token_count}台
           </p>
-          <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#666" }}>
+          <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#000" }}>
             接続済みデバイス
           </p>
         </div>
@@ -176,8 +176,8 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             borderLeft: "4px solid #009688",
           }}
         >
-          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#666" }}>稼働時間</p>
-          <p style={{ margin: "0", fontSize: "16px", fontWeight: "bold" }}>
+          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#000" }}>稼働時間</p>
+          <p style={{ margin: "0", fontSize: "16px", fontWeight: "bold", color: "#000" }}>
             {latest.server_uptime_hours.toFixed(1)}時間
           </p>
         </div>
@@ -191,8 +191,8 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             borderLeft: `4px solid ${latest.today_total_pips >= 0 ? "#28a745" : "#c41e3a"}`,
           }}
         >
-          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#666" }}>本日Pips</p>
-          <p style={{ margin: "0", fontSize: "18px", fontWeight: "bold" }}>
+          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#000" }}>本日Pips</p>
+          <p style={{ margin: "0", fontSize: "18px", fontWeight: "bold", color: "#000" }}>
             {latest.today_total_pips >= 0 ? "+" : ""}{latest.today_total_pips.toFixed(1)}
           </p>
         </div>
