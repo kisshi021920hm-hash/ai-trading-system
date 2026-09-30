@@ -514,8 +514,7 @@ void TrailingStopUpdate()
 
         // トレーリング条件：含み益 $15以上 かつ ADX > 25（トレンド環境）
         // v1.25改: レンジ相場でのムダな決済を防止
-        double cur_adx = _ea_latest_scores.adx;  // ハートビートから ADX 取得
-        if (unrealized_profit > trailing_profit_threshold && cur_adx > adx_trend_threshold)
+        if (unrealized_profit > trailing_profit_threshold && g_latest_adx > adx_trend_threshold)
         {
             double new_sl = 0;
             if (pos_type == POSITION_TYPE_BUY)
