@@ -85,13 +85,22 @@ DEMO_RULE_MIN_ADX   = float(os.environ.get("DEMO_RULE_MIN_ADX", "20.0"))  # ル�
 STATUS_LOG_INTERVAL = 300  # 5分ごと
 _status_log_thread = None
 
+# ==================== Gemini モデルプール（フォールバック対応）====================
+GEMINI_MODELS = [
+    "gemini-3.8-flash",        # RPM: 5（第1選択肢）
+    "gemini-3.5-flash-lite",   # RPM: 15（フォールバック1）
+    "gemini-3.1-flash-lite",   # RPM: 15（フォールバック2）
+]
+_current_gemini_model_index = 0  # 現在使用中のモデルインデックス
+_gemini_model_fallback_count = 0  # フォールバック実行回数（監視用）
+
 # ==================== 初期化 ====================
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "goldtrader_secret")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 genai.configure(api_key=GEMINI_API_KEY)
-gemini_model = genai.GenerativeModel("gemini-3.8-flash")
+gemini_model = genai.GenerativeModel(GEMINI_MODELS[_current_gemini_model_index])
 
 @app.after_request
 def add_cors(response):
@@ -597,22 +606,53 @@ def _gemini_should_call(signal):
     return True
 
 def _gemini_generate(prompt, max_retries=1):
-    """429クォータエラー時にリトライするGemini呼び出しラッパー"""
-    for attempt in range(max_retries + 1):
-        try:
-            return gemini_model.generate_content(prompt).text.strip()
-        except Exception as e:
-            err = str(e)
-            is_quota = "429" in err or "quota" in err.lower() or "Resource has been exhausted" in err
-            if is_quota and attempt < max_retries:
-                wait = 15 * (attempt + 1)
-                print(f"⏳ Gemini 429クォータ制限 → {wait}秒後リトライ ({attempt+1}/{max_retries})")
-                time.sleep(wait)
-                continue
-            if is_quota:
-                print(f"❌ Gemini クォータ超過（リトライ限界）: {e}")
-                raise Exception("クォータ制限中 - 数分後に自動回復します")
-            raise
+    """
+    Gemini API の RPM 制限対応（自動フォールバック）
+    - 429 エラーが出たら、別のモデルに自動切り替え
+    - すべてのモデルを試してからエラー返却
+    """
+    global _current_gemini_model_index, _gemini_model_fallback_count, gemini_model
+
+    # 全モデルをループして試す
+    models_attempted = 0
+
+    while models_attempted < len(GEMINI_MODELS):
+        for attempt in range(max_retries + 1):
+            try:
+                current_model_name = GEMINI_MODELS[_current_gemini_model_index]
+                print(f"🤖 Gemini 呼び出し: {current_model_name}")
+                result = gemini_model.generate_content(prompt).text.strip()
+                return result
+            except Exception as e:
+                err = str(e)
+                is_quota = "429" in err or "quota" in err.lower() or "Resource has been exhausted" in err
+
+                if is_quota:
+                    # RPM 制限に達した → 次のモデルに切り替え
+                    old_model = GEMINI_MODELS[_current_gemini_model_index]
+                    _current_gemini_model_index = (_current_gemini_model_index + 1) % len(GEMINI_MODELS)
+                    _gemini_model_fallback_count += 1
+                    new_model = GEMINI_MODELS[_current_gemini_model_index]
+                    gemini_model = genai.GenerativeModel(new_model)
+
+                    print(f"⚠️ {old_model} RPM 制限 → {new_model} に切り替え "
+                          f"（フォールバック#{_gemini_model_fallback_count}）")
+                    models_attempted += 1
+                    break  # 次のモデルを試す
+                else:
+                    # RPM 以外のエラー
+                    if attempt < max_retries:
+                        wait = 15 * (attempt + 1)
+                        print(f"⏳ Gemini エラー → {wait}秒後リトライ ({attempt+1}/{max_retries})")
+                        time.sleep(wait)
+                        continue
+                    # リトライ限界
+                    print(f"❌ Gemini エラー（リトライ限界）: {e}")
+                    raise
+
+    # すべてのモデルで RPM 制限に達した
+    print(f"❌ すべてのモデル RPM 制限に達した")
+    raise Exception("すべての Gemini モデルが RPM 制限中 - 数分後に自動回復します")
 
 def gemini_validate(df, signal):
     if signal['crossover'] is None:
@@ -990,6 +1030,8 @@ def status_logging_loop():
                 "gemini_last_direction": _last_gemini_direction or "なし",
                 "gemini_approved": _last_gemini_approved,
                 "gemini_last_call_ago_sec": round(now - _last_gemini_call_time) if _last_gemini_call_time else None,
+                "gemini_model": GEMINI_MODELS[_current_gemini_model_index],
+                "gemini_model_fallback_count": _gemini_model_fallback_count,
                 "ea_alive": ea_alive,
                 "ea_last_heartbeat_ago_sec": round(now - _ea_last_heartbeat) if _ea_last_heartbeat else None,
                 "ea_last_signal_push_ago_sec": round(now - _last_ea_signal_time) if _last_ea_signal_time else None,
