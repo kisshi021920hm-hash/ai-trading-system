@@ -7,6 +7,10 @@
 
 ## [Unreleased]
 
+### Planned (v1.24改良版)
+- [ ] レンジ回避ロジック: ADX≥25 & |DI+- DI-| > 15 の条件追加
+- [ ] ルールベース判定の強化（Gemini なしでもレンジ判定）
+
 ### Planned (v1.25)
 - [ ] Supabase `status_logs` テーブル作成
 - [ ] Flask バックグラウンドジョブ: `status_logging_loop()`
