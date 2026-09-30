@@ -487,8 +487,9 @@ void ClosePositions(ENUM_POSITION_TYPE pos_type)
 //+------------------------------------------------------------------+
 void TrailingStopUpdate()
 {
-    double trailing_profit_threshold = 30.0;  // $30以上の利益でトレーリング開始
-    double trailing_lock_profit      = 20.0;  // 含み益の$20を保護
+    double trailing_profit_threshold = 15.0;  // v1.24→v1.25改: $15以上 + ADX > 25でトレーリング開始
+    double trailing_lock_profit      = 10.0;  // v1.24→v1.25改: 含み益の$10を保護
+    double adx_trend_threshold       = 25.0;  // ADXトレンド判定閾値
 
     for (int i = PositionsTotal() - 1; i >= 0; i--)
     {
@@ -511,8 +512,10 @@ void TrailingStopUpdate()
         else
             unrealized_profit = entry_price - current_price;
 
-        // トレーリング条件：含み益が閾値を超えたら
-        if (unrealized_profit > trailing_profit_threshold)
+        // トレーリング条件：含み益 $15以上 かつ ADX > 25（トレンド環境）
+        // v1.25改: レンジ相場でのムダな決済を防止
+        double cur_adx = calculate_adx();
+        if (unrealized_profit > trailing_profit_threshold && cur_adx > adx_trend_threshold)
         {
             double new_sl = 0;
             if (pos_type == POSITION_TYPE_BUY)
