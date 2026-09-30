@@ -88,8 +88,8 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
   }
 
   return (
-    <div style={{ padding: "15px", backgroundColor: "#f5f5f5", minHeight: "100vh" }}>
-      <h2 style={{ marginTop: 0 }}>📊 システムダッシュボード</h2>
+    <div style={{ padding: "15px", backgroundColor: "#0f172a", minHeight: "100vh" }}>
+      <h2 style={{ marginTop: 0, color: "#f1f5f9" }}>📊 システムダッシュボード</h2>
 
       {/* KPI タイル */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "20px" }}>
@@ -199,40 +199,40 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
       </div>
 
       {/* 詳細情報 */}
-      <div style={{ backgroundColor: "white", padding: "15px", borderRadius: "8px", marginBottom: "20px" }}>
-        <h3 style={{ marginTop: 0, marginBottom: "12px" }}>⚙️ 設定</h3>
+      <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", marginBottom: "20px", color: "#f1f5f9" }}>
+        <h3 style={{ marginTop: 0, marginBottom: "12px", color: "#94a3b8" }}>⚙️ 設定</h3>
         <div style={{ fontSize: "13px", lineHeight: "1.8" }}>
-          <p style={{ margin: "6px 0" }}>
+          <p style={{ margin: "6px 0", color: "#e2e8f0" }}>
             <strong>時間足:</strong> {latest.settings_timeframe}分
           </p>
-          <p style={{ margin: "6px 0" }}>
+          <p style={{ margin: "6px 0", color: "#e2e8f0" }}>
             <strong>クロスオーバー:</strong> {latest.settings_crossover_mode}
           </p>
-          <p style={{ margin: "6px 0" }}>
+          <p style={{ margin: "6px 0", color: "#e2e8f0" }}>
             <strong>トレードモード:</strong> {latest.settings_trading_mode}
           </p>
-          <p style={{ margin: "6px 0" }}>
+          <p style={{ margin: "6px 0", color: "#e2e8f0" }}>
             <strong>モード:</strong> {latest.test_mode ? "🧪 TEST" : "🚀 PRODUCTION"}
           </p>
         </div>
       </div>
 
       {/* シグナルループモード */}
-      <div style={{ backgroundColor: "white", padding: "15px", borderRadius: "8px", marginBottom: "20px" }}>
-        <h3 style={{ marginTop: 0, marginBottom: "12px" }}>📡 シグナル</h3>
-        <p style={{ margin: "0", fontSize: "13px" }}>
+      <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", marginBottom: "20px", color: "#f1f5f9" }}>
+        <h3 style={{ marginTop: 0, marginBottom: "12px", color: "#94a3b8" }}>📡 シグナル</h3>
+        <p style={{ margin: "0", fontSize: "13px", color: "#e2e8f0" }}>
           <strong>ソース:</strong> {latest.ea_signal_loop_mode}
         </p>
         {latest.ea_last_signal_push_ago_sec !== null && (
-          <p style={{ margin: "6px 0 0 0", fontSize: "13px" }}>
+          <p style={{ margin: "6px 0 0 0", fontSize: "13px", color: "#e2e8f0" }}>
             <strong>最終受信:</strong> {latest.ea_last_signal_push_ago_sec}秒前
           </p>
         )}
       </div>
 
       {/* ログ履歴 */}
-      <div style={{ backgroundColor: "white", padding: "15px", borderRadius: "8px" }}>
-        <h3 style={{ marginTop: 0, marginBottom: "12px" }}>📋 ログ履歴</h3>
+      <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", color: "#f1f5f9" }}>
+        <h3 style={{ marginTop: 0, marginBottom: "12px", color: "#94a3b8" }}>📋 ログ履歴</h3>
         <div style={{ overflowX: "auto" }}>
           <table
             style={{
@@ -242,30 +242,30 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             }}
           >
             <thead>
-              <tr style={{ backgroundColor: "#f0f0f0", borderBottom: "1px solid #ddd" }}>
-                <th style={{ padding: "8px", textAlign: "left" }}>時刻</th>
-                <th style={{ padding: "8px", textAlign: "center" }}>EA</th>
-                <th style={{ padding: "8px", textAlign: "center" }}>Gemini</th>
-                <th style={{ padding: "8px", textAlign: "right" }}>スコア</th>
+              <tr style={{ backgroundColor: "#334155", borderBottom: "1px solid #475569" }}>
+                <th style={{ padding: "8px", textAlign: "left", color: "#cbd5e1" }}>時刻</th>
+                <th style={{ padding: "8px", textAlign: "center", color: "#cbd5e1" }}>EA</th>
+                <th style={{ padding: "8px", textAlign: "center", color: "#cbd5e1" }}>Gemini</th>
+                <th style={{ padding: "8px", textAlign: "right", color: "#cbd5e1" }}>スコア</th>
               </tr>
             </thead>
             <tbody>
               {logs.map((log, i) => (
-                <tr key={i} style={{ borderBottom: "1px solid #eee" }}>
-                  <td style={{ padding: "8px" }}>
+                <tr key={i} style={{ borderBottom: "1px solid #334155" }}>
+                  <td style={{ padding: "8px", color: "#e2e8f0" }}>
                     {new Date(log.recorded_at).toLocaleTimeString("ja-JP", {
                       hour: "2-digit",
                       minute: "2-digit",
                       second: "2-digit",
                     })}
                   </td>
-                  <td style={{ padding: "8px", textAlign: "center" }}>
+                  <td style={{ padding: "8px", textAlign: "center", color: "#e2e8f0" }}>
                     {log.ea_alive ? "🟢" : "🔴"}
                   </td>
-                  <td style={{ padding: "8px", textAlign: "center" }}>
+                  <td style={{ padding: "8px", textAlign: "center", color: "#e2e8f0" }}>
                     {log.gemini_approved ? "✅" : "⏳"}
                   </td>
-                  <td style={{ padding: "8px", textAlign: "right" }}>
+                  <td style={{ padding: "8px", textAlign: "right", color: "#e2e8f0" }}>
                     {log.ea_buy_score ?? "-"}/{log.ea_sell_score ?? "-"}
                   </td>
                 </tr>
