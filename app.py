@@ -87,9 +87,9 @@ _status_log_thread = None
 
 # ==================== Gemini モデルプール（フォールバック対応）====================
 GEMINI_MODELS = [
-    "gemini-1.5-flash",        # RPM: 15（第1選択肢）
-    "gemini-1.5-pro",          # RPM: 2（フォールバック1）
-    "gemini-1.5-flash-8b",     # RPM: 15（フォールバック2・軽量）
+    "gemini-3.5-flash-lite",   # RPM: 15（第1選択肢・低コスト）
+    "gemini-3.8-flash",        # RPM: 10（フォールバック1・最新）
+    "gemini-3.5-flash",        # RPM: 15（フォールバック2・高性能）
 ]
 _current_gemini_model_index = 0  # 現在使用中のモデルインデックス
 _gemini_model_fallback_count = 0  # フォールバック実行回数（監視用）
