@@ -1906,9 +1906,28 @@ def ea_signal_push():
         ai = {"valid": None, "confidence": None, "reason": f"{TRADING_MODE}モード"}
         _last_gemini_approved = False
     else:
-        # FULL_AUTO / AI_CLOSE_MODE: Gemini分析実行
-        ai = gemini_analyze_ea_signal(ea_data)
-        _last_gemini_approved = bool(ai.get('valid'))
+        # FULL_AUTO / AI_CLOSE_MODE: OPEN ポジション確認（省エネ対応）
+        try:
+            resp = req.get(
+                f"{SUPABASE_URL}/rest/v1/trades",
+                params={"status": "eq.OPEN"},
+                headers=supabase_headers(),
+                timeout=5
+            )
+            open_positions = resp.json() if resp.ok else []
+        except Exception as e:
+            print(f"⚠️ OPEN ポジション確認エラー: {e}")
+            open_positions = []
+
+        if open_positions:
+            # ポジション保有中: Gemini スキップ（省エネ・次シグナル待機）
+            print(f"✅ OPEN ポジション{len(open_positions)}件保有中 → Gemini スキップ（ポジション決済待機）")
+            ai = {"valid": None, "confidence": None, "reason": f"ポジション保有中（{len(open_positions)}件）"}
+            _last_gemini_approved = False
+        else:
+            # ポジション保有なし: Gemini分析実行（エントリー判定）
+            ai = gemini_analyze_ea_signal(ea_data)
+            _last_gemini_approved = bool(ai.get('valid'))
     _last_gemini_direction = crossover
 
     # ② デモ用ルールベースエントリー（DEMO_RULE_BASED=true かつ Geminiクォータ時）
