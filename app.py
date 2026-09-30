@@ -945,6 +945,25 @@ def start_background_jobs():
     _status_log_thread.start()
     print("✅ Status logging thread started")
 
+# ==================== Status Dashboard API ====================
+@app.route("/api/status-logs/latest", methods=["GET"])
+def get_latest_status_logs():
+    """最新のステータスログを取得（ダッシュボード用）"""
+    try:
+        limit = int(request.args.get("limit", "10"))
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/status_logs",
+            params={"order": "recorded_at.desc", "limit": str(limit)},
+            headers=supabase_headers(),
+            timeout=10
+        )
+        if resp.ok:
+            return jsonify(resp.json())
+        else:
+            return jsonify({"error": f"Supabase error: {resp.status_code}"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ==================== シグナルループ（24/7自動稼働）====================
 def signal_loop():
     """Yahoo Finance からデータ取得し、時間足ごとにシグナルを計算・配信

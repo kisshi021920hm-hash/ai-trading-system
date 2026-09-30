@@ -39,13 +39,8 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
         setLoading(true);
         setError(null);
 
-        // 最新ログを取得
-        const resp = await fetch(`${renderUrl}/rest/v1/status_logs?order=recorded_at.desc&limit=10`, {
-          headers: {
-            "apikey": import.meta.env.VITE_SUPABASE_KEY ?? "",
-            "Authorization": `Bearer ${import.meta.env.VITE_SUPABASE_KEY ?? ""}`,
-          },
-        });
+        // 最新ログを取得（Flask 経由）
+        const resp = await fetch(`${renderUrl}/api/status-logs/latest?limit=10`);
 
         if (resp.ok) {
           const data = await resp.json();
