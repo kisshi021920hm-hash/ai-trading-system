@@ -1941,12 +1941,32 @@ def ea_signal_push():
           f"買い{ea_data.get('buy_score')}点 vs 売り{ea_data.get('sell_score')}点 "
           f"ADX={ea_data.get('adx')} mode={TRADING_MODE}")
 
-    # TRADING_MODE に応じた Gemini 呼び出し判定
-    if TRADING_MODE in ["MANUAL", "SEMI_AUTO"]:
+    # ==================== v1.15 ローソク足確定時刻チェック ====================
+    # シグナルが来たのがローソク足確定時か中盤かを判定
+    # 確定時のみ AI 判定を実行、中盤はシグナル表示のみ（省エネ）
+    now_utc = datetime.now(timezone.utc)
+    current_minute = now_utc.minute
+    seconds_in_minute = now_utc.second
+
+    # ローソク足確定までの秒数を計算
+    minutes_until_close = (TIMEFRAME_MINUTES - (current_minute % TIMEFRAME_MINUTES)) % TIMEFRAME_MINUTES
+    seconds_until_close = (minutes_until_close * 60) - seconds_in_minute
+
+    # 確定時刻判定: 秒数 < 5秒 または > (TIMEFRAME * 60 - 5) なら「確定時」
+    IS_CANDLE_CONFIRMATION = seconds_until_close < 5 or seconds_until_close > (TIMEFRAME_MINUTES * 60 - 5)
+
+    if not IS_CANDLE_CONFIRMATION:
+        print(f"⏳ ローソク足中盤（確定まで {seconds_until_close}秒）→ シグナル表示のみ（AI判定スキップ）")
+        ai = {"valid": None, "confidence": None, "reason": "ローソク足中盤（確定待機中）"}
+        _last_gemini_approved = False
+        _last_gemini_direction = crossover
+    # ローソク足確定時のみ、以下の AI 判定処理を実行
+    elif TRADING_MODE in ["MANUAL", "SEMI_AUTO"]:
         # 手動・半自動モード: Gemini 分析スキップ（ユーザー判断に委ねる）
         print(f"⏭️ {TRADING_MODE}モード: Gemini分析スキップ（ユーザー判断）")
         ai = {"valid": None, "confidence": None, "reason": f"{TRADING_MODE}モード"}
         _last_gemini_approved = False
+        _last_gemini_direction = crossover
     else:
         # FULL_AUTO / AI_CLOSE_MODE: OPEN ポジション確認（省エネ対応）
         try:
@@ -1970,7 +1990,7 @@ def ea_signal_push():
             # ポジション保有なし: Gemini分析実行（エントリー判定）
             ai = gemini_analyze_ea_signal(ea_data)
             _last_gemini_approved = bool(ai.get('valid'))
-    _last_gemini_direction = crossover
+        _last_gemini_direction = crossover
 
     # ② デモ用ルールベースエントリー（DEMO_RULE_BASED=true かつ Geminiクォータ時）
     if ai.get('quota_error') and DEMO_RULE_BASED:
