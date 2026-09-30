@@ -11,6 +11,8 @@ interface StatusLog {
   gemini_last_direction: string;
   gemini_approved: boolean;
   gemini_last_call_ago_sec: number | null;
+  gemini_model: string;
+  gemini_model_fallback_count: number;
   ea_alive: boolean;
   ea_last_heartbeat_ago_sec: number | null;
   ea_last_signal_push_ago_sec: number | null;
@@ -129,6 +131,14 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
           <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#000" }}>
             {latest.gemini_last_direction || "なし"}
           </p>
+          <p style={{ margin: "6px 0 0 0", fontSize: "10px", color: "#000", fontWeight: "bold" }}>
+            🤖 {latest.gemini_model}
+          </p>
+          {latest.gemini_model_fallback_count > 0 && (
+            <p style={{ margin: "2px 0 0 0", fontSize: "10px", color: "#c41e3a" }}>
+              切り替え: {latest.gemini_model_fallback_count}回
+            </p>
+          )}
         </div>
 
         {/* スコア */}
