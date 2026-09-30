@@ -3,6 +3,7 @@ import { io, Socket } from "socket.io-client";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { PushNotifications } from "@capacitor/push-notifications";
 import { Haptics } from "@capacitor/haptics";
+import StatusDashboard from "./StatusDashboard";
 
 // ==================== 型定義 ====================
 interface CompositeData {
@@ -93,7 +94,7 @@ export default function App() {
   const [history, setHistory] = useState<Signal[]>([]);
   const [connected, setConnected] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<"signal" | "analytics">("signal");
+  const [activeTab, setActiveTab] = useState<"signal" | "analytics" | "dashboard">("signal");
   const [trades, setTrades] = useState<Trade[]>([]);
   const [todayStats, setTodayStats] = useState<TodayStats | null>(null);
   const [entryModalOpen, setEntryModalOpen] = useState(false);
@@ -469,6 +470,12 @@ export default function App() {
         >
           📈 アナリティクス
         </button>
+        <button
+          style={{ ...styles.tab, ...(activeTab === "dashboard" ? styles.tabActive : {}) }}
+          onClick={() => setActiveTab("dashboard")}
+        >
+          📋 ダッシュボード
+        </button>
       </div>
 
       {/* ===== シグナルタブ ===== */}
@@ -741,6 +748,11 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ===== ダッシュボードタブ ===== */}
+      {activeTab === "dashboard" && (
+        <StatusDashboard renderUrl={RENDER_URL} />
       )}
 
       {/* ===== 決済記録モーダル ===== */}

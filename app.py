@@ -75,6 +75,10 @@ DEMO_RULE_BASED = os.environ.get("DEMO_RULE_BASED", "false").lower() == "true"
 DEMO_RULE_MIN_SCORE = int(os.environ.get("DEMO_RULE_MIN_SCORE", "4"))  # ルールベース発動の最低スコア
 DEMO_RULE_MIN_ADX   = float(os.environ.get("DEMO_RULE_MIN_ADX", "20.0"))  # ルールベース発動の最低ADX
 
+# Status Logging設定
+STATUS_LOG_INTERVAL = 300  # 5分ごと
+_status_log_thread = None
+
 # ==================== 初期化 ====================
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "goldtrader_secret")
@@ -869,6 +873,77 @@ def save_signal_to_supabase(signal_data):
     except Exception as e:
         print(f"⚠️  Supabase 保存エラー: {e}")
         return None
+
+# ==================== Status Logging（ダッシュボード用）====================
+def status_logging_loop():
+    """5分ごとに /status データを Supabase に記録"""
+    while True:
+        try:
+            time.sleep(STATUS_LOG_INTERVAL)
+
+            now = time.time()
+            ea_alive = (_ea_last_heartbeat > 0 and now - _ea_last_heartbeat < 90)
+
+            status_log = {
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+                "server_uptime_hours": round((now - _server_start_time) / 3600, 1),
+                "settings_timeframe": TIMEFRAME_MINUTES,
+                "settings_crossover_mode": CROSSOVER_MODE,
+                "settings_trading_mode": TRADING_MODE,
+                "test_mode": TEST_MODE,
+                "gemini_state": "承認済み" if _last_gemini_approved else "待機中",
+                "gemini_last_direction": _last_gemini_direction or "なし",
+                "gemini_approved": _last_gemini_approved,
+                "gemini_last_call_ago_sec": round(now - _last_gemini_call_time) if _last_gemini_call_time else None,
+                "ea_alive": ea_alive,
+                "ea_last_heartbeat_ago_sec": round(now - _ea_last_heartbeat) if _ea_last_heartbeat else None,
+                "ea_last_signal_push_ago_sec": round(now - _last_ea_signal_time) if _last_ea_signal_time else None,
+                "ea_signal_loop_mode": "EA_PUSH" if ea_alive else "Yahoo Finance",
+                "ea_buy_score": _ea_latest_scores.get("buy_score"),
+                "ea_sell_score": _ea_latest_scores.get("sell_score"),
+                "ea_adx": _ea_latest_scores.get("adx"),
+                "fcm_token_count": len(fcm_tokens),
+                "recent_trade_count": len(_ea_trades),
+                "recent_trades_json": _ea_trades[-5:],
+                "total_signals_today": 0,
+                "total_trades_today": 0,
+                "open_trades_count": 0,
+                "today_win_count": 0,
+                "today_loss_count": 0,
+                "today_total_pips": 0,
+                "heartbeat_interval_sec": round(now - _ea_last_heartbeat) if _ea_last_heartbeat > 0 else None,
+                "signal_interval_sec": round(now - _last_ea_signal_time) if _last_ea_signal_time > 0 else None,
+            }
+
+            save_status_log(status_log)
+            print(f"✅ Status log saved: {datetime.now(timezone.utc).isoformat()}")
+
+        except Exception as e:
+            print(f"❌ Status logging error: {e}")
+
+def save_status_log(status_data):
+    """Supabase の status_logs に INSERT"""
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/status_logs"
+        resp = req.post(
+            url,
+            json=status_data,
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            timeout=10
+        )
+        if resp.status_code not in [200, 201]:
+            print(f"⚠️  Status log save failed: {resp.status_code} {resp.text}")
+        return resp.status_code in [200, 201]
+    except Exception as e:
+        print(f"⚠️  Status log save error: {e}")
+        return False
+
+def start_background_jobs():
+    """バックグラウンドジョブ開始"""
+    global _status_log_thread
+    _status_log_thread = threading.Thread(target=status_logging_loop, daemon=True)
+    _status_log_thread.start()
+    print("✅ Status logging thread started")
 
 # ==================== シグナルループ（24/7自動稼働）====================
 def signal_loop():
@@ -2057,6 +2132,7 @@ def on_disconnect():
 # ==================== 起動 ====================
 if __name__ == "__main__":
     load_fcm_tokens()
+    start_background_jobs()
     t = threading.Thread(target=signal_loop, daemon=True)
     t.start()
     t2 = threading.Thread(target=position_monitor_loop, daemon=True)
