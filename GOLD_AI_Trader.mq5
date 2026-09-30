@@ -15,8 +15,8 @@ input int      POLL_SECONDS     = 15;    // APIポーリング間隔（秒）
 input int      MIN_CONFIDENCE   = 50;    // 最低AI信頼度 (%) ※デモ用に緩め
 input bool     REQUIRE_AI_VALID = false; // AI承認必須 ※デモ用にOFF
 input double   RISK_PERCENT     = 2.0;   // 1トレードあたりのリスク率 (%)
-input double   DEFAULT_SL_USD   = 20.0;  // デフォルトSL（価格幅ドル）
-input double   DEFAULT_TP_USD   = 40.0;  // デフォルトTP（価格幅ドル）
+input double   DEFAULT_SL_USD   = 50.0;  // デフォルトSL（価格幅ドル）
+input double   DEFAULT_TP_USD   = 80.0;  // デフォルトTP（価格幅ドル）
 input bool     USE_AI_SL_TP     = true;  // GeminiのSL/TP提案を使用する
 input bool     FLIP_ON_REVERSE  = true;  // 逆クロスでドテン
 input int      MIN_TRADE_INTERVAL = 900; // 最短取引間隔（秒）= 15分
@@ -105,6 +105,7 @@ void OnTimer()
 {
     ComputeAndPushSignal();  // MT5指標計算 → /ea-signalにプッシュ
     PollAndTrade();
+    TrailingStopUpdate();    // トレーリングストップ更新
 }
 void OnTick()
 {
@@ -481,6 +482,74 @@ void ClosePositions(ENUM_POSITION_TYPE pos_type)
 }
 
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//  トレーリングストップ更新（含み益が出たらSLを自動引き上げ）
+//+------------------------------------------------------------------+
+void TrailingStopUpdate()
+{
+    double trailing_profit_threshold = 30.0;  // $30以上の利益でトレーリング開始
+    double trailing_lock_profit      = 20.0;  // 含み益の$20を保護
+
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0) continue;
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != MAGIC_NUMBER) continue;
+
+        ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        double entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
+        double current_sl   = PositionGetDouble(POSITION_SL);
+        double bid          = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        double ask          = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        double current_price = (pos_type == POSITION_TYPE_BUY) ? bid : ask;
+
+        // 含み益計算
+        double unrealized_profit = 0;
+        if (pos_type == POSITION_TYPE_BUY)
+            unrealized_profit = current_price - entry_price;
+        else
+            unrealized_profit = entry_price - current_price;
+
+        // トレーリング条件：含み益が閾値を超えたら
+        if (unrealized_profit > trailing_profit_threshold)
+        {
+            double new_sl = 0;
+            if (pos_type == POSITION_TYPE_BUY)
+                new_sl = current_price - trailing_lock_profit;  // 現在値から$20下
+            else
+                new_sl = current_price + trailing_lock_profit;  // 現在値から$20上
+
+            int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+            new_sl = NormalizeDouble(new_sl, digits);
+
+            // 新しいSLが現在のSLより有利な場合のみ更新
+            bool should_update = false;
+            if (pos_type == POSITION_TYPE_BUY  && new_sl > current_sl) should_update = true;
+            if (pos_type == POSITION_TYPE_SELL && new_sl < current_sl) should_update = true;
+
+            if (should_update)
+            {
+                MqlTradeRequest req = {};
+                MqlTradeResult  res = {};
+                req.action   = TRADE_ACTION_SLTP;
+                req.symbol   = _Symbol;
+                req.position = ticket;
+                req.sl       = new_sl;
+                req.tp       = PositionGetDouble(POSITION_TP);
+                req.magic    = MAGIC_NUMBER;
+
+                if (OrderSend(req, res))
+                    Print("✅ トレーリングストップ更新: ticket=", ticket,
+                          " 旧SL=", current_sl, " 新SL=", new_sl,
+                          " 含み益=$", DoubleToString(unrealized_profit, 2));
+                else
+                    Print("⚠️  トレーリングストップ更新失敗: retcode=", res.retcode);
+            }
+        }
+    }
+}
+
 void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
 {
     //--- 最小取引間隔チェック（チョッピー相場のノイズシグナル排除）
