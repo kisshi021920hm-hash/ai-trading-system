@@ -85,6 +85,16 @@ DEMO_RULE_MIN_ADX   = float(os.environ.get("DEMO_RULE_MIN_ADX", "20.0"))  # ル�
 STATUS_LOG_INTERVAL = 300  # 5分ごと
 _status_log_thread = None
 
+# AI 決済判定の履歴記録（最後の判定情報）
+_last_ai_decision = {
+    "timestamp": None,              # AI 判定実行時刻
+    "decision_type": None,          # ENTRY / CLOSE / HOLD
+    "crossover_direction": None,    # UP_CROSS / DOWN_CROSS
+    "confidence_score": None,       # 信頼度スコア（0-100）
+    "decision_reason": "",          # AI 判定理由（Gemini から返却）
+    "executed_action": "",          # 実際の実行内容（SELL 0.02, CLOSE, など）
+}
+
 # ==================== Gemini モデルプール（フォールバック対応）====================
 GEMINI_MODELS = [
     "gemini-3.8-flash",        # 主力・最新（高速・万能）
@@ -1050,6 +1060,12 @@ def status_logging_loop():
                 "today_total_pips": 0,
                 "heartbeat_interval_sec": round(now - _ea_last_heartbeat) if _ea_last_heartbeat > 0 else None,
                 "signal_interval_sec": round(now - _last_ea_signal_time) if _last_ea_signal_time > 0 else None,
+                # AI 決済判定の履歴
+                "ai_decision_timestamp": _last_ai_decision.get("timestamp"),
+                "ai_decision_type": _last_ai_decision.get("decision_type"),
+                "ai_confidence_score": _last_ai_decision.get("confidence_score"),
+                "ai_decision_reason": _last_ai_decision.get("decision_reason"),
+                "ai_executed_action": _last_ai_decision.get("executed_action"),
             }
 
             save_status_log(status_log)
@@ -1080,7 +1096,7 @@ def position_monitor_loop():
     AI_CLOSE_MODE 用: ポジション監視＆決済判定ループ
     15分ごと（ローソク足確定時）に OPEN ポジションを監視して Gemini で決済判定
     """
-    global _position_monitor_last
+    global _position_monitor_last, _last_ai_decision
     print("🔄 ポジション監視ループ開始（AI_CLOSE_MODE用）")
 
     while True:
@@ -1124,6 +1140,16 @@ def position_monitor_loop():
                 # Gemini で決済判定
                 close_decision = gemini_position_close_decision(pos, _ea_latest_scores)
 
+                # ✅ AI 決済判定情報を記録
+                _last_ai_decision = {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "decision_type": "CLOSE" if close_decision['should_close'] else "HOLD",
+                    "crossover_direction": None,
+                    "confidence_score": close_decision.get('confidence'),
+                    "decision_reason": close_decision.get('reason', ''),
+                    "executed_action": "",
+                }
+
                 # 決済信頼度が閾値以上なら自動決済
                 if close_decision['should_close'] and close_decision['confidence'] is not None:
                     if close_decision['confidence'] >= CLOSE_CONFIDENCE_THRESHOLD:
@@ -1137,9 +1163,11 @@ def position_monitor_loop():
                             headers={**supabase_headers(), "Prefer": "return=minimal"},
                             timeout=10
                         )
+                        _last_ai_decision["executed_action"] = f"CLOSE (ポジション#{pos.get('id')})"
                     else:
                         print(f"⚠️ 監視継続: ポジションID={pos.get('id')} "
                               f"信頼度={close_decision['confidence']}%（閾値{CLOSE_CONFIDENCE_THRESHOLD}%未満）")
+                        _last_ai_decision["executed_action"] = "継続監視"
 
             settings_changed.wait(timeout=60)
             settings_changed.clear()
@@ -1916,7 +1944,7 @@ def ea_heartbeat():
 @app.route("/ea-signal", methods=["POST", "OPTIONS"])
 def ea_signal_push():
     """MT5 EAからリアルタイム指標データを受信 → Gemini分析 → Supabase保存 → FCM通知"""
-    global _last_ea_signal_time, _last_gemini_approved, _last_gemini_direction, _ea_signal_dedup
+    global _last_ea_signal_time, _last_gemini_approved, _last_gemini_direction, _ea_signal_dedup, _last_ai_decision
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
@@ -1990,6 +2018,15 @@ def ea_signal_push():
             # ポジション保有なし: Gemini分析実行（エントリー判定）
             ai = gemini_analyze_ea_signal(ea_data)
             _last_gemini_approved = bool(ai.get('valid'))
+            # ✅ AI 判定情報を記録（v1.27準備）
+            _last_ai_decision = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "decision_type": "ENTRY",
+                "crossover_direction": crossover,
+                "confidence_score": ai.get('confidence'),
+                "decision_reason": ai.get('reason', ''),
+                "executed_action": f"{'SELL' if crossover == 'DOWN_CROSS' else 'BUY'} (待機中)" if ai.get('valid') else "スキップ",
+            }
         _last_gemini_direction = crossover
 
     # ② デモ用ルールベースエントリー（DEMO_RULE_BASED=true かつ Geminiクォータ時）

@@ -23,6 +23,12 @@ interface StatusLog {
   fcm_token_count: number;
   recent_trade_count: number;
   today_total_pips: number;
+  // AI 決済判定履歴
+  ai_decision_timestamp: string | null;
+  ai_decision_type: string | null;
+  ai_confidence_score: number | null;
+  ai_decision_reason: string | null;
+  ai_executed_action: string | null;
 }
 
 interface StatusDashboardProps {
@@ -239,6 +245,36 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
           </p>
         )}
       </div>
+
+      {/* AI 決定履歴 */}
+      {latest.ai_decision_timestamp && (
+        <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", marginBottom: "20px", color: "#f1f5f9" }}>
+          <h3 style={{ marginTop: 0, marginBottom: "12px", color: "#94a3b8" }}>🤖 AI判定履歴</h3>
+          <div style={{ fontSize: "12px", lineHeight: "2" }}>
+            <p style={{ margin: "0", color: "#e2e8f0" }}>
+              <strong>時刻:</strong> {new Date(latest.ai_decision_timestamp).toLocaleTimeString("ja-JP")}
+            </p>
+            <p style={{ margin: "0", color: "#e2e8f0" }}>
+              <strong>種類:</strong> {latest.ai_decision_type || "なし"}
+            </p>
+            {latest.ai_confidence_score !== null && (
+              <p style={{ margin: "0", color: "#e2e8f0" }}>
+                <strong>信頼度:</strong> {latest.ai_confidence_score}%
+              </p>
+            )}
+            {latest.ai_decision_reason && (
+              <p style={{ margin: "0", color: "#cbd5e1", fontSize: "11px", whiteSpace: "pre-wrap" }}>
+                <strong>理由:</strong> {latest.ai_decision_reason}
+              </p>
+            )}
+            {latest.ai_executed_action && (
+              <p style={{ margin: "0", color: "#a1e3a1" }}>
+                <strong>実行:</strong> {latest.ai_executed_action}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ログ履歴 */}
       <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", color: "#f1f5f9" }}>
