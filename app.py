@@ -1539,39 +1539,6 @@ def signal_loop():
             socketio.emit('signal', signal_data)
             print(f"📡 シグナル配信完了: close={signal_data['latest_close']} db_id={db_id} mode={TRADING_MODE}")
 
-            # 🚨 新シグナルが低信頼度の場合、OPEN ポジションを即座に決済
-            if signal_data.get('crossover') and signal_data.get('ai_confidence') is not None:
-                if signal_data['ai_confidence'] < CLOSE_CONFIDENCE_THRESHOLD:
-                    print(f"🚨 新シグナル危険検出: 信頼度={signal_data['ai_confidence']}%（< {CLOSE_CONFIDENCE_THRESHOLD}%）")
-                    try:
-                        # OPEN ポジション確認
-                        open_pos_resp = req.get(
-                            f"{SUPABASE_URL}/rest/v1/trades",
-                            params={"status": "eq.OPEN"},
-                            headers=supabase_headers(),
-                            timeout=10
-                        )
-                        open_positions = open_pos_resp.json() if open_pos_resp.ok else []
-
-                        # 各 OPEN ポジションを即座に決済
-                        for pos in open_positions:
-                            try:
-                                req.patch(
-                                    f"{SUPABASE_URL}/rest/v1/trades",
-                                    params={"id": f"eq.{pos['id']}"},
-                                    json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
-                                    headers={**supabase_headers(), "Prefer": "return=minimal"},
-                                    timeout=10
-                                )
-                                log_system("INFO", f"🚨 即座決済: 新シグナル危険（信頼度{signal_data['ai_confidence']}%<{CLOSE_CONFIDENCE_THRESHOLD}%）でポジション#{pos['id']}を決済")
-                                print(f"✅ 即座決済完了: ポジション#{pos['id']}")
-                            except Exception as e:
-                                print(f"❌ ポジション決済エラー: {e}")
-                                log_system("ERROR", f"新シグナル即座決済エラー: {e}")
-                    except Exception as e:
-                        print(f"❌ OPEN ポジション取得エラー: {e}")
-                        log_system("ERROR", f"OPEN ポジション取得エラー: {e}")
-
             if signal_data.get('crossover'):
                 # クールダウン中(ai_conf=None)のみFCMスキップ
                 # クォータ制限・実分析結果はどちらも通知する
@@ -2249,6 +2216,42 @@ def ea_signal_push():
             }
             log_system("INFO", f"AI判定: {crossover} → 有効={ai.get('valid')} 信頼度={ai.get('confidence')}% 理由={ai.get('reason')}")
         _last_gemini_direction = crossover
+
+    # 🚨 【v1.37改】新シグナルが低信頼度の場合、OPEN ポジションを即座に決済（リアルタイム）
+    if crossover and ai.get('confidence') is not None:
+        if ai.get('confidence') < CLOSE_CONFIDENCE_THRESHOLD:
+            print(f"🚨 新シグナル危険検出: 信頼度={ai.get('confidence')}%（< {CLOSE_CONFIDENCE_THRESHOLD}%）")
+            try:
+                # OPEN ポジション確認
+                close_pos_resp = req.get(
+                    f"{SUPABASE_URL}/rest/v1/trades",
+                    params={"status": "eq.OPEN"},
+                    headers=supabase_headers(),
+                    timeout=5
+                )
+                open_positions = close_pos_resp.json() if close_pos_resp.ok else []
+
+                # 各 OPEN ポジションを即座に決済
+                for pos in open_positions:
+                    try:
+                        req.patch(
+                            f"{SUPABASE_URL}/rest/v1/trades",
+                            params={"id": f"eq.{pos['id']}"},
+                            json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
+                            headers={**supabase_headers(), "Prefer": "return=minimal"},
+                            timeout=5
+                        )
+                        log_system("INFO", f"🚨 即座決済: 新シグナル危険（信頼度{ai.get('confidence')}%<{CLOSE_CONFIDENCE_THRESHOLD}%）でポジション#{pos['id']}を決済")
+                        print(f"✅ 即座決済完了: ポジション#{pos['id']}")
+                        _last_ai_decision["decision_type"] = "CLOSE"
+                        _last_ai_decision["decision_reason"] = f"新シグナル危険（信頼度{ai.get('confidence')}%）で即座決済"
+                        _last_ai_decision["executed_action"] = f"CLOSE_IMMEDIATE (ポジション#{pos['id']})"
+                    except Exception as e:
+                        print(f"❌ ポジション決済エラー: {e}")
+                        log_system("ERROR", f"新シグナル即座決済エラー: {e}")
+            except Exception as e:
+                print(f"❌ OPEN ポジション取得エラー: {e}")
+                log_system("ERROR", f"OPEN ポジション取得エラー（新シグナル判定）: {e}")
 
     # ② デモ用ルールベースエントリー（DEMO_RULE_BASED=true かつ Geminiクォータ時）
     if ai.get('quota_error') and DEMO_RULE_BASED:
