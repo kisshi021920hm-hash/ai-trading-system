@@ -135,9 +135,10 @@ def log_system(level, message):
 
 # ==================== Gemini モデルプール（フォールバック対応）====================
 GEMINI_MODELS = [
-    "gemini-3.8-flash",        # 主力・最新（API推奨）
-    "gemini-1.5-flash",        # フォールバック1
-    "gemini-1.5-pro",          # フォールバック2
+    "gemini-3.8-flash",        # 主力・最新
+    "gemini-3.7-flash",        # フォールバック1
+    "gemini-3.5-flash",        # フォールバック2
+    "gemini-3.5-flash-lite",   # フォールバック3（軽量・高速）
 ]
 _current_gemini_model_index = 0  # 現在使用中のモデルインデックス
 _gemini_model_fallback_count = 0  # フォールバック実行回数（監視用）
@@ -721,13 +722,13 @@ def _gemini_should_call(signal):
 
 def _gemini_generate(prompt, max_retries=1):
     """
-    Gemini API の RPM 制限対応（自動フォールバック）
-    - 429 エラーが出たら、別のモデルに自動切り替え
-    - すべてのモデルを試してからエラー返却
+    Gemini API 自動フォールバック
+    - 429（上限）・404（廃止）・503（障害）→ 次のモデルへ即切り替え
+    - 一時的なエラー（5xx以外）→ リトライ後に切り替え
+    - 全モデル失敗でエラー返却
     """
     global _current_gemini_model_index, _gemini_model_fallback_count, gemini_model
 
-    # 全モデルをループして試す
     models_attempted = 0
 
     while models_attempted < len(GEMINI_MODELS):
@@ -739,34 +740,45 @@ def _gemini_generate(prompt, max_retries=1):
                 return result
             except Exception as e:
                 err = str(e)
-                is_quota = "429" in err or "quota" in err.lower() or "Resource has been exhausted" in err
+                # 即切り替え対象: 上限・廃止・サービス障害
+                should_switch = (
+                    "429" in err or
+                    "quota" in err.lower() or
+                    "Resource has been exhausted" in err or
+                    "404" in err or
+                    "no longer available" in err.lower() or
+                    "deprecated" in err.lower() or
+                    "503" in err
+                )
 
-                if is_quota:
-                    # RPM 制限に達した → 次のモデルに切り替え
+                if should_switch:
                     old_model = GEMINI_MODELS[_current_gemini_model_index]
                     _current_gemini_model_index = (_current_gemini_model_index + 1) % len(GEMINI_MODELS)
                     _gemini_model_fallback_count += 1
                     new_model = GEMINI_MODELS[_current_gemini_model_index]
                     gemini_model = genai.GenerativeModel(new_model)
-
-                    print(f"⚠️ {old_model} RPM 制限 → {new_model} に切り替え "
-                          f"（フォールバック#{_gemini_model_fallback_count}）")
+                    print(f"⚠️ {old_model} → {new_model} に切り替え（フォールバック#{_gemini_model_fallback_count}）理由: {err[:80]}")
                     models_attempted += 1
                     break  # 次のモデルを試す
                 else:
-                    # RPM 以外のエラー
+                    # 一時的エラー → リトライ
                     if attempt < max_retries:
                         wait = 15 * (attempt + 1)
-                        print(f"⏳ Gemini エラー → {wait}秒後リトライ ({attempt+1}/{max_retries})")
+                        print(f"⏳ Gemini エラー → {wait}秒後リトライ ({attempt+1}/{max_retries}): {err[:80]}")
                         time.sleep(wait)
                         continue
-                    # リトライ限界
-                    print(f"❌ Gemini エラー（リトライ限界）: {e}")
-                    raise
+                    # リトライ限界 → 次のモデルへ
+                    old_model = GEMINI_MODELS[_current_gemini_model_index]
+                    _current_gemini_model_index = (_current_gemini_model_index + 1) % len(GEMINI_MODELS)
+                    _gemini_model_fallback_count += 1
+                    new_model = GEMINI_MODELS[_current_gemini_model_index]
+                    gemini_model = genai.GenerativeModel(new_model)
+                    print(f"❌ {old_model} リトライ限界 → {new_model} に切り替え（フォールバック#{_gemini_model_fallback_count}）")
+                    models_attempted += 1
+                    break
 
-    # すべてのモデルで RPM 制限に達した
-    print(f"❌ すべてのモデル RPM 制限に達した")
-    raise Exception("すべての Gemini モデルが RPM 制限中 - 数分後に自動回復します")
+    print(f"❌ すべての Gemini モデルで失敗")
+    raise Exception("すべての Gemini モデルが利用不可 - 数分後に自動回復します")
 
 def gemini_validate(df, signal):
     if signal['crossover'] is None:
