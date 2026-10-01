@@ -1171,6 +1171,43 @@ def position_monitor_loop():
                     print("⏳ 最新スコア待機中...")
                     continue
 
+                # 【v1.27改改】逆方向シグナルでの自動決済
+                crossover = _ea_latest_scores.get('crossover')
+                pos_side = pos.get('side', '').upper()
+
+                if crossover and pos_side:
+                    is_reverse = (crossover == "UP_CROSS" and pos_side == "SELL") or \
+                                 (crossover == "DOWN_CROSS" and pos_side == "BUY")
+
+                    if is_reverse:
+                        current_close = _ea_latest_scores.get('close', 0.0)
+                        entry_price = float(pos.get('entry_price', 0.0))
+                        pnl_pips = abs(current_close - entry_price) if current_close > 0 and entry_price > 0 else 0
+
+                        print(f"🔄 逆方向シグナル決済: ポジション#{pos.get('id')} "
+                              f"({pos_side}ポジション中に{crossover})")
+                        try:
+                            req.patch(
+                                f"{SUPABASE_URL}/rest/v1/trades",
+                                params={"id": f"eq.{pos.get('id')}"},
+                                json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
+                                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                                timeout=10
+                            )
+                            log_system("INFO", f"🔄 決済: ポジション#{pos.get('id')} 逆方向シグナル（{crossover}でエグジット、損益={pnl_pips:.2f}pips）")
+                            _last_ai_decision = {
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "decision_type": "CLOSE",
+                                "crossover_direction": crossover,
+                                "confidence_score": 100,
+                                "decision_reason": f"逆方向シグナル検出。{pos_side}ポジション中に{crossover}が発生。",
+                                "executed_action": f"CLOSE_REVERSE_SIGNAL (ポジション#{pos.get('id')})",
+                            }
+                            continue
+                        except Exception as e:
+                            print(f"❌ 逆方向決済エラー: {e}")
+                            log_system("ERROR", f"逆方向決済エラー: {e}")
+
                 # 【v1.27改】レンジ相場での利益確定判定
                 adx = _ea_latest_scores.get('adx', 0.0)
                 current_close = _ea_latest_scores.get('close', 0.0)
