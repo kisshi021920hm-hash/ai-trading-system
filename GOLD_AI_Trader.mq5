@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
-//|  GOLD AI Trader EA  v1.24                                        |
+//|  GOLD AI Trader EA  v1.25                                        |
 //|  Render API + Gemini AI シグナルによる自動売買                      |
 //|  対象: XAUUSD (GOLD) M15                                         |
 //|  決済: 逆クロスでドテン（SL/TPでも決済）                             |
-//|  v1.24: テクニカル指標強化版（OHLC + candle_history + Gemini分析向上）
+//|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.24"
+#property version   "1.25"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -509,14 +509,14 @@ void ClosePositions(ENUM_POSITION_TYPE pos_type)
 }
 
 //+------------------------------------------------------------------+
-//+------------------------------------------------------------------+
-//  トレーリングストップ更新（含み益が出たらSLを自動引き上げ）
+//  ハイブリッドSL + トレーリングストップ（v1.25: 含み損自動決済 + トレーリング実装）
 //+------------------------------------------------------------------+
 void TrailingStopUpdate()
 {
-    double trailing_profit_threshold = 15.0;  // v1.24→v1.25改: $15以上 + ADX > 25でトレーリング開始
-    double trailing_lock_profit      = 10.0;  // v1.24→v1.25改: 含み益の$10を保護
-    double adx_trend_threshold       = 25.0;  // ADXトレンド判定閾値
+    // ハイブリッドSL設定デフォルト値（Flask側から取得できない場合）
+    double initial_sl_usd       = 2.0;   // 初期SL（損切り保険）
+    double trailing_trigger_usd = 2.0;   // トレーリング開始条件
+    double trailing_sl_usd      = 0.5;   // トレーリングSL（スプレッド対応）
 
     for (int i = PositionsTotal() - 1; i >= 0; i--)
     {
@@ -528,26 +528,48 @@ void TrailingStopUpdate()
         ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
         double entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
         double current_sl   = PositionGetDouble(POSITION_SL);
+        double current_tp   = PositionGetDouble(POSITION_TP);
         double bid          = SymbolInfoDouble(_Symbol, SYMBOL_BID);
         double ask          = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
         double current_price = (pos_type == POSITION_TYPE_BUY) ? bid : ask;
+        double volume       = PositionGetDouble(POSITION_VOLUME);
 
-        // 含み益計算
-        double unrealized_profit = 0;
+        // 含み益/含み損計算（USD）
+        double unrealized_pips = 0;
         if (pos_type == POSITION_TYPE_BUY)
-            unrealized_profit = current_price - entry_price;
+            unrealized_pips = (current_price - entry_price);
         else
-            unrealized_profit = entry_price - current_price;
+            unrealized_pips = (entry_price - current_price);
 
-        // トレーリング条件：含み益 $15以上 かつ ADX > 25（トレンド環境）
-        // v1.25改: レンジ相場でのムダな決済を防止
-        if (unrealized_profit > trailing_profit_threshold && g_latest_adx > adx_trend_threshold)
+        double usd_per_pip = volume * 100;  // 0.02ロット = $2/pip
+        double unrealized_usd = unrealized_pips * usd_per_pip;
+
+        Print("📊 ポジション監視: ", _Symbol, " ", (pos_type == POSITION_TYPE_BUY ? "BUY" : "SELL"),
+              " volume=", volume, " entry=", entry_price, " current=", current_price,
+              " P&L=", DoubleToString(unrealized_usd, 2), "$ (", DoubleToString(unrealized_pips, 2), " pips)");
+
+        // ======== 1. 含み損が初期SL超過 → 強制決済 ========
+        if (unrealized_usd < -initial_sl_usd)
         {
+            Print("🚨 含み損限界超過: ", DoubleToString(unrealized_usd, 2), "$ < -", initial_sl_usd,
+                  "$ → 強制決済実行");
+            ClosePosition(ticket, pos_type);
+            continue;
+        }
+
+        // ======== 2. トレーリング条件チェック: 含み益 >= $2 ========
+        if (unrealized_usd >= trailing_trigger_usd)
+        {
+            // トレーリング中: SLを引き上げ（$0.5を保護）
             double new_sl = 0;
             if (pos_type == POSITION_TYPE_BUY)
-                new_sl = current_price - trailing_lock_profit;  // 現在値から$20下
+            {
+                new_sl = current_price - trailing_sl_usd;  // 現在値から$0.5下
+            }
             else
-                new_sl = current_price + trailing_lock_profit;  // 現在値から$20上
+            {
+                new_sl = current_price + trailing_sl_usd;  // 現在値から$0.5上
+            }
 
             int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
             new_sl = NormalizeDouble(new_sl, digits);
@@ -565,17 +587,53 @@ void TrailingStopUpdate()
                 req.symbol   = _Symbol;
                 req.position = ticket;
                 req.sl       = new_sl;
-                req.tp       = PositionGetDouble(POSITION_TP);
+                req.tp       = current_tp;
                 req.magic    = MAGIC_NUMBER;
 
                 if (OrderSend(req, res))
+                {
                     Print("✅ トレーリングストップ更新: ticket=", ticket,
-                          " 旧SL=", current_sl, " 新SL=", new_sl,
-                          " 含み益=$", DoubleToString(unrealized_profit, 2));
+                          " 含み益=$", DoubleToString(unrealized_usd, 2),
+                          " 旧SL=", DoubleToString(current_sl, 2),
+                          " 新SL=", DoubleToString(new_sl, 2),
+                          " (スプレッド$", DoubleToString(trailing_sl_usd, 2), "保護)");
+                }
                 else
+                {
                     Print("⚠️  トレーリングストップ更新失敗: retcode=", res.retcode);
+                }
             }
         }
+    }
+}
+
+// ポジション強制決済（含み損時の損切り）
+void ClosePosition(ulong ticket, ENUM_POSITION_TYPE pos_type)
+{
+    double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double close_price = (pos_type == POSITION_TYPE_BUY) ? bid : ask;
+
+    MqlTradeRequest req = {};
+    MqlTradeResult  res = {};
+    req.action      = TRADE_ACTION_DEAL;
+    req.symbol      = _Symbol;
+    req.price       = close_price;
+    req.sl          = 0;
+    req.tp          = 0;
+    req.type        = (pos_type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+    req.position    = ticket;
+    req.comment     = "GOLD_AI_LOSS_CUT";
+    req.type_filling = ORDER_FILLING_IOC;
+    req.magic       = MAGIC_NUMBER;
+
+    if (OrderSend(req, res))
+    {
+        Print("✅ 含み損自動決済成功: ticket=", ticket);
+    }
+    else
+    {
+        Print("❌ 含み損自動決済失敗: retcode=", res.retcode);
     }
 }
 
