@@ -823,33 +823,34 @@ export default function App() {
                 </label>
                 <label style={styles.radioLabel}>
                   <input type="radio" name="tmode2" checked={tradingMode === "SEMI_AUTO"} onChange={() => setTradingMode("SEMI_AUTO")} />
-                  <span>🟡 半自動（ボタンでMT5注文）</span>
+                  <span>🟡 セミ自動（ボタンでMT5注文）</span>
                 </label>
                 <label style={styles.radioLabel}>
                   <input type="radio" name="tmode2" checked={tradingMode === "FULL_AUTO"} onChange={() => setTradingMode("FULL_AUTO")} />
-                  <span>🟢 全自動（信頼度で自動実行）</span>
+                  <span>🟢 半自動（Geminiエントリー＋SL/トレーリング自動決済）</span>
                 </label>
                 <label style={styles.radioLabel}>
                   <input type="radio" name="tmode2" checked={tradingMode === "AI_CLOSE_MODE"} onChange={() => setTradingMode("AI_CLOSE_MODE")} />
-                  <span>🔷 AI決済判定（エントリー+定期監視決済）</span>
+                  <span>🔴 全自動（Geminiエントリー＋Gemini決済判断）</span>
                 </label>
               </div>
               {tradingMode === "FULL_AUTO" && (
-                <div style={{ marginTop: 10 }}>
-                  <label style={styles.inputLabel}>自動実行閾値: <b style={{ color: "#22c55e" }}>{autoThreshold}%</b></label>
-                  <input type="range" min={50} max={95} step={5} value={autoThreshold}
-                    onChange={e => setAutoThreshold(parseInt(e.target.value))}
-                    style={{ width: "100%", accentColor: "#22c55e" }} />
-                  <div style={{ fontSize: 11, color: "#fca5a5", marginTop: 6 }}>
-                    ⚠️ MT5 Webhookサーバー起動が必要です
+                <div style={{ marginTop: 10, padding: "8px 12px", background: "#14532d", borderRadius: 6, fontSize: 12, color: "#86efac" }}>
+                  ✅ <b>Gemini判定</b>でエントリー（信頼度 {autoThreshold}% 以上）<br/>
+                  ✅ 決済はアプリ設定の<b>初期SL＋トレーリング</b>が自動管理<br/>
+                  <div style={{ marginTop: 8 }}>
+                    <label style={styles.inputLabel}>エントリー閾値: <b style={{ color: "#22c55e" }}>{autoThreshold}%</b></label>
+                    <input type="range" min={50} max={95} step={5} value={autoThreshold}
+                      onChange={e => setAutoThreshold(parseInt(e.target.value))}
+                      style={{ width: "100%", accentColor: "#22c55e" }} />
                   </div>
                 </div>
               )}
               {tradingMode === "AI_CLOSE_MODE" && (
-                <div style={{ marginTop: 10, padding: "8px 12px", background: "#1e3a8a", borderRadius: 6, fontSize: 12, color: "#93c5fd" }}>
-                  ✨ <b>エントリー信頼度 60%</b> で自動エントリー<br/>
-                  ✨ <b>15分ごと監視</b>、決済信頼度 70% で自動決済<br/>
-                  ✨ ドテン廃止、決済ベースの安定運用
+                <div style={{ marginTop: 10, padding: "8px 12px", background: "#7f1d1d", borderRadius: 6, fontSize: 12, color: "#fca5a5" }}>
+                  🤖 <b>Gemini判定</b>でエントリー（信頼度 60% 以上）<br/>
+                  🤖 <b>15分ごとGemini監視</b>、決済判断も全てGemini<br/>
+                  🤖 決済指示はEAへ自動送信（force_close）
                 </div>
               )}
             </div>

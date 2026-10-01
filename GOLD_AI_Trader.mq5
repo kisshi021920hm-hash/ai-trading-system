@@ -422,6 +422,21 @@ void PollAndTrade()
     int    confidence = JsonInt(json,    "\"ai_confidence\":");
     double sl_price   = JsonDouble(json, "\"ai_sl_suggestion\":");
     double tp_price   = JsonDouble(json, "\"ai_tp_suggestion\":");
+    bool   force_close = JsonBool(json,  "\"force_close\":");
+
+    //--- AI_CLOSE_MODE: Geminiからの決済指示（force_close）チェック（signal_idに依存しない）
+    if (force_close)
+    {
+        int open_buy  = CountPositions(POSITION_TYPE_BUY);
+        int open_sell = CountPositions(POSITION_TYPE_SELL);
+        if (open_buy > 0 || open_sell > 0)
+        {
+            Print("🔴 Gemini決済指示受信 → 全ポジション決済");
+            if (open_buy  > 0) ClosePositions(POSITION_TYPE_BUY);
+            if (open_sell > 0) ClosePositions(POSITION_TYPE_SELL);
+        }
+        return;  // force_close時はエントリーロジックをスキップ
+    }
 
     if (sig_id <= 0 || sig_id == g_last_signal_id) return;
     g_last_signal_id = sig_id;

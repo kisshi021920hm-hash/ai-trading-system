@@ -84,6 +84,8 @@ _position_monitor_last = 0.0  # ポジション監視最終実行時刻
 _last_ea_signal_time = 0.0   # EAから/ea-signalを最後に受信した時刻（signal_loopスキップ判定用）
 _ea_latest_scores: dict = {}  # EAから受信した最新スコア（ハートビート経由）
 _ea_signal_dedup: dict = {}  # 重複防止キャッシュ {crossover: last_time}
+_force_close_pending = False   # AI_CLOSE_MODE: Gemini決済指示フラグ
+_force_close_set_time = 0.0    # フラグをセットした時刻（120秒後に自動リセット）
 
 # デモ用ルールベースエントリー設定
 DEMO_RULE_BASED = os.environ.get("DEMO_RULE_BASED", "false").lower() == "true"
@@ -1298,7 +1300,7 @@ def position_monitor_loop():
     AI_CLOSE_MODE 用: ポジション監視＆決済判定ループ
     TIMEFRAME ごと（ローソク足確定時）に OPEN ポジションを監視して Gemini で決済判定
     """
-    global _position_monitor_last, _last_ai_decision
+    global _position_monitor_last, _last_ai_decision, _force_close_pending, _force_close_set_time
     log_system("INFO", f"🔄 ポジション監視ループ開始（{TIMEFRAME_MINUTES}分間隔）")
 
     while True:
@@ -1501,6 +1503,10 @@ def position_monitor_loop():
                     if close_decision['confidence'] >= CLOSE_CONFIDENCE_THRESHOLD:
                         print(f"🔴 決済実行: ポジションID={pos.get('id')} "
                               f"信頼度={close_decision['confidence']}%")
+                        # EA に force_close 指示を送る（/latest-signal 経由）
+                        _force_close_pending = True
+                        _force_close_set_time = time.time()
+                        log_system("INFO", f"🔴 force_close フラグセット: Gemini決済指示（信頼度={close_decision['confidence']}%）")
                         # Supabase で status を CLOSED に更新
                         req.patch(
                             f"{SUPABASE_URL}/rest/v1/trades",
@@ -2026,6 +2032,7 @@ def health():
 
 @app.route("/latest-signal", methods=["GET"])
 def latest_signal():
+    global _force_close_pending, _force_close_set_time
     try:
         resp = req.get(
             f"{SUPABASE_URL}/rest/v1/signals",
@@ -2035,7 +2042,16 @@ def latest_signal():
         )
         resp.raise_for_status()
         data = resp.json()
-        return jsonify(data[0] if data else {})
+        signal = data[0] if data else {}
+
+        # force_close フラグを付加（AI_CLOSE_MODE でGeminiが決済指示を出した場合）
+        # 120秒後に自動リセット（EAが確実に受け取れる猶予）
+        if _force_close_pending and time.time() - _force_close_set_time > 120:
+            _force_close_pending = False
+            print("⏱️ force_close フラグ自動リセット（120秒経過）")
+        signal["force_close"] = _force_close_pending
+
+        return jsonify(signal)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
