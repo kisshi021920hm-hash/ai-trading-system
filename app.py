@@ -40,6 +40,15 @@ TIMEFRAME_MINUTES = int(os.environ.get("TIMEFRAME_MINUTES", "30"))
 TEST_MODE = os.environ.get("TEST_MODE", "false").lower() == "true"
 CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI", "MACD", "RSI_MACD", "COMPOSITE"
 
+# ==================== ハイブリッドSL設定（v1.25新機能） ====================
+# アプリから動的に調整可能
+_hybrid_sl_config = {
+    "initial_sl_usd": 2.0,       # 初期SL（-$2）- 保険・ノイズ対策
+    "trailing_trigger_usd": 2.0, # トレーリング開始条件（+$2）
+    "trailing_sl_usd": 0.5,      # トレーリング後のSL（+$0.5）- スプレッド対応
+    "enabled": True
+}
+
 # トレード自動化設定
 # MANUAL: スマホのみ配信（ユーザー判断）
 # SEMI_AUTO: スマホのボタンで MT5 注文
@@ -1922,8 +1931,43 @@ def get_current_settings():
         "crossover_mode": CROSSOVER_MODE,
         "trading_mode": TRADING_MODE,
         "auto_confidence_threshold": AUTO_CONFIDENCE_THRESHOLD,
-        "mt5_webhook_configured": bool(MT5_WEBHOOK_URL)
+        "mt5_webhook_configured": bool(MT5_WEBHOOK_URL),
+        "hybrid_sl": _hybrid_sl_config
     })
+
+@app.route("/api/settings/hybrid-sl", methods=["GET", "POST", "OPTIONS"])
+def hybrid_sl_settings():
+    """ハイブリッドSL設定（v1.25）- アプリから動的に調整可能"""
+    global _hybrid_sl_config
+
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
+    if request.method == "GET":
+        return jsonify(_hybrid_sl_config)
+
+    if request.method == "POST":
+        data = request.get_json()
+        old_config = _hybrid_sl_config.copy()
+
+        # 設定を更新
+        if "initial_sl_usd" in data:
+            _hybrid_sl_config["initial_sl_usd"] = float(data["initial_sl_usd"])
+        if "trailing_trigger_usd" in data:
+            _hybrid_sl_config["trailing_trigger_usd"] = float(data["trailing_trigger_usd"])
+        if "trailing_sl_usd" in data:
+            _hybrid_sl_config["trailing_sl_usd"] = float(data["trailing_sl_usd"])
+        if "enabled" in data:
+            _hybrid_sl_config["enabled"] = bool(data["enabled"])
+
+        log_system("INFO", f"⚙️ ハイブリッドSL設定変更: {old_config} → {_hybrid_sl_config}")
+        print(f"🎯 ハイブリッドSL設定変更: {_hybrid_sl_config}")
+
+        return jsonify({
+            "status": "ok",
+            "hybrid_sl": _hybrid_sl_config,
+            "message": "ハイブリッドSL設定が更新されました"
+        })
 
 @app.route("/health", methods=["GET"])
 def health():
