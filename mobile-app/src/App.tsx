@@ -496,7 +496,7 @@ export default function App() {
                 value={signal.main_line?.toFixed(4) ?? signal.rsi?.toFixed(2)}
               />
               <Row
-                label={signal.crossover_mode === "MACD" || signal.crossover_mode === "COMPOSITE" ? "MACDシグナル" : signal.crossover_mode === "RSI_MACD" ? "MACDシグナル(正規化)" : "RSIシグナルSMA"}
+                label={signal.crossover_mode === "RSI" || signal.crossover_mode === "RSI_MACD" ? (signal.crossover_mode === "RSI" ? "RSI Signal SMA" : "MACDシグナル(正規化)") : "MACDシグナル"}
                 value={signal.signal_line?.toFixed(4)}
               />
               <Row label="終値" value={signal.latest_close?.toFixed(2)} />
