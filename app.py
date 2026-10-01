@@ -1624,7 +1624,10 @@ def signal_loop():
     log_system("INFO", "🔄 EA接続猶予終了 → シグナルループ本処理開始")
     while True:
         # EA稼働中はYahoo Finance処理をスキップ（EAがMT5リアルタイムデータをプッシュするため）
-        if _ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 300:
+        # ハートビートまたはea-signal受信から300秒以内 → EA生存中
+        ea_alive = (_ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 300) or \
+                   (_last_ea_signal_time > 0 and time.time() - _last_ea_signal_time < 300)
+        if ea_alive:
             print("⏸️  EA稼働中 → Yahoo Financeシグナルループをスキップ（EAからのプッシュ待機）")
             settings_changed.wait(timeout=TIMEFRAME_MINUTES * 60)
             settings_changed.clear()
@@ -2440,20 +2443,18 @@ def ea_signal_push():
     if crossover not in ('UP_CROSS', 'DOWN_CROSS'):
         return jsonify({"error": f"Invalid crossover: {crossover}"}), 400
 
-    # ① 方向変化チェック: 前回と同じ方向なら Gemini/Supabase 保存をスキップ
-    # （クロスになったタイミングのみ処理・同方向の繰り返しはスルー）
-    if crossover == _last_gemini_direction:
-        _last_ea_signal_time = time.time()  # ハートビート扱いで時刻だけ更新
-        print(f"⏭️ /ea-signal 方向変化なし({crossover}) → Gemini/保存スキップ")
-        return jsonify({"status": "skipped", "reason": "same_direction"}), 200
-
-    # ② バースト防止: 5秒以内の同方向重複（複数インスタンス対策）
+    # ① 重複防止: 同一キャンドル内の同方向シグナルはスキップ
+    # TIMEFRAME * 60 - 30秒 以内の同方向は「同キャンドルの再送」として扱う
+    # 方向が変わった場合は時間に関係なく処理する
     now = time.time()
     last_recv = _ea_signal_dedup.get(crossover, 0)
-    if now - last_recv < 5:
-        print(f"⏭️ /ea-signal バースト重複スキップ: {crossover}")
-        return jsonify({"status": "skipped", "reason": "burst_duplicate"}), 200
+    candle_dedup_seconds = max(TIMEFRAME_MINUTES * 60 - 30, 60)  # M15=870s, 最低60s
+    if crossover == _ea_signal_dedup.get("last_direction") and now - last_recv < candle_dedup_seconds:
+        _last_ea_signal_time = time.time()
+        print(f"⏭️ /ea-signal 同キャンドル重複スキップ: {crossover} ({int(now - last_recv)}秒前に処理済み)")
+        return jsonify({"status": "skipped", "reason": "same_candle_duplicate"}), 200
     _ea_signal_dedup[crossover] = now
+    _ea_signal_dedup["last_direction"] = crossover
 
     print(f"📡 EA→サーバー シグナル受信: {crossover} "
           f"close={ea_data.get('latest_close')} "
