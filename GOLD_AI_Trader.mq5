@@ -52,6 +52,12 @@ double g_latest_adx        = 0.0;
 double g_latest_close      = 0.0;
 string g_latest_crossover  = "NONE";  // 最新のクロスオーバー方向（NONE/UP_CROSS/DOWN_CROSS）
 
+//--- ハイブリッドSL設定キャッシュ（固定4変数・上書き更新のみで増えない）
+double   g_cached_initial_sl_usd       = 2.0;
+double   g_cached_trailing_trigger_usd = 2.0;
+double   g_cached_trailing_sl_usd      = 0.5;
+datetime g_last_hybrid_sl_fetch        = 0;    // 最後にFlaskから取得した時刻
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -510,14 +516,53 @@ void ClosePositions(ENUM_POSITION_TYPE pos_type)
 }
 
 //+------------------------------------------------------------------+
+//  ハイブリッドSL設定をFlaskから取得（60秒キャッシュ・固定4変数で増えない）
+//+------------------------------------------------------------------+
+void FetchHybridSlConfig()
+{
+    if (TimeCurrent() - g_last_hybrid_sl_fetch < 60) return;  // 60秒キャッシュ有効中はスキップ
+
+    string headers = "Content-Type: application/json\r\n";
+    char   post[], result[];
+    string res_headers;
+
+    int status = WebRequest("GET", API_BASE + "/api/settings/hybrid-sl",
+                            headers, 3000, post, result, res_headers);
+    if (status != 200)
+    {
+        // 取得失敗時はキャッシュ済みの値をそのまま使い続ける（デフォルト値で安全動作）
+        Print("⚠️  ハイブリッドSL設定取得失敗(HTTP", status, ") → キャッシュ値で継続");
+        g_last_hybrid_sl_fetch = TimeCurrent();  // 再試行は60秒後（連続失敗を防ぐ）
+        return;
+    }
+
+    string json = CharArrayToString(result);
+    double new_initial_sl       = JsonDouble(json, "\"initial_sl_usd\":");
+    double new_trailing_trigger = JsonDouble(json, "\"trailing_trigger_usd\":");
+    double new_trailing_sl      = JsonDouble(json, "\"trailing_sl_usd\":");
+
+    // 値が有効な場合のみ上書き（0や負の値は無視してキャッシュを保持）
+    if (new_initial_sl > 0)       g_cached_initial_sl_usd       = new_initial_sl;
+    if (new_trailing_trigger > 0) g_cached_trailing_trigger_usd = new_trailing_trigger;
+    if (new_trailing_sl > 0)      g_cached_trailing_sl_usd      = new_trailing_sl;
+
+    g_last_hybrid_sl_fetch = TimeCurrent();  // 取得時刻を更新（次回は60秒後）
+
+    Print("🔧 ハイブリッドSL設定更新: 初期SL=$", g_cached_initial_sl_usd,
+          " トレーリング開始=$", g_cached_trailing_trigger_usd,
+          " トレーリングSL=$", g_cached_trailing_sl_usd);
+}
+
+//+------------------------------------------------------------------+
 //  ハイブリッドSL + トレーリングストップ（v1.25: 含み損自動決済 + トレーリング実装）
 //+------------------------------------------------------------------+
 void TrailingStopUpdate()
 {
-    // ハイブリッドSL設定デフォルト値（Flask側から取得できない場合）
-    double initial_sl_usd       = 2.0;   // 初期SL（損切り保険）
-    double trailing_trigger_usd = 2.0;   // トレーリング開始条件
-    double trailing_sl_usd      = 0.5;   // トレーリングSL（スプレッド対応）
+    FetchHybridSlConfig();  // 60秒ごとにFlaskから設定を取得（キャッシュ制御済み）
+
+    double initial_sl_usd       = g_cached_initial_sl_usd;
+    double trailing_trigger_usd = g_cached_trailing_trigger_usd;
+    double trailing_sl_usd      = g_cached_trailing_sl_usd;
 
     for (int i = PositionsTotal() - 1; i >= 0; i--)
     {
