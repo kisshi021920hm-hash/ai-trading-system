@@ -2290,6 +2290,22 @@ def health_check():
     issues = []
     warnings = []
 
+    # ========== 通信状態監視（新機能） ==========
+    # 最新ログの鮮度チェック
+    latest_log_age = None
+    if _system_logs:
+        try:
+            latest_timestamp_str = _system_logs[-1].get('timestamp', '')
+            latest_timestamp = datetime.fromisoformat(latest_timestamp_str.replace('Z', '+00:00')).timestamp()
+            latest_log_age = now - latest_timestamp
+
+            if latest_log_age > 300:  # 5分以上古い
+                issues.append(f"🚨 ログが古い（{round(latest_log_age/60)}分以上更新なし）→ 通信遅延の可能性")
+            elif latest_log_age > 120:  # 2分以上
+                warnings.append(f"⚠️ ログ更新が遅い（最新ログ{round(latest_log_age)}秒前）")
+        except:
+            pass
+
     # EA接続確認
     ea_alive = (_ea_last_heartbeat > 0 and now - _ea_last_heartbeat < 90)
     if not ea_alive:
@@ -2303,7 +2319,17 @@ def health_check():
 
     # シグナル受信確認
     if _last_ea_signal_time and now - _last_ea_signal_time > 1800:
-        warnings.append(f"⚠️ シグナル受信なし（最後{round((now - _last_ea_signal_time)/60)}分前）")
+        warnings.append(f"⚠️ シグナル受信なし（最後{round((now - _last_ea_signal_time)/60)}分前）→ 古い情報の可能性")
+
+    # データキャッシュ検証
+    if _ea_latest_scores.get('updated_at'):
+        try:
+            scores_age_str = _ea_latest_scores.get('updated_at', '')
+            scores_age = now - datetime.fromisoformat(scores_age_str.replace('Z', '+00:00')).timestamp()
+            if scores_age > 600:  # 10分以上
+                warnings.append(f"⚠️ EA スコアが古い（{round(scores_age/60)}分前）→ キャッシュデータの可能性")
+        except:
+            pass
 
     # ログエラー確認
     error_count = sum(1 for log in _system_logs if log.get('level') == 'ERROR')
@@ -2330,6 +2356,7 @@ def health_check():
             "ea_last_heartbeat_sec_ago": round(now - _ea_last_heartbeat) if _ea_last_heartbeat else None,
             "gemini_last_call_sec_ago": round(now - _last_gemini_call_time) if _last_gemini_call_time else None,
             "last_signal_push_sec_ago": round(now - _last_ea_signal_time) if _last_ea_signal_time else None,
+            "latest_log_age_sec": round(latest_log_age) if latest_log_age else None,
             "recent_error_count": error_count,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
