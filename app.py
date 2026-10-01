@@ -1238,12 +1238,28 @@ def get_latest_status_logs():
 
 @app.route("/api/system-logs", methods=["GET"])
 def get_system_logs():
-    """システムログを取得（最新 50 件）"""
+    """システムログを取得（Supabase から永続保存ログを取得、デフォルト 100 件）"""
     try:
-        with _system_logs_lock:
-            logs = _system_logs[-50:]  # 最新 50 件
-        return jsonify(logs)
+        limit = int(request.args.get('limit', '100'))
+        limit = min(limit, 1000)  # 最大 1000 件に制限
+
+        # Supabase から取得（永続保存）
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/system_logs",
+            params={"order": "timestamp.desc", "limit": limit},
+            headers=supabase_headers(),
+            timeout=5
+        )
+        if resp.ok:
+            return jsonify(resp.json())
+        else:
+            # Supabase 取得失敗時はメモリから返却（フォールバック）
+            log_system("WARNING", f"Supabase ログ取得失敗 {resp.status_code} → メモリから返却")
+            with _system_logs_lock:
+                logs = list(reversed(_system_logs[-limit:]))
+            return jsonify(logs)
     except Exception as e:
+        log_system("WARNING", f"システムログ取得エラー: {e}")
         return jsonify({"error": str(e)}), 500
 
 # ==================== シグナルループ（24/7自動稼働）====================
