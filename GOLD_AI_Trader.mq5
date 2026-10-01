@@ -55,7 +55,7 @@ string g_latest_crossover  = "NONE";  // 最新のクロスオーバー方向（
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.23 起動 ===");
+    Print("=== GOLD AI Trader EA v1.24 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
