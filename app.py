@@ -95,6 +95,32 @@ _last_ai_decision = {
     "executed_action": "",          # 実際の実行内容（SELL 0.02, CLOSE, など）
 }
 
+# システムログ記録（最大 100 行までメモリ保持）
+_system_logs = []
+_system_logs_lock = threading.Lock()
+
+def log_system(level, message):
+    """システムログを記録（Supabase + メモリ）"""
+    timestamp = datetime.now(timezone.utc).isoformat()
+    log_entry = {"timestamp": timestamp, "level": level, "message": message}
+
+    # メモリに保持
+    with _system_logs_lock:
+        _system_logs.append(log_entry)
+        if len(_system_logs) > 100:
+            _system_logs.pop(0)
+
+    # Supabase に非同期保存
+    try:
+        req.post(
+            f"{SUPABASE_URL}/rest/v1/system_logs",
+            json=log_entry,
+            headers={**supabase_headers(), "Prefer": "return=minimal"},
+            timeout=5
+        )
+    except Exception as e:
+        pass  # ログ保存失敗時は無視
+
 # ==================== Gemini モデルプール（フォールバック対応）====================
 GEMINI_MODELS = [
     "gemini-3.8-flash",        # 主力・最新（高速・万能）
@@ -1097,7 +1123,7 @@ def position_monitor_loop():
     15分ごと（ローソク足確定時）に OPEN ポジションを監視して Gemini で決済判定
     """
     global _position_monitor_last, _last_ai_decision
-    print("🔄 ポジション監視ループ開始（AI_CLOSE_MODE用）")
+    log_system("INFO", "🔄 ポジション監視ループ開始（30分間隔）")
 
     while True:
         try:
@@ -1180,14 +1206,16 @@ def position_monitor_loop():
 def start_background_jobs():
     """バックグラウンドジョブ開始"""
     global _status_log_thread
+    log_system("INFO", "✅ バックグラウンドジョブ開始")
+
     _status_log_thread = threading.Thread(target=status_logging_loop, daemon=True)
     _status_log_thread.start()
-    print("✅ Status logging thread started")
+    log_system("INFO", "✅ Status logging thread started")
 
     # AI_CLOSE_MODE 用ポジション監視ループ
     position_monitor_thread = threading.Thread(target=position_monitor_loop, daemon=True)
     position_monitor_thread.start()
-    print("✅ Position monitor thread started")
+    log_system("INFO", "✅ Position monitor thread started")
 
 # ==================== Status Dashboard API ====================
 @app.route("/api/status-logs/latest", methods=["GET"])
@@ -1208,6 +1236,16 @@ def get_latest_status_logs():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/system-logs", methods=["GET"])
+def get_system_logs():
+    """システムログを取得（最新 50 件）"""
+    try:
+        with _system_logs_lock:
+            logs = _system_logs[-50:]  # 最新 50 件
+        return jsonify(logs)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ==================== シグナルループ（24/7自動稼働）====================
 def signal_loop():
     """Yahoo Finance からデータ取得し、時間足ごとにシグナルを計算・配信
@@ -1215,14 +1253,14 @@ def signal_loop():
     YAHOO_FINANCE_ENABLED=false の場合は完全停止（EA運用時）"""
     yahoo_enabled = os.environ.get("YAHOO_FINANCE_ENABLED", "true").lower() == "true"
     if not yahoo_enabled:
-        print("⏸️  YAHOO_FINANCE_ENABLED=false → Yahoo Financeシグナルループを無効化")
+        log_system("INFO", "⏸️  YAHOO_FINANCE_ENABLED=false → Yahoo Financeシグナルループを無効化")
         return  # スレッドを終了（コードは残したまま）
-    print(f"🔄 シグナルループ開始 TF={TIMEFRAME_MINUTES}m MODE={'TEST' if TEST_MODE else 'PROD'}")
+    log_system("INFO", f"🔄 シグナルループ開始 TF={TIMEFRAME_MINUTES}m MODE={'TEST' if TEST_MODE else 'PROD'}")
     # サーバー起動直後: EAが再接続する猶予を120秒与える（Renderデプロイ後の競合防止）
-    print("⏳ 起動待機: EA接続猶予120秒（Yahoo Finance開始を遅延）")
+    log_system("INFO", "⏳ 起動待機: EA接続猶予120秒（Yahoo Finance開始を遅延）")
     settings_changed.wait(timeout=120)
     settings_changed.clear()
-    print("🔄 EA接続猶予終了 → シグナルループ本処理開始")
+    log_system("INFO", "🔄 EA接続猶予終了 → シグナルループ本処理開始")
     while True:
         # EA稼働中はYahoo Finance処理をスキップ（EAがMT5リアルタイムデータをプッシュするため）
         if _ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 300:
