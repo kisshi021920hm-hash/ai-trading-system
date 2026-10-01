@@ -6,7 +6,7 @@
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.26"
+#property version   "1.27"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -61,7 +61,7 @@ datetime g_last_hybrid_sl_fetch        = 0;    // 最後にFlaskから取得し�
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.26 起動 ===");
+    Print("=== GOLD AI Trader EA v1.27 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
@@ -786,11 +786,40 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
     lot_size = MathMax(min_lot, MathMin(max_lot,
                    MathFloor(lot_size / lot_step) * lot_step));
     lot_size = NormalizeDouble(lot_size, 2);
+
+    // ======== 初期SLをアプリ設定値(-$X)に相当する価格に上書き ========
+    // ロット確定後に計算することで price_distance = initial_sl_usd / (lot × contract) が正確になる
+    double cs = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+    if (lot_size > 0 && cs > 0)
+    {
+        FetchHybridSlConfig();  // 最新設定を確認（キャッシュ済みなら即return）
+        double sl_price_dist  = g_cached_initial_sl_usd / (lot_size * cs);
+        double initial_sl_price = NormalizeDouble(
+            (order_type == ORDER_TYPE_BUY) ? price - sl_price_dist
+                                           : price + sl_price_dist, digits);
+
+        // より保護的な（エントリー価格に近い）SLを採用
+        bool initial_is_tighter = (order_type == ORDER_TYPE_BUY) ? (initial_sl_price > sl)
+                                                                  : (initial_sl_price < sl);
+        if (initial_is_tighter)
+        {
+            Print("🛡️ 初期SL上書き: -$", g_cached_initial_sl_usd,
+                  " → SL価格=", initial_sl_price,
+                  " (価格幅=", NormalizeDouble(sl_price_dist, 2), ")");
+            sl = initial_sl_price;
+        }
+        else
+        {
+            Print("🛡️ 初期SL: -$", g_cached_initial_sl_usd, " 相当=", initial_sl_price,
+                  " / Gemini/デフォルトSL=", sl, " → 既存SLの方が保護的");
+        }
+    }
+
     Print("💰 残高:", balance, currency,
           " リスク:", NormalizeDouble(risk_amount, 2), currency,
           " SL幅:", NormalizeDouble(sl_distance, 2),
           " tick_value:", NormalizeDouble(tick_value, 4),
-          " → ロット:", lot_size);
+          " → ロット:", lot_size, " 最終SL:", sl);
 
     MqlTradeRequest req = {};
     MqlTradeResult  res = {};
