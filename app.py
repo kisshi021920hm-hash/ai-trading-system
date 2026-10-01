@@ -223,18 +223,29 @@ def supabase_headers():
     }
 
 # ==================== MT5 Webhook 自動注文 ====================
-def send_mt5_order(signal_id, direction, entry_price, sl_pips=20, tp_pips=40):
-    """MT5 Webhook サーバーに自動注文を送信し、Supabaseにトレードを記録する"""
+def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=None, sl_pips=20, tp_pips=40):
+    """MT5 Webhook サーバーに自動注文を送信し、Supabaseにトレードを記録する
+
+    Args:
+        sl_price, tp_price: Gemini提案値（指定されている場合はこれを使用）
+        sl_pips, tp_pips: フォールバック値（提案がない場合に使用）
+    """
     if not MT5_WEBHOOK_URL:
         print("⚠️  MT5_WEBHOOK_URL 未設定 → 自動注文スキップ")
         return {"success": False, "error": "Webhook URL not configured"}
 
-    if direction == "BUY":
-        sl_price = round(entry_price - sl_pips * 0.1, 2)
-        tp_price = round(entry_price + tp_pips * 0.1, 2)
+    # Gemini提案値がなければ、pipsから計算
+    if sl_price is None or tp_price is None:
+        if direction == "BUY":
+            sl_price = round(entry_price - sl_pips * 0.1, 2) if sl_price is None else sl_price
+            tp_price = round(entry_price + tp_pips * 0.1, 2) if tp_price is None else tp_price
+        else:
+            sl_price = round(entry_price + sl_pips * 0.1, 2) if sl_price is None else sl_price
+            tp_price = round(entry_price - tp_pips * 0.1, 2) if tp_price is None else tp_price
     else:
-        sl_price = round(entry_price + sl_pips * 0.1, 2)
-        tp_price = round(entry_price - tp_pips * 0.1, 2)
+        # Gemini提案値を使用
+        sl_price = round(sl_price, 2)
+        tp_price = round(tp_price, 2)
 
     payload = {
         "signal_id": signal_id,
@@ -1498,10 +1509,16 @@ def signal_loop():
             auto_result = check_auto_execution(signal_data)
             if auto_result["should_execute"]:
                 print(f"🤖 FULL_AUTO実行: {auto_result['reason']}")
+                # Gemini提案のSL/TPを使用（あれば）
+                sl = signal_data.get('ai_sl_suggestion')
+                tp = signal_data.get('ai_tp_suggestion')
+                print(f"💡 AI提案SL/TP: SL={sl}, TP={tp}")
                 mt5_result = send_mt5_order(
                     signal_id=db_id,
                     direction=auto_result["direction"],
-                    entry_price=signal_data["latest_close"]
+                    entry_price=signal_data["latest_close"],
+                    sl_price=sl,
+                    tp_price=tp
                 )
                 signal_data["auto_executed"] = mt5_result.get("success", False)
                 signal_data["auto_result"] = mt5_result
