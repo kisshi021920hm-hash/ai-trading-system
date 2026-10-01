@@ -2137,14 +2137,18 @@ def ea_signal_push():
     # 確定時刻判定: 秒数 < 5秒 または > (TIMEFRAME * 60 - 5) なら「確定時」
     IS_CANDLE_CONFIRMATION = seconds_until_close < 5 or seconds_until_close > (TIMEFRAME_MINUTES * 60 - 5)
 
-    if not IS_CANDLE_CONFIRMATION:
+    # 【v1.27改改改】ローソク足確定チェック：TRADING_MODE に応じて分岐
+    # MANUAL/SEMI_AUTO: ローソク足確定時のみ AI判定（省エネ）
+    # AI_CLOSE_MODE: 常に AI判定を実行（決済判定が毎回必要）
+    if not IS_CANDLE_CONFIRMATION and TRADING_MODE in ["MANUAL", "SEMI_AUTO"]:
+        # MANUAL/SEMI_AUTO モードのみ、ローソク足中盤でスキップ
         print(f"⏳ ローソク足中盤（確定まで {seconds_until_close}秒）→ シグナル表示のみ（AI判定スキップ）")
         ai = {"valid": None, "confidence": None, "reason": "ローソク足中盤（確定待機中）"}
         _last_gemini_approved = False
         _last_gemini_direction = crossover
         log_system("INFO", f"シグナル受信: {crossover} → ローソク足中盤（AI判定スキップ、確定待機中）")
     # ローソク足確定時のみ、以下の AI 判定処理を実行
-    elif TRADING_MODE in ["MANUAL", "SEMI_AUTO"]:
+    elif TRADING_MODE in ["MANUAL", "SEMI_AUTO"] and IS_CANDLE_CONFIRMATION:
         # 手動・半自動モード: Gemini 分析スキップ（ユーザー判断に委ねる）
         print(f"⏭️ {TRADING_MODE}モード: Gemini分析スキップ（ユーザー判断）")
         ai = {"valid": None, "confidence": None, "reason": f"{TRADING_MODE}モード"}
