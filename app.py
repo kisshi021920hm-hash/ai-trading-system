@@ -223,12 +223,13 @@ def supabase_headers():
     }
 
 # ==================== MT5 Webhook 自動注文 ====================
-def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=None, sl_pips=20, tp_pips=40):
+def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=None, sl_pips=20, tp_pips=40, trailing_stop_pips=15):
     """MT5 Webhook サーバーに自動注文を送信し、Supabaseにトレードを記録する
 
     Args:
         sl_price, tp_price: Gemini提案値（指定されている場合はこれを使用）
         sl_pips, tp_pips: フォールバック値（提案がない場合に使用）
+        trailing_stop_pips: トレーリングストップ幅（デフォルト15pips）
     """
     if not MT5_WEBHOOK_URL:
         print("⚠️  MT5_WEBHOOK_URL 未設定 → 自動注文スキップ")
@@ -247,12 +248,17 @@ def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=No
         sl_price = round(sl_price, 2)
         tp_price = round(tp_price, 2)
 
+    # トレーリングストップの初期値を計算
+    trailing_sl = entry_price - (trailing_stop_pips * 0.1) if direction == "BUY" else entry_price + (trailing_stop_pips * 0.1)
+
     payload = {
         "signal_id": signal_id,
         "direction": direction,
         "entry_price": entry_price,
         "sl": sl_price,
         "tp": tp_price,
+        "trailing_sl": round(trailing_sl, 2),
+        "trailing_stop_pips": trailing_stop_pips,
         "volume": 0.1,
         "magic_number": 20260928,
         "timestamp": datetime.now(timezone.utc).isoformat()
@@ -266,8 +272,9 @@ def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=No
         )
         if response.status_code == 200:
             result = response.json()
-            print(f"✅ MT5注文成功: {direction} @{entry_price} SL={sl_price} TP={tp_price}")
-            log_system("INFO", f"✅ エントリー実行: {direction} @{entry_price}円 SL={sl_price}円 TP={tp_price}円 (Signal#{signal_id})")
+            print(f"✅ MT5注文成功: {direction} @{entry_price} SL={sl_price} TP={tp_price} Trailing={trailing_stop_pips}pips")
+            log_system("INFO", f"✅ エントリー実行: {direction} @{entry_price}円 SL={sl_price}円 TP={tp_price}円 TrailingSL={trailing_sl}円 (Signal#{signal_id})")
+            log_system("INFO", f"📊 トレーリングストップ: {trailing_stop_pips}pips 設定完了（初期値={trailing_sl}円）")
             # Supabase にトレード記録
             req.post(
                 f"{SUPABASE_URL}/rest/v1/trades",
@@ -280,11 +287,13 @@ def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=No
                     "auto_executed": True,
                     "sl": sl_price,
                     "tp": tp_price,
+                    "trailing_sl": trailing_sl,
+                    "trailing_pips": trailing_stop_pips,
                 },
                 headers={**supabase_headers(), "Prefer": "return=minimal"},
                 timeout=10
             )
-            log_system("INFO", f"📊 トレード記録保存: {direction} エントリー価格={entry_price} (SL={sl_price}, TP={tp_price})")
+            log_system("INFO", f"📊 トレード記録保存: {direction} エントリー価格={entry_price} (SL={sl_price}, TP={tp_price}, TrailingSL={trailing_sl})")
             return {"success": True, **result}
         else:
             print(f"❌ MT5 Webhook エラー: {response.status_code} {response.text}")
@@ -851,20 +860,33 @@ ADX={ea_data.get('adx')} DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus
         if "```" in text:
             text = text.split("```")[1].replace("json", "").strip()
         result = json.loads(text)
+
+        # Gemini 判定結果をシステムログに記録
+        valid = bool(result.get('valid', False))
+        confidence = int(result.get('confidence', 0))
+        reason = str(result.get('reason', ''))
+        sl_sugg = result.get('sl_suggestion')
+        tp_sugg = result.get('tp_suggestion')
+
+        log_system("INFO", f"🤖 Gemini判定: {direction} → 有効={valid} 信頼度={confidence}% (SL={sl_sugg}, TP={tp_sugg})")
+        log_system("INFO", f"📝 判定理由: {reason}")
+
         return {
-            'valid': bool(result.get('valid', False)),
-            'confidence': int(result.get('confidence', 0)),
-            'reason': str(result.get('reason', '')),
-            'sl_suggestion': result.get('sl_suggestion'),
-            'tp_suggestion': result.get('tp_suggestion'),
+            'valid': valid,
+            'confidence': confidence,
+            'reason': reason,
+            'sl_suggestion': sl_sugg,
+            'tp_suggestion': tp_sugg,
             'key_level': str(result.get('key_level', '')),
         }
     except Exception as e:
         err_str = str(e)
         print(f"❌ Gemini EAシグナル分析エラー: {err_str[:100]}")
+        log_system("ERROR", f"❌ Gemini API エラー: {err_str[:150]}")
         is_quota = "クォータ制限中" in err_str or "429" in err_str or "quota" in err_str.lower()
         if is_quota:
             # クォータ時: valid=None/confidence=None で「判定不能」扱い（ダマシ扱いしない）
+            log_system("WARNING", f"⏳ Gemini クォータ制限: {direction}シグナルは一時スキップ")
             return {'valid': None, 'confidence': None, 'reason': 'クォータ制限中 - 数分後に自動回復します',
                     'sl_suggestion': None, 'tp_suggestion': None, 'key_level': '', 'quota_error': True}
         return {'valid': False, 'confidence': 0, 'reason': err_str[:200],
@@ -1703,9 +1725,11 @@ def set_timeframe():
     if tf not in [1, 5, 15, 30, 60]:
         return jsonify({"error": f"Invalid timeframe: {tf}"}), 400
     if tf != TIMEFRAME_MINUTES:
+        old_tf = TIMEFRAME_MINUTES
         TIMEFRAME_MINUTES = tf
         settings_changed.set()
         print(f"📊 時間足変更: {tf}分足（ループ即座再開）")
+        log_system("INFO", f"⚙️ 設定変更: 時間足 {old_tf}分 → {tf}分")
     return jsonify({"status": "ok", "timeframe": tf})
 
 @app.route("/api/settings/mode", methods=["POST", "OPTIONS"])
@@ -1720,6 +1744,7 @@ def set_mode():
         TEST_MODE = new_test
         settings_changed.set()
         print(f"{'🧪 TEST_MODE ON' if TEST_MODE else '🚀 PRODUCTION ON'}（ループ即座再開）")
+        log_system("INFO", f"⚙️ 設定変更: 運用モード {'TEST' if TEST_MODE else 'PRODUCTION'}")
     return jsonify({"status": "ok", "mode": mode, "test_mode": TEST_MODE})
 
 @app.route("/api/settings/crossover", methods=["POST", "OPTIONS"])
@@ -1732,9 +1757,11 @@ def set_crossover():
     if mode not in ["RSI", "MACD", "RSI_MACD", "COMPOSITE"]:
         return jsonify({"error": f"Invalid crossover_mode: {mode}"}), 400
     if mode != CROSSOVER_MODE:
+        old_mode = CROSSOVER_MODE
         CROSSOVER_MODE = mode
         settings_changed.set()
         print(f"📊 クロスオーバー方式変更: {mode}（ループ即座再開）")
+        log_system("INFO", f"⚙️ 設定変更: クロスオーバー方式 {old_mode} → {mode}")
     return jsonify({"status": "ok", "crossover_mode": mode})
 
 @app.route("/api/settings/trading-mode", methods=["POST", "OPTIONS"])
@@ -1747,8 +1774,10 @@ def set_trading_mode():
     valid_modes = ["MANUAL", "SEMI_AUTO", "FULL_AUTO", "AI_CLOSE_MODE"]
     if mode not in valid_modes:
         return jsonify({"error": f"Invalid trading_mode: {mode}. Valid: {valid_modes}"}), 400
+    old_mode = TRADING_MODE
     TRADING_MODE = mode
     print(f"🔄 トレードモード変更: {mode}")
+    log_system("INFO", f"⚙️ 設定変更: トレードモード {old_mode} → {mode}")
     settings_changed.set()  # signal_loop の即座再開を通知
     return jsonify({
         "status": "ok",
@@ -1770,8 +1799,10 @@ def set_auto_threshold():
     threshold = int(data.get("threshold", 70))
     if not (0 <= threshold <= 100):
         return jsonify({"error": "threshold must be 0-100"}), 400
+    old_threshold = AUTO_CONFIDENCE_THRESHOLD
     AUTO_CONFIDENCE_THRESHOLD = threshold
     print(f"🎯 自動実行閾値変更: {threshold}%")
+    log_system("INFO", f"⚙️ 設定変更: 自動実行閾値 {old_threshold}% → {threshold}%")
     return jsonify({"status": "ok", "threshold": threshold})
 
 @app.route("/api/execute-order", methods=["POST", "OPTIONS"])
@@ -2161,6 +2192,10 @@ def ea_signal_push():
           f"close={ea_data.get('latest_close')} "
           f"買い{ea_data.get('buy_score')}点 vs 売り{ea_data.get('sell_score')}点 "
           f"ADX={ea_data.get('adx')} mode={TRADING_MODE}")
+
+    # シグナル受信を詳細ログに記録
+    log_system("INFO", f"📡 シグナル受信: {crossover} @ {ea_data.get('latest_close')}円 (買={ea_data.get('buy_score')}, 売={ea_data.get('sell_score')}, ADX={ea_data.get('adx')})")
+    _last_ea_signal_time = time.time()
 
     # ==================== v1.15 ローソク足確定時刻チェック ====================
     # シグナルが来たのがローソク足確定時か中盤かを判定
