@@ -1384,11 +1384,6 @@ def start_background_jobs():
     _status_log_thread.start()
     log_system("INFO", "✅ Status logging thread started")
 
-    # AI_CLOSE_MODE 用ポジション監視ループ
-    position_monitor_thread = threading.Thread(target=position_monitor_loop, daemon=True)
-    position_monitor_thread.start()
-    log_system("INFO", "✅ Position monitor thread started")
-
 # ==================== Status Dashboard API ====================
 @app.route("/api/status-logs/latest", methods=["GET"])
 def get_latest_status_logs():
@@ -2697,8 +2692,6 @@ if __name__ == "__main__":
     start_background_jobs()
     t = threading.Thread(target=signal_loop, daemon=True)
     t.start()
-    t2 = threading.Thread(target=position_monitor_loop, daemon=True)
-    t2.start()
     t3 = threading.Thread(target=weekly_analysis_loop, daemon=True)
     t3.start()
     port = int(os.environ.get("PORT", 5000))
