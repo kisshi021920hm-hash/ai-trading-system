@@ -1465,58 +1465,6 @@ def send_position_alert_push(title: str, body: str):
         delete_fcm_token(t)
     return results
 
-# ==================== ポジション監視ループ（Phase 7）====================
-def position_monitor_loop():
-    """30分ごとに保有ポジションをGeminiで監視し、危険なら FCM 通知を送る"""
-    global _position_monitor_last
-    print(f"🔍 ポジション監視ループ開始（{POSITION_MONITOR_INTERVAL // 60}分間隔）")
-    # 起動直後は1サイクル待ってから開始
-    time.sleep(POSITION_MONITOR_INTERVAL)
-    while True:
-        try:
-            resp = req.get(
-                f"{SUPABASE_URL}/rest/v1/trades",
-                params={"status": "eq.OPEN", "select": "*", "order": "entry_time.asc"},
-                headers=supabase_headers(),
-                timeout=10
-            )
-            if not resp.ok:
-                print(f"⚠️ ポジション監視: Supabase取得失敗 {resp.status_code}")
-            else:
-                open_positions = resp.json()
-                if not open_positions:
-                    print("🔍 ポジション監視: OPENポジションなし → スキップ")
-                else:
-                    print(f"🔍 ポジション監視: {len(open_positions)}件を分析中...")
-                    df = fetch_yahoo_data(15)
-                    if df is None:
-                        print("⚠️ ポジション監視: 価格データ取得失敗")
-                    else:
-                        for pos in open_positions[:3]:  # 最大3件（クォータ節約）
-                            result = gemini_monitor_position(pos, df)
-                            risk = result['risk']
-                            direction = pos.get('direction', '?')
-                            unrealized_pl = result['unrealized_pl']
-                            print(
-                                f"🔍 監視結果: {direction} @{pos.get('entry_price')} "
-                                f"現在{result['current_price']} 含み損益{unrealized_pl:+.2f}$ "
-                                f"→ リスク[{risk}] {result['reason']}"
-                            )
-                            if risk in ('HIGH', 'MEDIUM'):
-                                direction_icon = "📈" if direction == 'BUY' else "📉"
-                                risk_icon = "🚨" if risk == 'HIGH' else "⚠️"
-                                title = f"{risk_icon} ポジション警告 [{risk}]"
-                                body = (
-                                    f"{direction_icon} {direction} @{pos.get('entry_price')} → "
-                                    f"現在{result['current_price']} 含み損益:{unrealized_pl:+.2f}$ | "
-                                    f"{result['reason']}"
-                                )
-                                send_position_alert_push(title, body)
-            _position_monitor_last = time.time()
-        except Exception as e:
-            print(f"❌ ポジション監視ループエラー: {e}")
-        time.sleep(POSITION_MONITOR_INTERVAL)
-
 # ==================== REST エンドポイント ====================
 @app.route("/push-signal", methods=["POST"])
 def push_signal():
