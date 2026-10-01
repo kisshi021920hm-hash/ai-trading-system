@@ -135,9 +135,9 @@ def log_system(level, message):
 
 # ==================== Gemini モデルプール（フォールバック対応）====================
 GEMINI_MODELS = [
-    "gemini-3.8-flash",        # 主力・最新（高速・万能）
-    "gemini-3.5-flash-lite",   # 軽量・低コスト
-    "gemini-3.1-pro",          # 高度な推論・マルチモーダル対応
+    "gemini-2.0-flash",        # 主力・最新（高速・万能）
+    "gemini-1.5-flash",        # 軽量・低コスト フォールバック1
+    "gemini-1.5-pro",          # 高精度 フォールバック2
 ]
 _current_gemini_model_index = 0  # 現在使用中のモデルインデックス
 _gemini_model_fallback_count = 0  # フォールバック実行回数（監視用）
@@ -791,7 +791,7 @@ RSI: {signal['rsi']}
     try:
         text = _gemini_generate(prompt)
         if "```" in text:
-            text = text.split("```")[1].replace("json", "").strip()
+            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
         result = json.loads(text)
         return {
             'valid': bool(result.get('valid', False)),
@@ -841,7 +841,7 @@ ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={
     try:
         text = _gemini_generate(prompt)
         if "```" in text:
-            text = text.split("```")[1].replace("json", "").strip()
+            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
         result = json.loads(text)
         return {
             'valid': bool(result.get('valid', False)),
@@ -961,7 +961,7 @@ DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr
     try:
         text = _gemini_generate(prompt)
         if "```" in text:
-            text = text.split("```")[1].replace("json", "").strip()
+            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
         result = json.loads(text)
 
         # Gemini 判定結果をシステムログに記録
@@ -1057,7 +1057,7 @@ RSI: {current_scores.get('rsi', 50):.1f}（過買売）
     try:
         text = _gemini_generate(prompt, max_retries=1)
         if "```" in text:
-            text = text.split("```")[1].replace("json", "").strip()
+            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
         result = json.loads(text)
         should_close = bool(result.get('should_close', False))
         confidence = int(result.get('confidence', 0))
@@ -1124,7 +1124,7 @@ EMA20={comp_data.get('ema20', 'N/A')} / EMA50={comp_data.get('ema50', 'N/A')}
     try:
         text = _gemini_generate(prompt, max_retries=0)
         if "```" in text:
-            text = text.split("```")[1].replace("json", "").strip()
+            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
         result = json.loads(text)
         return {
             'risk': str(result.get('risk', 'LOW')).upper(),
@@ -1329,7 +1329,7 @@ def position_monitor_loop():
                     continue
 
                 pos_id = pos.get('id')
-                pos_side = pos.get('side', '').upper()
+                pos_side = pos.get('direction', '').upper()  # tradesテーブルは'direction'フィールド
                 crossover = _ea_latest_scores.get('crossover')
                 current_close = _ea_latest_scores.get('close', 0.0)
                 entry_price = float(pos.get('entry_price', 0.0))
@@ -1824,6 +1824,7 @@ def set_timeframe():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json()
+    if not data: return jsonify({"error": "No JSON body"}), 400
     tf = int(data.get("timeframe", 30))
     if tf not in [1, 5, 15, 30, 60]:
         return jsonify({"error": f"Invalid timeframe: {tf}"}), 400
@@ -1841,6 +1842,7 @@ def set_mode():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json()
+    if not data: return jsonify({"error": "No JSON body"}), 400
     mode = data.get("mode", "PRODUCTION")
     new_test = (mode == "TEST")
     if new_test != TEST_MODE:
@@ -1856,6 +1858,7 @@ def set_crossover():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json()
+    if not data: return jsonify({"error": "No JSON body"}), 400
     mode = data.get("crossover_mode", "RSI")
     if mode not in ["RSI", "MACD", "RSI_MACD", "COMPOSITE"]:
         return jsonify({"error": f"Invalid crossover_mode: {mode}"}), 400
@@ -1873,6 +1876,7 @@ def set_trading_mode():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json()
+    if not data: return jsonify({"error": "No JSON body"}), 400
     mode = data.get("trading_mode", "MANUAL")
     valid_modes = ["MANUAL", "SEMI_AUTO", "FULL_AUTO", "AI_CLOSE_MODE"]
     if mode not in valid_modes:
@@ -1899,6 +1903,7 @@ def set_auto_threshold():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json()
+    if not data: return jsonify({"error": "No JSON body"}), 400
     threshold = int(data.get("threshold", 70))
     if not (0 <= threshold <= 100):
         return jsonify({"error": "threshold must be 0-100"}), 400
@@ -1914,6 +1919,7 @@ def execute_order():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     data = request.get_json()
+    if not data: return jsonify({"error": "No JSON body"}), 400
     signal_id = data.get("signal_id")
     direction = data.get("direction", "BUY")
     entry_price = float(data.get("entry_price", 0))
@@ -2631,7 +2637,7 @@ def ea_signal_push():
         'ai_sl_suggestion': ai.get('sl_suggestion'),
         'ai_tp_suggestion': ai.get('tp_suggestion'),
         'ai_key_level':     ai.get('key_level', ''),
-        'timeframe':        15,
+        'timeframe':        TIMEFRAME_MINUTES,
         'test_mode':        TEST_MODE,
         'source':           'EA_PUSH',
         'generated_at':     datetime.now(timezone.utc).isoformat(),
@@ -2917,7 +2923,7 @@ MIN_CONFIDENCE=50% / MIN_TRADE_INTERVAL=900秒(15分) / RISK_PERCENT=2%
     try:
         text = _gemini_generate(prompt, max_retries=1)
         if "```" in text:
-            text = text.split("```")[1].replace("json", "").strip()
+            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
         result = json.loads(text)
         return {
             "summary": str(result.get("summary", "")),
