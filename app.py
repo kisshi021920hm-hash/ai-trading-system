@@ -95,6 +95,9 @@ _last_ai_decision = {
     "executed_action": "",          # 実際の実行内容（SELL 0.02, CLOSE, など）
 }
 
+# ポジション監視用：前回のシグナル記憶（{position_id: crossover}）
+_last_position_signal = {}
+
 # システムログ記録（最大 100 行までメモリ保持）
 _system_logs = []
 _system_logs_lock = threading.Lock()
@@ -1171,49 +1174,41 @@ def position_monitor_loop():
                     print("⏳ 最新スコア待機中...")
                     continue
 
-                # 【v1.27改改】逆方向シグナルでの自動決済
-                crossover = _ea_latest_scores.get('crossover')
+                pos_id = pos.get('id')
                 pos_side = pos.get('side', '').upper()
+                crossover = _ea_latest_scores.get('crossover')
+                current_close = _ea_latest_scores.get('close', 0.0)
+                entry_price = float(pos.get('entry_price', 0.0))
+                adx = _ea_latest_scores.get('adx', 0.0)
 
-                if crossover and pos_side:
-                    is_reverse = (crossover == "UP_CROSS" and pos_side == "SELL") or \
-                                 (crossover == "DOWN_CROSS" and pos_side == "BUY")
+                # 【優先度1】同一方向クロス継続中の低信頼度チェック（最優先）
+                # 同じ方向のシグナルが続いていても、信頼度が低いなら決済して損切り
+                if crossover and pos_side and _last_ai_decision.get('confidence_score') is not None:
+                    same_direction = (crossover == "UP_CROSS" and pos_side == "BUY") or \
+                                     (crossover == "DOWN_CROSS" and pos_side == "SELL")
 
-                    if is_reverse:
-                        current_close = _ea_latest_scores.get('close', 0.0)
-                        entry_price = float(pos.get('entry_price', 0.0))
-                        pnl_pips = abs(current_close - entry_price) if current_close > 0 and entry_price > 0 else 0
-
-                        print(f"🔄 逆方向シグナル決済: ポジション#{pos.get('id')} "
-                              f"({pos_side}ポジション中に{crossover})")
+                    if same_direction and _last_ai_decision.get('confidence_score', 0) < CLOSE_CONFIDENCE_THRESHOLD:
+                        current_pnl = abs(current_close - entry_price) if current_close > 0 and entry_price > 0 else 0
+                        print(f"⚠️ 低信頼度決済: ポジション#{pos_id} ({pos_side}ポジション中に{crossover}だが信頼度={_last_ai_decision.get('confidence_score')}%)")
                         try:
                             req.patch(
                                 f"{SUPABASE_URL}/rest/v1/trades",
-                                params={"id": f"eq.{pos.get('id')}"},
+                                params={"id": f"eq.{pos_id}"},
                                 json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
                                 headers={**supabase_headers(), "Prefer": "return=minimal"},
                                 timeout=10
                             )
-                            log_system("INFO", f"🔄 決済: ポジション#{pos.get('id')} 逆方向シグナル（{crossover}でエグジット、損益={pnl_pips:.2f}pips）")
-                            _last_ai_decision = {
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                                "decision_type": "CLOSE",
-                                "crossover_direction": crossover,
-                                "confidence_score": 100,
-                                "decision_reason": f"逆方向シグナル検出。{pos_side}ポジション中に{crossover}が発生。",
-                                "executed_action": f"CLOSE_REVERSE_SIGNAL (ポジション#{pos.get('id')})",
-                            }
+                            log_system("INFO", f"⚠️ 決済: ポジション#{pos_id} 同一方向クロス継続中の低信頼度で決済（信頼度={_last_ai_decision.get('confidence_score')}%<{CLOSE_CONFIDENCE_THRESHOLD}%）")
+                            _last_ai_decision["decision_type"] = "CLOSE"
+                            _last_ai_decision["confidence_score"] = 100
+                            _last_ai_decision["decision_reason"] = f"同一方向クロス継続中も信頼度不足。{pos_side}ポジション中に{crossover}だが信頼度{_last_ai_decision.get('confidence_score')}%<{CLOSE_CONFIDENCE_THRESHOLD}%で損切り。"
+                            _last_ai_decision["executed_action"] = f"CLOSE_LOW_CONFIDENCE (ポジション#{pos_id})"
                             continue
                         except Exception as e:
-                            print(f"❌ 逆方向決済エラー: {e}")
-                            log_system("ERROR", f"逆方向決済エラー: {e}")
+                            print(f"❌ 低信頼度決済エラー: {e}")
+                            log_system("ERROR", f"低信頼度決済エラー: {e}")
 
-                # 【v1.27改】レンジ相場での利益確定判定
-                adx = _ea_latest_scores.get('adx', 0.0)
-                current_close = _ea_latest_scores.get('close', 0.0)
-                entry_price = float(pos.get('entry_price', 0.0))
-                pos_side = pos.get('side', '').upper()
-
+                # 【優先度2】レンジ相場での利益確定判定
                 if adx < 20 and current_close > 0 and entry_price > 0:
                     pnl_pips = abs(current_close - entry_price)
                     has_profit = False
@@ -1224,29 +1219,94 @@ def position_monitor_loop():
                         has_profit = True
 
                     if has_profit:
-                        print(f"🎯 レンジ相場での利益確定: ポジション#{pos.get('id')} "
+                        print(f"🎯 レンジ相場での利益確定: ポジション#{pos_id} "
                               f"(ADX={adx:.1f}<20, 含み益={pnl_pips:.2f}pips)")
                         try:
                             req.patch(
                                 f"{SUPABASE_URL}/rest/v1/trades",
-                                params={"id": f"eq.{pos.get('id')}"},
+                                params={"id": f"eq.{pos_id}"},
                                 json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
                                 headers={**supabase_headers(), "Prefer": "return=minimal"},
                                 timeout=10
                             )
-                            log_system("INFO", f"🎯 決済: ポジション#{pos.get('id')} レンジ相場での利益確定（ADX={adx:.1f}, 含み益={pnl_pips:.2f}pips）")
+                            log_system("INFO", f"🎯 決済: ポジション#{pos_id} レンジ相場での利益確定（ADX={adx:.1f}, 含み益={pnl_pips:.2f}pips）")
                             _last_ai_decision = {
                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                                 "decision_type": "CLOSE",
                                 "crossover_direction": None,
                                 "confidence_score": 95,
                                 "decision_reason": f"レンジ相場（ADX={adx:.1f}<20）で含み益あり。反転リスク回避のため決済。",
-                                "executed_action": f"CLOSE_PROFIT_LOCK (ポジション#{pos.get('id')})",
+                                "executed_action": f"CLOSE_PROFIT_LOCK (ポジション#{pos_id})",
                             }
                             continue
                         except Exception as e:
                             print(f"❌ レンジ相場決済エラー: {e}")
                             log_system("ERROR", f"レンジ相場決済エラー: {e}")
+
+                # 【優先度3】シグナル消滅（NONE）での決済判定
+                last_signal = _last_position_signal.get(pos_id)
+                if last_signal is not None and crossover is None:
+                    # 前回はシグナルがあったのに、今回はない = トレンド終了
+                    current_pnl = abs(current_close - entry_price) if current_close > 0 and entry_price > 0 else 0
+                    print(f"📉 シグナル消滅決済: ポジション#{pos_id} (前回:{last_signal} → 今回:NONE = トレンド終了)")
+                    try:
+                        req.patch(
+                            f"{SUPABASE_URL}/rest/v1/trades",
+                            params={"id": f"eq.{pos_id}"},
+                            json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
+                            headers={**supabase_headers(), "Prefer": "return=minimal"},
+                            timeout=10
+                        )
+                        log_system("INFO", f"📉 決済: ポジション#{pos_id} シグナル消滅（前回:{last_signal}→現在:NONE、トレンド終了、損益={current_pnl:.2f}pips）")
+                        _last_ai_decision = {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "decision_type": "CLOSE",
+                            "crossover_direction": None,
+                            "confidence_score": 90,
+                            "decision_reason": f"シグナル消滅。前回{last_signal}だったがNONEに。トレンド終了判定。",
+                            "executed_action": f"CLOSE_SIGNAL_NONE (ポジション#{pos_id})",
+                        }
+                        del _last_position_signal[pos_id]
+                        continue
+                    except Exception as e:
+                        print(f"❌ シグナル消滅決済エラー: {e}")
+                        log_system("ERROR", f"シグナル消滅決済エラー: {e}")
+
+                # 【優先度4】逆方向シグナルでの決済
+                if crossover and pos_side:
+                    is_reverse = (crossover == "UP_CROSS" and pos_side == "SELL") or \
+                                 (crossover == "DOWN_CROSS" and pos_side == "BUY")
+
+                    if is_reverse:
+                        current_pnl = abs(current_close - entry_price) if current_close > 0 and entry_price > 0 else 0
+                        print(f"🔄 逆方向シグナル決済: ポジション#{pos_id} "
+                              f"({pos_side}ポジション中に{crossover})")
+                        try:
+                            req.patch(
+                                f"{SUPABASE_URL}/rest/v1/trades",
+                                params={"id": f"eq.{pos_id}"},
+                                json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
+                                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                                timeout=10
+                            )
+                            log_system("INFO", f"🔄 決済: ポジション#{pos_id} 逆方向シグナル（{crossover}でエグジット、損益={current_pnl:.2f}pips）")
+                            _last_ai_decision = {
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "decision_type": "CLOSE",
+                                "crossover_direction": crossover,
+                                "confidence_score": 100,
+                                "decision_reason": f"逆方向シグナル検出。{pos_side}ポジション中に{crossover}が発生。",
+                                "executed_action": f"CLOSE_REVERSE_SIGNAL (ポジション#{pos_id})",
+                            }
+                            del _last_position_signal[pos_id]
+                            continue
+                        except Exception as e:
+                            print(f"❌ 逆方向決済エラー: {e}")
+                            log_system("ERROR", f"逆方向決済エラー: {e}")
+
+                # 前回のシグナルを記憶
+                if crossover:
+                    _last_position_signal[pos_id] = crossover
 
                 # Gemini で決済判定
                 close_decision = gemini_position_close_decision(pos, _ea_latest_scores)
