@@ -86,6 +86,8 @@ _ea_latest_scores: dict = {}  # EAから受信した最新スコア（ハート�
 _ea_signal_dedup: dict = {}  # 重複防止キャッシュ {crossover: last_time}
 _force_close_pending = False   # AI_CLOSE_MODE: Gemini決済指示フラグ
 _force_close_set_time = 0.0    # フラグをセットした時刻（120秒後に自動リセット）
+_last_gemini_close_call_time = 0.0   # AI_CLOSE_MODE: クロスオーバー決済判断の最終呼び出し時刻（60秒クールダウン用）
+_last_gemini_any_call_time = 0.0     # グローバルGemini呼び出し最終時刻（30秒間隔制限用）
 
 # デモ用ルールベースエントリー設定
 DEMO_RULE_BASED = os.environ.get("DEMO_RULE_BASED", "false").lower() == "true"
@@ -144,6 +146,7 @@ GEMINI_MODELS = [
 ]
 _current_gemini_model_index = 0  # 現在使用中のモデルインデックス
 _gemini_model_fallback_count = 0  # フォールバック実行回数（監視用）
+GEMINI_MIN_CALL_INTERVAL = 30    # Gemini呼び出しの最低間隔（秒）- 連続エラー防止
 
 # ==================== 初期化 ====================
 app = Flask(__name__)
@@ -728,8 +731,17 @@ def _gemini_generate(prompt, max_retries=1):
     - 429（上限）・404（廃止）・503（障害）→ 次のモデルへ即切り替え
     - 一時的なエラー（5xx以外）→ リトライ後に切り替え
     - 全モデル失敗でエラー返却
+    - グローバル30秒間隔制限: 連続呼び出しによる429エラーを防止
     """
-    global _current_gemini_model_index, _gemini_model_fallback_count, gemini_model
+    global _current_gemini_model_index, _gemini_model_fallback_count, gemini_model, _last_gemini_any_call_time
+
+    # グローバルGemini呼び出し間隔制限（30秒以内は429エラー扱いでスキップ）
+    now_check = time.time()
+    if _last_gemini_any_call_time > 0 and now_check - _last_gemini_any_call_time < GEMINI_MIN_CALL_INTERVAL:
+        remaining = GEMINI_MIN_CALL_INTERVAL - (now_check - _last_gemini_any_call_time)
+        print(f"⏭️ Gemini グローバルクールダウン中（あと{remaining:.0f}秒）→ スキップ")
+        raise Exception(f"Geminiクールダウン中（{remaining:.0f}秒後に再試行可能）- 429クォータ制限中")
+    _last_gemini_any_call_time = time.time()
 
     models_attempted = 0
 
@@ -2448,6 +2460,7 @@ def ea_heartbeat():
 def ea_signal_push():
     """MT5 EAからリアルタイム指標データを受信 → Gemini分析 → Supabase保存 → FCM通知"""
     global _last_ea_signal_time, _last_gemini_approved, _last_gemini_direction, _ea_signal_dedup, _last_ai_decision
+    global _last_gemini_close_call_time, _force_close_pending, _force_close_set_time
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
@@ -2497,6 +2510,8 @@ def ea_signal_push():
 
     # 確定時刻判定: 秒数 < 5秒 または > (TIMEFRAME * 60 - 5) なら「確定時」
     IS_CANDLE_CONFIRMATION = seconds_until_close < 5 or seconds_until_close > (TIMEFRAME_MINUTES * 60 - 5)
+
+    open_positions = []  # 後段のAI_CLOSE_MODEブロックでも参照できるよう初期化
 
     # 【v1.27改改改】ローソク足確定チェック：TRADING_MODE に応じて分岐
     # MANUAL/SEMI_AUTO: ローソク足確定時のみ AI判定（省エネ）
@@ -2560,6 +2575,35 @@ def ea_signal_push():
             }
             log_system("INFO", f"AI判定: {crossover} → 有効={ai.get('valid')} 信頼度={ai.get('confidence')}% 理由={ai.get('reason')}")
         _last_gemini_direction = crossover
+
+    # ==================== AI_CLOSE_MODE: クロスオーバー時のGemini決済判断 ====================
+    # クロスが出るたびに実行（最低60秒クールダウン）- 15分ループと独立して判断
+    if TRADING_MODE == "AI_CLOSE_MODE" and open_positions and \
+            time.time() - _last_gemini_close_call_time >= 60:
+        try:
+            current_scores = {
+                "buy_score":  ea_data.get("buy_score", 0),
+                "sell_score": ea_data.get("sell_score", 0),
+                "adx":        float(ea_data.get("adx", 0)),
+                "rsi":        float(ea_data.get("rsi", 0)),
+                "close":      float(ea_data.get("latest_close", 0)),
+            }
+            for pos in open_positions:
+                close_result = gemini_position_close_decision(pos, current_scores)
+                if close_result.get("should_close") and \
+                        close_result.get("confidence", 0) >= CLOSE_CONFIDENCE_THRESHOLD:
+                    _force_close_pending = True
+                    _force_close_set_time = time.time()
+                    log_system("INFO",
+                        f"🔴 クロスオーバー決済判断: ポジション#{pos.get('id')} → Gemini決済指示 "
+                        f"(信頼度{close_result.get('confidence')}% 理由:{close_result.get('reason','')})")
+                    print(f"🔴 AI_CLOSE_MODE: クロス時決済指示 → force_close=True "
+                          f"(conf={close_result.get('confidence')}%)")
+                    break
+            _last_gemini_close_call_time = time.time()
+        except Exception as e:
+            print(f"⚠️ AI_CLOSE_MODE クロスオーバー決済判断エラー: {e}")
+            log_system("WARNING", f"AI_CLOSE_MODE クロスオーバー決済判断エラー: {e}")
 
     # 🚨 【v1.37改】新シグナルが低信頼度の場合、OPEN ポジションを即座に決済（リアルタイム）
     if crossover and ai.get('confidence') is not None:
