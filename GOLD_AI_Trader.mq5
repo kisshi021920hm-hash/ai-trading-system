@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
-//|  GOLD AI Trader EA  v1.22                                        |
+//|  GOLD AI Trader EA  v1.24                                        |
 //|  Render API + Gemini AI シグナルによる自動売買                      |
 //|  対象: XAUUSD (GOLD) M15                                         |
 //|  決済: 逆クロスでドテン（SL/TPでも決済）                             |
-//|  v1.22: MT5リアルタイム指標をサーバーにプッシュ（Yahoo Finance廃止）  |
+//|  v1.24: テクニカル指標強化版（OHLC + candle_history + Gemini分析向上）
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.23"
+#property version   "1.24"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -117,9 +117,10 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//  MT5リアルタイム指標計算 → /ea-signal プッシュ（v1.22）
+//  MT5リアルタイム指標計算 → /ea-signal プッシュ（v1.24: テクニカル強化版）
 //+------------------------------------------------------------------+
 void PushSignalToServer(string crossover, double close_price,
+                        double open_price, double high_price, double low_price,
                         double rsi, double macd, double macd_sig,
                         double ema20, double ema50, double ema200,
                         double bb_upper, double bb_lower,
@@ -128,10 +129,31 @@ void PushSignalToServer(string crossover, double close_price,
                         double atr, int buy_score, int sell_score,
                         string buy_reasons, string sell_reasons)
 {
+    // 過去20本のローソク足データを取得（テクニカル強化用）
+    MqlRates rates[20];
+    CopyRates(_Symbol, PERIOD_M15, 0, 20, rates);
+
+    string candle_history = "[";
+    for (int i = 19; i >= 0; i--)  // 古い足から新しい足へ
+    {
+        if (i < 19) candle_history += ",";
+        candle_history += "{"
+            + "\"open\":"  + DoubleToString(rates[i].open,  2)
+            + ",\"high\":" + DoubleToString(rates[i].high,  2)
+            + ",\"low\":"  + DoubleToString(rates[i].low,   2)
+            + ",\"close\":" + DoubleToString(rates[i].close, 2)
+            + "}";
+    }
+    candle_history += "]";
+
     // buy_reasons/sell_reasons は日本語のためJSON送信から除外（スコアと数値指標で代替）
     string json = "{"
         + "\"crossover\":\""    + crossover                          + "\""
         + ",\"latest_close\":"  + DoubleToString(close_price, 2)
+        + ",\"current_open\":"  + DoubleToString(open_price,   2)
+        + ",\"current_high\":"  + DoubleToString(high_price,   2)
+        + ",\"current_low\":"   + DoubleToString(low_price,    2)
+        + ",\"candle_history\":" + candle_history
         + ",\"rsi\":"           + DoubleToString(rsi,          2)
         + ",\"macd\":"          + DoubleToString(macd,         4)
         + ",\"macd_signal\":"   + DoubleToString(macd_sig,     4)
@@ -291,8 +313,13 @@ void ComputeAndPushSignal()
     if (crossover == g_last_pushed_crossover &&
         TimeCurrent() - g_last_signal_push_time < SIGNAL_PUSH_INTERVAL) return;
 
-    // サーバーにプッシュ
-    PushSignalToServer(crossover, cur_close,
+    // 現在足の OHLC を取得（v1.24テクニカル強化用）
+    double cur_open  = iOpen (_Symbol, PERIOD_M15, 0);
+    double cur_high  = iHigh (_Symbol, PERIOD_M15, 0);
+    double cur_low   = iLow  (_Symbol, PERIOD_M15, 0);
+
+    // サーバーにプッシュ（v1.24: OHLC + candle_history追加）
+    PushSignalToServer(crossover, cur_close, cur_open, cur_high, cur_low,
                        cur_rsi, cur_macd, cur_macd_sig,
                        cur_ema20, cur_ema50, cur_ema200,
                        cur_bb_upper, cur_bb_lower,
