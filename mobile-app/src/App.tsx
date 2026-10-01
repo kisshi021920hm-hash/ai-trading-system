@@ -3,6 +3,7 @@ import { io, Socket } from "socket.io-client";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { PushNotifications } from "@capacitor/push-notifications";
 import { Haptics } from "@capacitor/haptics";
+import { Capacitor } from "@capacitor/core";
 import StatusDashboard from "./StatusDashboard";
 
 // ==================== 型定義 ====================
@@ -155,29 +156,31 @@ export default function App() {
   const [fcmStatus, setFcmStatus] = useState<string>("初期化中...");
 
   useEffect(() => {
-    // FCMプッシュ通知の登録
-    PushNotifications.requestPermissions().then(result => {
-      if (result.receive === "granted") {
-        setFcmStatus("登録中...");
-        PushNotifications.register();
-      } else {
-        setFcmStatus("⚠️ 通知許可なし");
-      }
-    });
-    PushNotifications.addListener("registration", async (token) => {
-      setFcmStatus("✅ FCM登録済");
-      try { localStorage.setItem("gt_fcm_token", token.value); } catch (_) {}
-      try {
-        await fetch(`${RENDER_URL}/register-token`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ token: token.value }),
-        });
-      } catch (_) { setFcmStatus("⚠️ サーバー送信失敗"); }
-    });
-    PushNotifications.addListener("registrationError", (err) => {
-      setFcmStatus(`❌ FCM失敗: ${err.error}`);
-    });
+    // FCMプッシュ通知の登録（ネイティブのみ）
+    if (Capacitor.isNativePlatform()) {
+      PushNotifications.requestPermissions().then(result => {
+        if (result.receive === "granted") {
+          setFcmStatus("登録中...");
+          PushNotifications.register();
+        } else {
+          setFcmStatus("⚠️ 通知許可なし");
+        }
+      });
+      PushNotifications.addListener("registration", async (token) => {
+        setFcmStatus("✅ FCM登録済");
+        try { localStorage.setItem("gt_fcm_token", token.value); } catch (_) {}
+        try {
+          await fetch(`${RENDER_URL}/register-token`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: token.value }),
+          });
+        } catch (_) { setFcmStatus("⚠️ サーバー送信失敗"); }
+      });
+      PushNotifications.addListener("registrationError", (err) => {
+        setFcmStatus(`❌ FCM失敗: ${err.error}`);
+      });
+    }
 
     LocalNotifications.requestPermissions();
     // チャンネルIDをv2に更新（振動設定を確実に反映させるため）
@@ -312,6 +315,9 @@ export default function App() {
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       socket.disconnect();
+      if (Capacitor.isNativePlatform()) {
+        PushNotifications.removeAllListeners();
+      }
     };
   }, []);
 

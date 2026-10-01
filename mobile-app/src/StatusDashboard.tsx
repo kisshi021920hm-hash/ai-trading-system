@@ -303,7 +303,7 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
               min="0.1"
               max="10"
               value={hybridSlConfig.initial_sl_usd}
-              onChange={(e) => setHybridSlConfig({ ...hybridSlConfig, initial_sl_usd: parseFloat(e.target.value) })}
+              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, initial_sl_usd: v }); }}
               style={{
                 width: "100%",
                 padding: "6px",
@@ -324,7 +324,7 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
               min="0.1"
               max="10"
               value={hybridSlConfig.trailing_trigger_usd}
-              onChange={(e) => setHybridSlConfig({ ...hybridSlConfig, trailing_trigger_usd: parseFloat(e.target.value) })}
+              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_trigger_usd: v }); }}
               style={{
                 width: "100%",
                 padding: "6px",
@@ -345,7 +345,7 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
               min="0.1"
               max="5"
               value={hybridSlConfig.trailing_sl_usd}
-              onChange={(e) => setHybridSlConfig({ ...hybridSlConfig, trailing_sl_usd: parseFloat(e.target.value) })}
+              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_sl_usd: v }); }}
               style={{
                 width: "100%",
                 padding: "6px",
