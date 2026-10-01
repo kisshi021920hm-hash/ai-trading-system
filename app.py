@@ -793,7 +793,7 @@ ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
 
 # ==================== EA リアルタイムシグナル Gemini 分析（Phase 9）====================
-def gemini_analyze_ea_signal(ea_data):
+def gemini_analyze_ea_signal(ea_data, open_positions=None):
     """EAからのMT5リアルタイム指標データをGemini分析（Yahoo Finance不要）"""
     crossover = ea_data.get('crossover', '')
     if not crossover:
@@ -811,6 +811,22 @@ def gemini_analyze_ea_signal(ea_data):
 直近5件: {stats['recent5']}
 ※ 負けが続いている場合は特に慎重に判定してください。"""
 
+    # 現在のポジション情報をプロンプトに追加（ポジション保有中の判定用）
+    position_context = ""
+    if open_positions:
+        current_price = float(ea_data.get('latest_close', 0))
+        for pos in open_positions:
+            entry_price = float(pos.get('entry_price', 0))
+            direction_jp = "買いポジション" if pos.get('direction') == 'BUY' else "売りポジション"
+            pnl = current_price - entry_price if pos.get('direction') == 'BUY' else entry_price - current_price
+            pnl_pips = abs(pnl)
+            profit_loss_text = "含み益" if pnl > 0 else "含み損"
+            position_context += f"""
+【保有中のポジション】
+種類: {direction_jp} / エントリー価格: {entry_price}
+現在価格: {current_price} / {profit_loss_text}: {pnl_pips:.2f}pips
+※ 現在のポジションがある中での新シグナル判定です。含み損がある場合は特に慎重に、含み益がある場合は利益確保を優先に判定してください。"""
+
     prompt = f"""あなたはゴールド（XAUUSD）の上級テクニカルアナリストです。
 MT5のリアルタイムデータから計算された複合テクニカル指標を総合分析し、このシグナルの有効性を判定してください。
 
@@ -823,7 +839,7 @@ EMA20={ea_data.get('ema20')} EMA50={ea_data.get('ema50')} EMA200={ea_data.get('e
 RSI={ea_data.get('rsi')} MACD={ea_data.get('macd')} MACDシグナル={ea_data.get('macd_signal')}
 ストキャスK={ea_data.get('stoch_k')} D={ea_data.get('stoch_d')}
 BB上={ea_data.get('bb_upper')} BB下={ea_data.get('bb_lower')}
-ADX={ea_data.get('adx')} DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr')}{trade_context}
+ADX={ea_data.get('adx')} DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr')}{trade_context}{position_context}
 
 以下のJSON形式のみで回答:
 {{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "key_level": "注目水準50文字以内"}}"""
@@ -2191,9 +2207,9 @@ def ea_signal_push():
             open_positions = []
 
         if open_positions:
-            # ポジション保有中: 新シグナルの信頼度を判定（決済判定が必要）
-            print(f"✅ OPEN ポジション{len(open_positions)}件保有中 → 新シグナル信頼度を判定（決済判定実行）")
-            ai = gemini_analyze_ea_signal(ea_data)
+            # ポジション保有中: 新シグナルの信頼度を判定（決済判定が必要）+ ポジション情報を反映
+            print(f"✅ OPEN ポジション{len(open_positions)}件保有中 → 新シグナル信頼度を判定（含み損益を考慮）")
+            ai = gemini_analyze_ea_signal(ea_data, open_positions=open_positions)
             _last_gemini_approved = bool(ai.get('valid'))
             # ✅ AI 判定情報を記録
             _last_ai_decision = {
