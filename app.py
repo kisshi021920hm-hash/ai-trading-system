@@ -1510,6 +1510,12 @@ def position_monitor_loop():
                     # should_close=False の場合もログに記録
                     log_system("INFO", f"AI判定: HOLD → ポジション#{pos.get('id')} 理由={close_decision.get('reason')}")
 
+            # 外部決済されたポジションのシグナルキャッシュをクリーンアップ
+            open_ids = {pos.get('id') for pos in open_positions}
+            stale_keys = [k for k in _last_position_signal if k not in open_ids]
+            for k in stale_keys:
+                del _last_position_signal[k]
+
             settings_changed.wait(timeout=60)
             settings_changed.clear()
 
@@ -1518,14 +1524,31 @@ def position_monitor_loop():
             settings_changed.wait(timeout=60)
             settings_changed.clear()
 
+_bg_jobs_started = False
+
 def start_background_jobs():
-    """バックグラウンドジョブ開始"""
-    global _status_log_thread
+    """バックグラウンドジョブ開始（gunicorn/直接起動どちらでも1回だけ実行）"""
+    global _status_log_thread, _bg_jobs_started
+    if _bg_jobs_started:
+        return
+    _bg_jobs_started = True
     log_system("INFO", "✅ バックグラウンドジョブ開始")
 
     _status_log_thread = threading.Thread(target=status_logging_loop, daemon=True)
     _status_log_thread.start()
     log_system("INFO", "✅ Status logging thread started")
+
+    t_signal = threading.Thread(target=signal_loop, daemon=True, name="signal_loop")
+    t_signal.start()
+    log_system("INFO", "✅ Signal loop thread started")
+
+    t_pos = threading.Thread(target=position_monitor_loop, daemon=True, name="position_monitor_loop")
+    t_pos.start()
+    log_system("INFO", "✅ Position monitor loop thread started")
+
+    t_weekly = threading.Thread(target=weekly_analysis_loop, daemon=True, name="weekly_analysis_loop")
+    t_weekly.start()
+    log_system("INFO", "✅ Weekly analysis loop thread started")
 
 # ==================== Status Dashboard API ====================
 @app.route("/api/status-logs/latest", methods=["GET"])
@@ -2039,7 +2062,8 @@ def create_trade():
             timeout=10
         )
         resp.raise_for_status()
-        return jsonify(resp.json()[0]), 201
+        rows = resp.json()
+        return jsonify(rows[0] if rows else {}), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2082,7 +2106,8 @@ def close_trade(trade_id):
             timeout=10
         )
         resp.raise_for_status()
-        return jsonify(resp.json()[0])
+        rows = resp.json()
+        return jsonify(rows[0] if rows else {}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -3018,12 +3043,10 @@ def on_disconnect():
     print("📴 クライアント切断")
 
 # ==================== 起動 ====================
+# gunicorn でも直接起動でも必ず実行されるモジュールレベル初期化
+load_fcm_tokens()
+start_background_jobs()
+
 if __name__ == "__main__":
-    load_fcm_tokens()
-    start_background_jobs()
-    t = threading.Thread(target=signal_loop, daemon=True)
-    t.start()
-    t3 = threading.Thread(target=weekly_analysis_loop, daemon=True)
-    t3.start()
     port = int(os.environ.get("PORT", 5000))
     socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)
