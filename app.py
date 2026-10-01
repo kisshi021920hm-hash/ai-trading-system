@@ -2273,6 +2273,58 @@ def ea_signal_push():
                 print(f"❌ OPEN ポジション取得エラー: {e}")
                 log_system("ERROR", f"OPEN ポジション取得エラー（新シグナル判定）: {e}")
 
+    # 【フェーズ2】シグナル消滅での決済
+    if crossover is None:
+        """前回シグナルがあったが、現在消滅した場合 → トレンド終了と判定して決済"""
+        try:
+            close_pos_resp = req.get(
+                f"{SUPABASE_URL}/rest/v1/trades",
+                params={"status": "eq.OPEN"},
+                headers=supabase_headers(),
+                timeout=5
+            )
+            open_positions = close_pos_resp.json() if close_pos_resp.ok else []
+
+            for pos in open_positions:
+                pos_id = pos.get('id')
+                last_signal = _last_position_signal.get(pos_id)
+
+                # 前回はシグナルがあったが、今回は消滅 → トレンド終了
+                if last_signal is not None:
+                    try:
+                        entry_price = float(pos.get('entry_price', 0))
+                        current_price = float(ea_data.get('latest_close', 0))
+                        current_pnl = abs(current_price - entry_price) if current_price > 0 and entry_price > 0 else 0
+
+                        req.patch(
+                            f"{SUPABASE_URL}/rest/v1/trades",
+                            params={"id": f"eq.{pos_id}"},
+                            json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
+                            headers={**supabase_headers(), "Prefer": "return=minimal"},
+                            timeout=5
+                        )
+
+                        log_system("INFO", f"📉 決済: ポジション#{pos_id} シグナル消滅（前回:{last_signal}→現在:NONE、トレンド終了、損益={current_pnl:.2f}pips）")
+                        print(f"📉 シグナル消滅決済: ポジション#{pos_id} (前回:{last_signal} → 今回:NONE = トレンド終了)")
+
+                        _last_ai_decision = {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "decision_type": "CLOSE",
+                            "crossover_direction": None,
+                            "confidence_score": 90,
+                            "decision_reason": f"シグナル消滅。前回{last_signal}だったがNONEに。トレンド終了判定。",
+                            "executed_action": f"CLOSE_SIGNAL_NONE (ポジション#{pos_id})",
+                        }
+
+                        del _last_position_signal[pos_id]
+
+                    except Exception as e:
+                        print(f"❌ シグナル消滅決済エラー: {e}")
+                        log_system("ERROR", f"シグナル消滅決済エラー: {e}")
+        except Exception as e:
+            print(f"❌ OPEN ポジション取得エラー（シグナル消滅判定）: {e}")
+            log_system("ERROR", f"OPEN ポジション取得エラー（シグナル消滅判定）: {e}")
+
     # ② デモ用ルールベースエントリー（DEMO_RULE_BASED=true かつ Geminiクォータ時）
     if ai.get('quota_error') and DEMO_RULE_BASED:
         buy_score  = int(ea_data.get('buy_score',  0))
