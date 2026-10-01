@@ -858,34 +858,41 @@ def gemini_position_close_decision(position, current_scores):
     entry_price = float(position.get('entry_price', 0))
     direction_ja = "買いポジション（ロング）" if direction == 'BUY' else "売りポジション（ショート）"
 
+    current_price = float(current_scores.get('close', entry_price))
+    price_distance = abs(current_price - entry_price)
+
     prompt = f"""あなたはゴールド（XAUUSD）の上級テクニカルアナリストです。
 保有中のポジションについて、今このタイミングで決済（損切・利確）すべきかを判定してください。
 
 【保有ポジション】
 方向: {direction_ja}
 エントリー価格: {entry_price}
+現在価格: {current_price:.2f}
+損益: {price_distance:.2f}pips {'利益' if (current_price > entry_price and direction == 'BUY') or (current_price < entry_price and direction == 'SELL') else '損失'}
 
 【最新テクニカル指標】
 買いスコア: {current_scores.get('buy_score', 0)}点
 売りスコア: {current_scores.get('sell_score', 0)}点
 ADX: {current_scores.get('adx', 0):.1f}（トレンド強度）
 RSI: {current_scores.get('rsi', 50):.1f}（過買売）
-現在価格: {current_scores.get('close', entry_price):.2f}
 
-【判定基準】
+【プロの判定基準】
 - {direction_ja}を持っている
 - 「決済すべき」と判定する場合は以下のいずれかに該当:
   1. 逆方向のスコアが圧倒的に高い（例: BUY持ちなのに売りスコア≥5）
-  2. ADX が極端に低下した（トレンド終了の可能性）
-  3. RSI が極端な過買売状態（RSI≥85 or RSI≤15）
+  2. ADX が低い（<20）レンジ相場での含み益 → 反転リスク高い
+  3. サポート/レジスタンスレベルに接近している
+     - SELL中に支持線（サポート）手前 → 買い戻しリスク
+     - BUY中に抵抗線（レジスタンス）手前 → 売り圧力
+  4. RSI が極端な過買売状態（RSI≥85 or RSI≤15）
 
 【JSON回答形式（以下のみ）】
 {{"should_close": true/false, "confidence": 0-100, "reason": "50文字以内"}}
 
 決済信頼度:
-- 100: 即座に決済すべき（逆方向がきわめて強い）
-- 70-90: 決済を強く推奨（シグナルが反転）
-- 50-69: 決済を検討（リスク警告）
+- 100: 即座に決済すべき（逆方向がきわめて強い、またはレベル接近）
+- 70-90: 決済を強く推奨（シグナル反転、レンジ含み益）
+- 50-69: 決済を検討（リスク警告、レベル警戒）
 - 30-49: 監視継続推奨（まだホールド）
 - 0-29: 継続保有推奨（トレンド継続）
 """
