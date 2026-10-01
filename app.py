@@ -1192,15 +1192,24 @@ def position_monitor_loop():
                 entry_price = float(pos.get('entry_price', 0.0))
                 adx = _ea_latest_scores.get('adx', 0.0)
 
-                # 【優先度1】同一方向クロス継続中の低信頼度チェック（最優先）
-                # 同じ方向のシグナルが続いていても、信頼度が低いなら決済して損切り
-                if crossover and pos_side and _last_ai_decision.get('confidence_score') is not None:
-                    same_direction = (crossover == "UP_CROSS" and pos_side == "BUY") or \
-                                     (crossover == "DOWN_CROSS" and pos_side == "SELL")
+                # 【優先度1】現在のシグナルが低信頼度 → 即座に決済（最優先）
+                # AI が「今危険」と判定したら、ポジション方向に関わらず決済
+                if crossover:
+                    # 最新シグナルを Supabase から取得
+                    latest_signal_resp = req.get(
+                        f"{SUPABASE_URL}/rest/v1/signals",
+                        params={"order": "created_at.desc", "limit": "1"},
+                        headers=supabase_headers(),
+                        timeout=10
+                    )
+                    latest_signals = latest_signal_resp.json() if latest_signal_resp.ok else []
+                    latest_signal = latest_signals[0] if latest_signals else None
+                    latest_confidence = latest_signal.get('ai_confidence') if latest_signal else None
 
-                    if same_direction and _last_ai_decision.get('confidence_score', 0) < CLOSE_CONFIDENCE_THRESHOLD:
-                        current_pnl = abs(current_close - entry_price) if current_close > 0 and entry_price > 0 else 0
-                        print(f"⚠️ 低信頼度決済: ポジション#{pos_id} ({pos_side}ポジション中に{crossover}だが信頼度={_last_ai_decision.get('confidence_score')}%)")
+                    # 現在のシグナルが低信頼度（ダマシ判定）なら即座に決済
+                    if latest_confidence is not None and latest_confidence < CLOSE_CONFIDENCE_THRESHOLD:
+                        print(f"🚨 危険シグナル検出: 現在の信頼度={latest_confidence}%（< {CLOSE_CONFIDENCE_THRESHOLD}%）")
+                        print(f"⚠️ 低信頼度決済: ポジション#{pos_id} ({pos_side}ポジション中に{crossover}だが信頼度={latest_confidence}%で危険)")
                         try:
                             req.patch(
                                 f"{SUPABASE_URL}/rest/v1/trades",
@@ -1209,10 +1218,10 @@ def position_monitor_loop():
                                 headers={**supabase_headers(), "Prefer": "return=minimal"},
                                 timeout=10
                             )
-                            log_system("INFO", f"⚠️ 決済: ポジション#{pos_id} 同一方向クロス継続中の低信頼度で決済（信頼度={_last_ai_decision.get('confidence_score')}%<{CLOSE_CONFIDENCE_THRESHOLD}%）")
+                            log_system("INFO", f"🚨 決済: ポジション#{pos_id} 現在のシグナルが危険（信頼度={latest_confidence}%<{CLOSE_CONFIDENCE_THRESHOLD}%）で即座に決済")
                             _last_ai_decision["decision_type"] = "CLOSE"
                             _last_ai_decision["confidence_score"] = 100
-                            _last_ai_decision["decision_reason"] = f"同一方向クロス継続中も信頼度不足。{pos_side}ポジション中に{crossover}だが信頼度{_last_ai_decision.get('confidence_score')}%<{CLOSE_CONFIDENCE_THRESHOLD}%で損切り。"
+                            _last_ai_decision["decision_reason"] = f"現在のシグナルが危険と判定（信頼度{latest_confidence}%<{CLOSE_CONFIDENCE_THRESHOLD}%）。AI警告に従い即座に損切り。"
                             _last_ai_decision["executed_action"] = f"CLOSE_LOW_CONFIDENCE (ポジション#{pos_id})"
                             continue
                         except Exception as e:
