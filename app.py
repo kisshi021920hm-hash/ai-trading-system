@@ -223,6 +223,43 @@ def supabase_headers():
     }
 
 # ==================== MT5 Webhook 自動注文 ====================
+def log_position_status():
+    """保有中のすべてのポジション含み益をシステムログに記録"""
+    try:
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"status": "eq.OPEN"},
+            headers=supabase_headers(),
+            timeout=5
+        )
+        open_positions = resp.json() if resp.ok else []
+        if not open_positions:
+            return
+
+        # 現在価格を取得
+        current_close = None
+        if _ea_latest_scores and 'close' in _ea_latest_scores:
+            current_close = float(_ea_latest_scores.get('close', 0))
+
+        for pos in open_positions:
+            try:
+                entry_price = float(pos.get('entry_price', 0))
+                direction = pos.get('direction', 'BUY')
+
+                if current_close:
+                    pnl = current_close - entry_price if direction == 'BUY' else entry_price - current_close
+                    pnl_pips = abs(pnl)
+                    pnl_sign = "📈 含み益" if pnl > 0 else "📉 含み損"
+
+                    log_system("INFO",
+                        f"📊 ポジション監視: {direction} @{entry_price}円 → 現在{current_close}円 | "
+                        f"{pnl_sign}={pnl_pips:.2f}pips | "
+                        f"SL={pos.get('sl')}円 TP={pos.get('tp')}円")
+            except Exception as e:
+                print(f"⚠️  ポジションログエラー: {e}")
+    except Exception as e:
+        print(f"⚠️  ポジション監視エラー: {e}")
+
 def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=None, sl_pips=20, tp_pips=40, trailing_stop_pips=15):
     """MT5 Webhook サーバーに自動注文を送信し、Supabaseにトレードを記録する
 
@@ -2298,6 +2335,9 @@ def ea_signal_push():
     # シグナル受信を詳細ログに記録
     log_system("INFO", f"📡 シグナル受信: {crossover} @ {ea_data.get('latest_close')}円 (買={ea_data.get('buy_score')}, 売={ea_data.get('sell_score')}, ADX={ea_data.get('adx')})")
     _last_ea_signal_time = time.time()
+
+    # 保有中のポジション含み益をログに記録（透明性向上）
+    log_position_status()
 
     # ==================== v1.15 ローソク足確定時刻チェック ====================
     # シグナルが来たのがローソク足確定時か中盤かを判定
