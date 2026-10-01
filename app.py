@@ -2196,11 +2196,20 @@ def ea_signal_push():
             open_positions = []
 
         if open_positions:
-            # ポジション保有中: Gemini スキップ（省エネ・次シグナル待機）
-            print(f"✅ OPEN ポジション{len(open_positions)}件保有中 → Gemini スキップ（ポジション決済待機）")
-            ai = {"valid": None, "confidence": None, "reason": f"ポジション保有中（{len(open_positions)}件）"}
-            _last_gemini_approved = False
-            log_system("INFO", f"AI判定スキップ: ポジション保有中（{len(open_positions)}件）")
+            # ポジション保有中: 新シグナルの信頼度を判定（決済判定が必要）
+            print(f"✅ OPEN ポジション{len(open_positions)}件保有中 → 新シグナル信頼度を判定（決済判定実行）")
+            ai = gemini_analyze_ea_signal(ea_data)
+            _last_gemini_approved = bool(ai.get('valid'))
+            # ✅ AI 判定情報を記録
+            _last_ai_decision = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "decision_type": "CLOSE" if ai.get('confidence') is not None and ai.get('confidence') < CLOSE_CONFIDENCE_THRESHOLD else "HOLD",
+                "crossover_direction": crossover,
+                "confidence_score": ai.get('confidence'),
+                "decision_reason": ai.get('reason', ''),
+                "executed_action": f"決済待機中（信頼度判定）",
+            }
+            log_system("INFO", f"AI判定: ポジション保有中の新シグナル → 信頼度={ai.get('confidence')}% 有効={ai.get('valid')}")
         else:
             # ポジション保有なし: Gemini分析実行（エントリー判定）
             ai = gemini_analyze_ea_signal(ea_data)
