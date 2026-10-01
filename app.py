@@ -267,6 +267,7 @@ def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=No
         if response.status_code == 200:
             result = response.json()
             print(f"✅ MT5注文成功: {direction} @{entry_price} SL={sl_price} TP={tp_price}")
+            log_system("INFO", f"✅ エントリー実行: {direction} @{entry_price}円 SL={sl_price}円 TP={tp_price}円 (Signal#{signal_id})")
             # Supabase にトレード記録
             req.post(
                 f"{SUPABASE_URL}/rest/v1/trades",
@@ -283,6 +284,7 @@ def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=No
                 headers={**supabase_headers(), "Prefer": "return=minimal"},
                 timeout=10
             )
+            log_system("INFO", f"📊 トレード記録保存: {direction} エントリー価格={entry_price} (SL={sl_price}, TP={tp_price})")
             return {"success": True, **result}
         else:
             print(f"❌ MT5 Webhook エラー: {response.status_code} {response.text}")
