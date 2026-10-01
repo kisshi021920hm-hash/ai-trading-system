@@ -6,7 +6,7 @@
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.25"
+#property version   "1.26"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -61,7 +61,7 @@ datetime g_last_hybrid_sl_fetch        = 0;    // 最後にFlaskから取得し�
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.25 起動 ===");
+    Print("=== GOLD AI Trader EA v1.26 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
@@ -115,7 +115,13 @@ void OnTimer()
 }
 void OnTick()
 {
-    TrailingStopUpdate();  // 毎tickで含み損監視（15秒タイマー補完）
+    // 含み損監視は最低1秒間隔（毎tick実行で過負荷にならないよう制限）
+    static datetime s_last_trailing_tick = 0;
+    if (TimeCurrent() > s_last_trailing_tick)
+    {
+        s_last_trailing_tick = TimeCurrent();
+        TrailingStopUpdate();
+    }
     if (TimeCurrent() - g_last_poll_time >= POLL_SECONDS)
     {
         ComputeAndPushSignal();
@@ -138,7 +144,11 @@ void PushSignalToServer(string crossover, double close_price,
 {
     // 過去20本のローソク足データを取得（テクニカル強化用）
     MqlRates rates[20];
-    CopyRates(_Symbol, PERIOD_M15, 0, 20, rates);
+    if (CopyRates(_Symbol, PERIOD_M15, 0, 20, rates) < 20)
+    {
+        Print("⚠️ CopyRates失敗 - シグナルプッシュをスキップ");
+        return;
+    }
 
     string candle_history = "[";
     for (int i = 19; i >= 0; i--)  // 古い足から新しい足へ
@@ -210,8 +220,8 @@ void ComputeAndPushSignal()
     if (CopyBuffer(g_h_ema20,  0, 0, 2, ema20_buf)    < 2) return;
     if (CopyBuffer(g_h_ema50,  0, 0, 2, ema50_buf)    < 2) return;
     if (CopyBuffer(g_h_ema200, 0, 0, 2, ema200_buf)   < 2) return;
-    if (CopyBuffer(g_h_bb,     0, 0, 2, bb_upper_buf) < 2) return;
-    if (CopyBuffer(g_h_bb,     1, 0, 2, bb_lower_buf) < 2) return;
+    if (CopyBuffer(g_h_bb,     1, 0, 2, bb_upper_buf) < 2) return;  // buffer1=UPPER_BAND
+    if (CopyBuffer(g_h_bb,     2, 0, 2, bb_lower_buf) < 2) return;  // buffer2=LOWER_BAND
     if (CopyBuffer(g_h_stoch,  0, 0, 3, stoch_k_buf)  < 3) return;
     if (CopyBuffer(g_h_stoch,  1, 0, 3, stoch_d_buf)  < 3) return;
     if (CopyBuffer(g_h_adx,    0, 0, 2, adx_buf)      < 2) return;
@@ -358,7 +368,9 @@ void SendHeartbeat()
     char   hb_post[], hb_result[];
     string hb_resp_headers;
     StringToCharArray(hb_json, hb_post, 0, StringLen(hb_json));
-    WebRequest("POST", API_BASE + "/ea-heartbeat", hb_headers, 3000, hb_post, hb_result, hb_resp_headers);
+    int hb_status = WebRequest("POST", API_BASE + "/ea-heartbeat", hb_headers, 3000, hb_post, hb_result, hb_resp_headers);
+    if (hb_status != 200)
+        Print("⚠️ ハートビート送信失敗: HTTP", hb_status);
 }
 
 void ReportTrade(string action, string direction, double price,
@@ -377,7 +389,9 @@ void ReportTrade(string action, string direction, double price,
     char   rep_post[], rep_result[];
     string rep_resp_headers;
     StringToCharArray(json, rep_post, 0, StringLen(json));
-    WebRequest("POST", API_BASE + "/ea-trade", rep_headers, 3000, rep_post, rep_result, rep_resp_headers);
+    int rep_status = WebRequest("POST", API_BASE + "/ea-trade", rep_headers, 3000, rep_post, rep_result, rep_resp_headers);
+    if (rep_status != 200)
+        Print("⚠️ 取引レポート送信失敗: HTTP", rep_status, " action=", action, " direction=", direction);
 }
 
 //+------------------------------------------------------------------+
@@ -506,12 +520,11 @@ void ClosePositions(ENUM_POSITION_TYPE pos_type)
         {
             Print("✅ 決済成功: ticket=", ticket);
             string close_dir = (pos_type == POSITION_TYPE_BUY) ? "BUY_CLOSE" : "SELL_CLOSE";
-            double close_price = req.price;
-            ReportTrade("CLOSE", close_dir, close_price, 0, 0,
-                        PositionGetDouble(POSITION_VOLUME), ticket);
+            ReportTrade("CLOSE", close_dir, req.price, 0, 0,
+                        req.volume, ticket);  // 決済前に取得済みのreq.volumeを使用
         }
         else
-            Print("❌ 決済失敗: retcode=", res.retcode);
+            Print("❌ 決済失敗: retcode=", res.retcode, " comment=", res.comment);
     }
 }
 
@@ -587,7 +600,8 @@ void TrailingStopUpdate()
         else
             unrealized_pips = (entry_price - current_price);
 
-        double usd_per_pip = volume * 100;  // 0.02ロット = $2/pip
+        double contract_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+        double usd_per_pip    = volume * contract_size;  // ブローカー依存のコントラクトサイズ
         double unrealized_usd = unrealized_pips * usd_per_pip;
 
         Print("📊 ポジション監視: ", _Symbol, " ", (pos_type == POSITION_TYPE_BUY ? "BUY" : "SELL"),
@@ -715,7 +729,19 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
     {
         sl = NormalizeDouble(sl_price, digits);
         tp = NormalizeDouble(tp_price, digits);
-        Print("💡 Gemini SL/TP: SL=", sl, " TP=", tp);
+
+        // Gemini SL/TPの方向整合性チェック（逆方向SLは注文失敗の原因になる）
+        bool sl_valid = (order_type == ORDER_TYPE_BUY)  ? (sl < price) : (sl > price);
+        bool tp_valid = (order_type == ORDER_TYPE_BUY)  ? (tp > price) : (tp < price);
+        if (!sl_valid || !tp_valid)
+        {
+            Print("⚠️ Gemini SL/TP方向不正: SL=", sl, " TP=", tp, " price=", price,
+                  " → デフォルト値を使用");
+            sl = NormalizeDouble((order_type == ORDER_TYPE_BUY) ? price - DEFAULT_SL_USD : price + DEFAULT_SL_USD, digits);
+            tp = NormalizeDouble((order_type == ORDER_TYPE_BUY) ? price + DEFAULT_TP_USD : price - DEFAULT_TP_USD, digits);
+        }
+        else
+            Print("💡 Gemini SL/TP: SL=", sl, " TP=", tp);
     }
     else
     {
@@ -746,6 +772,9 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
         if (usdjpy > 100.0) tick_value *= usdjpy;
     }
     double lot_size   = 0.01;
+    if (sl_distance <= 0.0 || tick_value <= 0.0 || tick_size <= 0.0)
+        Print("⚠️ ロット計算失敗（フォールバック0.01使用）: sl_distance=", sl_distance,
+              " tick_value=", tick_value, " tick_size=", tick_size);
     if (sl_distance > 0.0 && tick_value > 0.0 && tick_size > 0.0)
     {
         double ticks_in_sl = sl_distance / tick_size;
