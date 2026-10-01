@@ -245,17 +245,18 @@ def log_position_status():
         if not open_positions:
             return
 
-        # 現在価格を取得
+        # 現在価格を取得（複数の方法で試す）
         current_close = None
         if _ea_latest_scores and 'close' in _ea_latest_scores:
             current_close = float(_ea_latest_scores.get('close', 0))
 
+        # EA最新スコアから close が取得できない場合はポジション情報のみ記録
         for pos in open_positions:
             try:
                 entry_price = float(pos.get('entry_price', 0))
                 direction = pos.get('direction', 'BUY')
 
-                if current_close:
+                if current_close and current_close > 0:
                     pnl = current_close - entry_price if direction == 'BUY' else entry_price - current_close
                     pnl_pips = abs(pnl)
                     pnl_sign = "📈 含み益" if pnl > 0 else "📉 含み損"
@@ -264,6 +265,12 @@ def log_position_status():
                         f"📊 ポジション監視: {direction} @{entry_price}円 → 現在{current_close}円 | "
                         f"{pnl_sign}={pnl_pips:.2f}pips | "
                         f"SL={pos.get('sl')}円 TP={pos.get('tp')}円")
+                else:
+                    # 現在価格がない場合でもポジション存在を記録
+                    log_system("INFO",
+                        f"📊 ポジション監視: {direction} @{entry_price}円 | "
+                        f"SL={pos.get('sl')}円 TP={pos.get('tp')}円 | "
+                        f"ロット={pos.get('volume')}lot (価格更新待機中)")
             except Exception as e:
                 print(f"⚠️  ポジションログエラー: {e}")
     except Exception as e:
