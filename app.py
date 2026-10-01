@@ -135,9 +135,9 @@ def log_system(level, message):
 
 # ==================== Gemini モデルプール（フォールバック対応）====================
 GEMINI_MODELS = [
-    "gemini-2.0-flash",        # 主力・最新（高速・万能）
-    "gemini-1.5-flash",        # 軽量・低コスト フォールバック1
-    "gemini-1.5-pro",          # 高精度 フォールバック2
+    "gemini-3.8-flash",        # 主力・最新（API推奨）
+    "gemini-1.5-flash",        # フォールバック1
+    "gemini-1.5-pro",          # フォールバック2
 ]
 _current_gemini_model_index = 0  # 現在使用中のモデルインデックス
 _gemini_model_fallback_count = 0  # フォールバック実行回数（監視用）
