@@ -55,7 +55,7 @@ string g_latest_crossover  = "NONE";  // 最新のクロスオーバー方向（
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.24 起動 ===");
+    Print("=== GOLD AI Trader EA v1.25 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
@@ -109,6 +109,7 @@ void OnTimer()
 }
 void OnTick()
 {
+    TrailingStopUpdate();  // 毎tickで含み損監視（15秒タイマー補完）
     if (TimeCurrent() - g_last_poll_time >= POLL_SECONDS)
     {
         ComputeAndPushSignal();
@@ -610,30 +611,42 @@ void TrailingStopUpdate()
 // ポジション強制決済（含み損時の損切り）
 void ClosePosition(ulong ticket, ENUM_POSITION_TYPE pos_type)
 {
+    if (!PositionSelectByTicket(ticket))
+    {
+        Print("❌ 含み損決済: ticket=", ticket, " のポジション選択失敗");
+        return;
+    }
+    double volume = PositionGetDouble(POSITION_VOLUME);
+
     double bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double ask   = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double close_price = (pos_type == POSITION_TYPE_BUY) ? bid : ask;
 
     MqlTradeRequest req = {};
     MqlTradeResult  res = {};
-    req.action      = TRADE_ACTION_DEAL;
-    req.symbol      = _Symbol;
-    req.price       = close_price;
-    req.sl          = 0;
-    req.tp          = 0;
-    req.type        = (pos_type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
-    req.position    = ticket;
-    req.comment     = "GOLD_AI_LOSS_CUT";
+    req.action       = TRADE_ACTION_DEAL;
+    req.symbol       = _Symbol;
+    req.volume       = volume;  // ★修正: 決済ロット数を設定
+    req.price        = close_price;
+    req.sl           = 0;
+    req.tp           = 0;
+    req.type         = (pos_type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+    req.position     = ticket;
+    req.comment      = "GOLD_AI_LOSS_CUT";
     req.type_filling = ORDER_FILLING_IOC;
-    req.magic       = MAGIC_NUMBER;
+    req.magic        = MAGIC_NUMBER;
 
     if (OrderSend(req, res))
     {
-        Print("✅ 含み損自動決済成功: ticket=", ticket);
+        Print("✅ 含み損自動決済成功: ticket=", ticket,
+              " volume=", volume, " price=", close_price);
+        string close_dir = (pos_type == POSITION_TYPE_BUY) ? "BUY_CLOSE" : "SELL_CLOSE";
+        ReportTrade("LOSS_CUT", close_dir, close_price, 0, 0, volume, ticket);
     }
     else
     {
-        Print("❌ 含み損自動決済失敗: retcode=", res.retcode);
+        Print("❌ 含み損自動決済失敗: retcode=", res.retcode, " comment=", res.comment,
+              " ticket=", ticket, " volume=", volume);
     }
 }
 
