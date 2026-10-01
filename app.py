@@ -838,6 +838,51 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
 現在価格: {current_price} / {profit_loss_text}: {pnl_pips:.2f}pips
 ※ 現在のポジションがある中での新シグナル判定です。含み損がある場合は特に慎重に、含み益がある場合は利益確保を優先に判定してください。"""
 
+    # テクニカル指標の詳細分析コンテキスト
+    technical_analysis = ""
+
+    # RSI トレンド分析
+    rsi_value = float(ea_data.get('rsi', 50))
+    rsi_trend = "⚠️ オーバーバイ域（反転警戒）" if rsi_value > 70 else ("⚠️ オーバーソールド域（反発期待）" if rsi_value < 30 else "✅ 中立")
+    technical_analysis += f"\n【RSI 分析】{rsi_value:.1f} {rsi_trend}"
+
+    # ボリンジャーバンド乖離度
+    current_price = float(ea_data.get('latest_close', 0))
+    bb_upper = float(ea_data.get('bb_upper', current_price))
+    bb_lower = float(ea_data.get('bb_lower', current_price))
+    bb_middle = (bb_upper + bb_lower) / 2
+    bb_width = bb_upper - bb_lower
+    if bb_width > 0:
+        bb_position = (current_price - bb_lower) / bb_width * 100
+        bb_status = "上限接近（反転警戒）" if bb_position > 80 else ("下限接近（反発期待）" if bb_position < 20 else "中立")
+        technical_analysis += f"\n【ボリンジャーバンド】位置{bb_position:.0f}% {bb_status} / 幅={bb_width:.2f}"
+
+    # MACD トレンド
+    macd_val = float(ea_data.get('macd', 0))
+    macd_sig = float(ea_data.get('macd_signal', 0))
+    macd_status = "📈 上昇勢力" if macd_val > macd_sig else "📉 下降勢力"
+    macd_histogram = macd_val - macd_sig
+    technical_analysis += f"\n【MACD】{macd_status} (ヒストグラム={macd_histogram:+.4f})"
+
+    # ADX トレンド強度
+    adx_val = float(ea_data.get('adx', 20))
+    adx_strength = "💪 強トレンド" if adx_val > 25 else ("⚠️ 弱トレンド" if adx_val < 20 else "普通")
+    technical_analysis += f"\n【ADX】{adx_strength} (値={adx_val:.1f})"
+
+    # ローソク足の高値安値の幅（ボラティリティ）
+    current_high = float(ea_data.get('current_high', current_price))
+    current_low = float(ea_data.get('current_low', current_price))
+    candle_range = current_high - current_low
+    technical_analysis += f"\n【現在足ボラティリティ】高値-安値={candle_range:.2f}pips (高値={current_high} 安値={current_low})"
+
+    # 過去ローソク足の方向性判定
+    candle_history = ea_data.get('candle_history', [])
+    if candle_history and len(candle_history) >= 5:
+        closes = [float(c.get('close', 0)) for c in candle_history[-5:]]
+        is_uptrend = closes[-1] > closes[0]
+        trend_direction = "📈 上昇傾向" if is_uptrend else "📉 下降傾向"
+        technical_analysis += f"\n【過去5足の方向】{trend_direction}"
+
     prompt = f"""あなたはゴールド（XAUUSD）の上級テクニカルアナリストです。
 MT5のリアルタイムデータから計算された複合テクニカル指標を総合分析し、このシグナルの有効性を判定してください。
 
@@ -845,12 +890,17 @@ MT5のリアルタイムデータから計算された複合テクニカル指�
 【スコア】買い{ea_data.get('buy_score', 0)}点 vs 売り{ea_data.get('sell_score', 0)}点
 買い根拠: {ea_data.get('buy_reasons', '')}
 売り根拠: {ea_data.get('sell_reasons', '')}
+
 【指標（MT5リアルタイム）】
 EMA20={ea_data.get('ema20')} EMA50={ea_data.get('ema50')} EMA200={ea_data.get('ema_long')}
-RSI={ea_data.get('rsi')} MACD={ea_data.get('macd')} MACDシグナル={ea_data.get('macd_signal')}
 ストキャスK={ea_data.get('stoch_k')} D={ea_data.get('stoch_d')}
-BB上={ea_data.get('bb_upper')} BB下={ea_data.get('bb_lower')}
-ADX={ea_data.get('adx')} DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr')}{trade_context}{position_context}
+DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr')}{technical_analysis}{trade_context}{position_context}
+
+【判定基準】
+1. RSI が 70 以上（買い信号時）または 30 以下（売り信号時）の場合は反転警戒
+2. MACD ヒストグラムがシグナルと逆方向に向かっていたら勢い衰退の兆候
+3. ADX < 20 の場合は弱いトレンドなので信頼度を下げる
+4. ボラティリティが極度に高い場合は危険性を考慮
 
 以下のJSON形式のみで回答:
 {{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "key_level": "注目水準50文字以内"}}"""
