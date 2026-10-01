@@ -295,7 +295,7 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
         <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", marginBottom: "20px", color: "#f1f5f9" }}>
           <h3 style={{ marginTop: 0, marginBottom: "12px", color: "#94a3b8" }}>📜 システムログ</h3>
           <div style={{ fontSize: "11px", lineHeight: "1.6", maxHeight: "200px", overflowY: "auto" }}>
-            {systemLogs.slice().reverse().map((log, i) => (
+            {systemLogs.map((log, i) => (
               <p key={i} style={{ margin: "4px 0", color: log.level === "ERROR" ? "#f87171" : log.level === "WARNING" ? "#fbbf24" : "#cbd5e1" }}>
                 <span style={{ fontWeight: "bold" }}>{new Date(log.timestamp).toLocaleTimeString("ja-JP")}</span> — {log.message}
               </p>
