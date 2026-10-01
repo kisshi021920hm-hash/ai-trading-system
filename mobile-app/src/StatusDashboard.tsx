@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
 
+interface SystemLog {
+  timestamp: string;
+  level: string;
+  message: string;
+}
+
 interface StatusLog {
   recorded_at: string;
   server_uptime_hours: number;
@@ -38,6 +44,7 @@ interface StatusDashboardProps {
 export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
   const [logs, setLogs] = useState<StatusLog[]>([]);
   const [latest, setLatest] = useState<StatusLog | null>(null);
+  const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -58,6 +65,13 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
           }
         } else {
           setError(`データ取得失敗: ${resp.status}`);
+        }
+
+        // システムログを取得
+        const sysResp = await fetch(`${renderUrl}/api/system-logs`);
+        if (sysResp.ok) {
+          const sysData = await sysResp.json();
+          setSystemLogs(sysData);
         }
       } catch (err) {
         setError(`エラー: ${err instanceof Error ? err.message : "不明"}`);
@@ -272,6 +286,20 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
                 <strong>実行:</strong> {latest.ai_executed_action}
               </p>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* システムログ */}
+      {systemLogs.length > 0 && (
+        <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", marginBottom: "20px", color: "#f1f5f9" }}>
+          <h3 style={{ marginTop: 0, marginBottom: "12px", color: "#94a3b8" }}>📜 システムログ</h3>
+          <div style={{ fontSize: "11px", lineHeight: "1.6", maxHeight: "200px", overflowY: "auto" }}>
+            {systemLogs.slice().reverse().map((log, i) => (
+              <p key={i} style={{ margin: "4px 0", color: log.level === "ERROR" ? "#f87171" : log.level === "WARNING" ? "#fbbf24" : "#cbd5e1" }}>
+                <span style={{ fontWeight: "bold" }}>{new Date(log.timestamp).toLocaleTimeString("ja-JP")}</span> — {log.message}
+              </p>
+            ))}
           </div>
         </div>
       )}
