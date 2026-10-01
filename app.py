@@ -2026,6 +2026,7 @@ def ea_signal_push():
         ai = {"valid": None, "confidence": None, "reason": "ローソク足中盤（確定待機中）"}
         _last_gemini_approved = False
         _last_gemini_direction = crossover
+        log_system("INFO", f"シグナル受信: {crossover} → ローソク足中盤（AI判定スキップ、確定待機中）")
     # ローソク足確定時のみ、以下の AI 判定処理を実行
     elif TRADING_MODE in ["MANUAL", "SEMI_AUTO"]:
         # 手動・半自動モード: Gemini 分析スキップ（ユーザー判断に委ねる）
@@ -2033,6 +2034,7 @@ def ea_signal_push():
         ai = {"valid": None, "confidence": None, "reason": f"{TRADING_MODE}モード"}
         _last_gemini_approved = False
         _last_gemini_direction = crossover
+        log_system("INFO", f"シグナル受信: {crossover} → {TRADING_MODE}モード（ユーザー判断に委ねる）")
     else:
         # FULL_AUTO / AI_CLOSE_MODE: OPEN ポジション確認（省エネ対応）
         try:
@@ -2052,6 +2054,7 @@ def ea_signal_push():
             print(f"✅ OPEN ポジション{len(open_positions)}件保有中 → Gemini スキップ（ポジション決済待機）")
             ai = {"valid": None, "confidence": None, "reason": f"ポジション保有中（{len(open_positions)}件）"}
             _last_gemini_approved = False
+            log_system("INFO", f"AI判定スキップ: ポジション保有中（{len(open_positions)}件）")
         else:
             # ポジション保有なし: Gemini分析実行（エントリー判定）
             ai = gemini_analyze_ea_signal(ea_data)
@@ -2065,6 +2068,7 @@ def ea_signal_push():
                 "decision_reason": ai.get('reason', ''),
                 "executed_action": f"{'SELL' if crossover == 'DOWN_CROSS' else 'BUY'} (待機中)" if ai.get('valid') else "スキップ",
             }
+            log_system("INFO", f"AI判定: {crossover} → 有効={ai.get('valid')} 信頼度={ai.get('confidence')}% 理由={ai.get('reason')}")
         _last_gemini_direction = crossover
 
     # ② デモ用ルールベースエントリー（DEMO_RULE_BASED=true かつ Geminiクォータ時）
