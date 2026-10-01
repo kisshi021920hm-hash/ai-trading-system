@@ -1120,10 +1120,10 @@ def save_status_log(status_data):
 def position_monitor_loop():
     """
     AI_CLOSE_MODE 用: ポジション監視＆決済判定ループ
-    15分ごと（ローソク足確定時）に OPEN ポジションを監視して Gemini で決済判定
+    TIMEFRAME ごと（ローソク足確定時）に OPEN ポジションを監視して Gemini で決済判定
     """
     global _position_monitor_last, _last_ai_decision
-    log_system("INFO", "🔄 ポジション監視ループ開始（30分間隔）")
+    log_system("INFO", f"🔄 ポジション監視ループ開始（{TIMEFRAME_MINUTES}分間隔）")
 
     while True:
         try:
@@ -1133,7 +1133,8 @@ def position_monitor_loop():
                 continue
 
             now = time.time()
-            if now - _position_monitor_last < 900:  # 15分（900秒）未満ならスキップ
+            interval_seconds = TIMEFRAME_MINUTES * 60  # TIMEFRAME に応じた間隔
+            if now - _position_monitor_last < interval_seconds:
                 settings_changed.wait(timeout=60)
                 settings_changed.clear()
                 continue
@@ -1190,10 +1191,17 @@ def position_monitor_loop():
                             timeout=10
                         )
                         _last_ai_decision["executed_action"] = f"CLOSE (ポジション#{pos.get('id')})"
+                        # システムログに記録
+                        log_system("INFO", f"AI判定: CLOSE → ポジション#{pos.get('id')} 信頼度={close_decision['confidence']}% 理由={close_decision.get('reason')}")
                     else:
                         print(f"⚠️ 監視継続: ポジションID={pos.get('id')} "
                               f"信頼度={close_decision['confidence']}%（閾値{CLOSE_CONFIDENCE_THRESHOLD}%未満）")
                         _last_ai_decision["executed_action"] = "継続監視"
+                        # システムログに記録
+                        log_system("INFO", f"AI判定: HOLD → ポジション#{pos.get('id')} 信頼度={close_decision['confidence']}% 理由={close_decision.get('reason')}")
+                else:
+                    # should_close=False の場合もログに記録
+                    log_system("INFO", f"AI判定: HOLD → ポジション#{pos.get('id')} 理由={close_decision.get('reason')}")
 
             settings_changed.wait(timeout=60)
             settings_changed.clear()
