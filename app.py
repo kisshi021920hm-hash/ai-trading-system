@@ -2145,6 +2145,58 @@ def get_status():
         },
     })
 
+@app.route("/api/health-check", methods=["GET"])
+def health_check():
+    """システム監視用・健康状態詳細チェック（Claude管理者用）"""
+    now = time.time()
+    issues = []
+    warnings = []
+
+    # EA接続確認
+    ea_alive = (_ea_last_heartbeat > 0 and now - _ea_last_heartbeat < 90)
+    if not ea_alive:
+        issues.append("❌ EA未接続（MT5が停止している可能性）")
+    elif now - _ea_last_heartbeat > 60:
+        warnings.append(f"⚠️ EA遅延（最後のハートビート{round(now - _ea_last_heartbeat)}秒前）")
+
+    # Gemini API確認
+    if _last_gemini_call_time and now - _last_gemini_call_time > 3600:
+        warnings.append("⚠️ Gemini未使用（1時間以上判定なし）")
+
+    # シグナル受信確認
+    if _last_ea_signal_time and now - _last_ea_signal_time > 1800:
+        warnings.append(f"⚠️ シグナル受信なし（最後{round((now - _last_ea_signal_time)/60)}分前）")
+
+    # ログエラー確認
+    error_count = sum(1 for log in _system_logs if log.get('level') == 'ERROR')
+    if error_count > 5:
+        issues.append(f"❌ ログエラー多発（最近{error_count}件）")
+
+    # サーバー稼働時間確認
+    uptime_hours = (now - _server_start_time) / 3600
+
+    health_score = 100
+    if issues:
+        health_score -= 50
+    if warnings:
+        health_score -= 20
+
+    return jsonify({
+        "health_score": max(0, health_score),
+        "status": "🟢 正常" if health_score >= 80 else ("🟡 注意" if health_score >= 50 else "🔴 問題あり"),
+        "issues": issues,
+        "warnings": warnings,
+        "system": {
+            "uptime_hours": round(uptime_hours, 1),
+            "ea_alive": ea_alive,
+            "ea_last_heartbeat_sec_ago": round(now - _ea_last_heartbeat) if _ea_last_heartbeat else None,
+            "gemini_last_call_sec_ago": round(now - _last_gemini_call_time) if _last_gemini_call_time else None,
+            "last_signal_push_sec_ago": round(now - _last_ea_signal_time) if _last_ea_signal_time else None,
+            "recent_error_count": error_count,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    })
+
 @app.route("/ea-heartbeat", methods=["POST"])
 def ea_heartbeat():
     """MT5 EAからの定期ハートビート（生存確認・1分ごと）+ 最新スコア受信（v1.23）"""
