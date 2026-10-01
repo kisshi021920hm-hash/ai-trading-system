@@ -2440,12 +2440,19 @@ def ea_signal_push():
     if crossover not in ('UP_CROSS', 'DOWN_CROSS'):
         return jsonify({"error": f"Invalid crossover: {crossover}"}), 400
 
-    # ① 重複防止: 60秒以内の同方向シグナルはスキップ（EA複数インスタンス・リトライ対策）
+    # ① 方向変化チェック: 前回と同じ方向なら Gemini/Supabase 保存をスキップ
+    # （クロスになったタイミングのみ処理・同方向の繰り返しはスルー）
+    if crossover == _last_gemini_direction:
+        _last_ea_signal_time = time.time()  # ハートビート扱いで時刻だけ更新
+        print(f"⏭️ /ea-signal 方向変化なし({crossover}) → Gemini/保存スキップ")
+        return jsonify({"status": "skipped", "reason": "same_direction"}), 200
+
+    # ② バースト防止: 5秒以内の同方向重複（複数インスタンス対策）
     now = time.time()
     last_recv = _ea_signal_dedup.get(crossover, 0)
-    if now - last_recv < 60:
-        print(f"⏭️ /ea-signal 重複スキップ: {crossover} ({int(now - last_recv)}秒前に受信済み)")
-        return jsonify({"status": "skipped", "reason": "duplicate_within_60s"}), 200
+    if now - last_recv < 5:
+        print(f"⏭️ /ea-signal バースト重複スキップ: {crossover}")
+        return jsonify({"status": "skipped", "reason": "burst_duplicate"}), 200
     _ea_signal_dedup[crossover] = now
 
     print(f"📡 EA→サーバー シグナル受信: {crossover} "
