@@ -1164,6 +1164,46 @@ def position_monitor_loop():
                     print("⏳ 最新スコア待機中...")
                     continue
 
+                # 【v1.27改】レンジ相場での利益確定判定
+                adx = _ea_latest_scores.get('adx', 0.0)
+                current_close = _ea_latest_scores.get('close', 0.0)
+                entry_price = float(pos.get('entry_price', 0.0))
+                pos_side = pos.get('side', '').upper()
+
+                if adx < 20 and current_close > 0 and entry_price > 0:
+                    pnl_pips = abs(current_close - entry_price)
+                    has_profit = False
+
+                    if pos_side == 'SELL' and entry_price > current_close and pnl_pips > 0:
+                        has_profit = True
+                    elif pos_side == 'BUY' and current_close > entry_price and pnl_pips > 0:
+                        has_profit = True
+
+                    if has_profit:
+                        print(f"🎯 レンジ相場での利益確定: ポジション#{pos.get('id')} "
+                              f"(ADX={adx:.1f}<20, 含み益={pnl_pips:.2f}pips)")
+                        try:
+                            req.patch(
+                                f"{SUPABASE_URL}/rest/v1/trades",
+                                params={"id": f"eq.{pos.get('id')}"},
+                                json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
+                                headers={**supabase_headers(), "Prefer": "return=minimal"},
+                                timeout=10
+                            )
+                            log_system("INFO", f"🎯 決済: ポジション#{pos.get('id')} レンジ相場での利益確定（ADX={adx:.1f}, 含み益={pnl_pips:.2f}pips）")
+                            _last_ai_decision = {
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "decision_type": "CLOSE",
+                                "crossover_direction": None,
+                                "confidence_score": 95,
+                                "decision_reason": f"レンジ相場（ADX={adx:.1f}<20）で含み益あり。反転リスク回避のため決済。",
+                                "executed_action": f"CLOSE_PROFIT_LOCK (ポジション#{pos.get('id')})",
+                            }
+                            continue
+                        except Exception as e:
+                            print(f"❌ レンジ相場決済エラー: {e}")
+                            log_system("ERROR", f"レンジ相場決済エラー: {e}")
+
                 # Gemini で決済判定
                 close_decision = gemini_position_close_decision(pos, _ea_latest_scores)
 
