@@ -83,7 +83,7 @@ interface TodayStats {
 
 // ==================== 設定 ====================
 // v3B-rebuild
-const APP_VERSION = "1.23";
+const APP_VERSION = "1.24";
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -131,6 +131,9 @@ export default function App() {
   });
   const [useKeyLevels, setUseKeyLevels] = useState<boolean>(() => {
     try { return (localStorage.getItem("gt_use_key_levels") ?? "true") === "true"; } catch { return true; }
+  });
+  const [useRangeMode, setUseRangeMode] = useState<boolean>(() => {
+    try { return (localStorage.getItem("gt_use_range_mode") ?? "false") === "true"; } catch { return false; }
   });
   const [executing, setExecuting] = useState(false);
   const [execMsg, setExecMsg] = useState("");
@@ -294,6 +297,10 @@ export default function App() {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ use_key_levels: (localStorage.getItem("gt_use_key_levels") ?? "true") === "true" }),
           }),
+          fetch(`${RENDER_URL}/api/settings/range-mode`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ use_range_mode: (localStorage.getItem("gt_use_range_mode") ?? "false") === "true" }),
+          }),
         ]);
 
         setTf(savedTf);
@@ -426,6 +433,10 @@ export default function App() {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ use_key_levels: useKeyLevels }),
         }),
+        fetch(`${RENDER_URL}/api/settings/range-mode`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ use_range_mode: useRangeMode }),
+        }),
       ]);
       try {
         localStorage.setItem("gt_tf", String(tf));
@@ -435,6 +446,7 @@ export default function App() {
         localStorage.setItem("gt_auto_threshold", String(autoThreshold));
         localStorage.setItem("gt_entry_threshold", String(entryThreshold));
         localStorage.setItem("gt_use_key_levels", String(useKeyLevels));
+        localStorage.setItem("gt_use_range_mode", String(useRangeMode));
       } catch (_) {}
       setSaveMsg("✅ 保存しました");
       setTimeout(() => { setSaveMsg(""); setSettingsOpen(false); }, 1500);
@@ -1077,6 +1089,28 @@ export default function App() {
                 }} />
                 <span style={{
                   position: "absolute", top: 3, left: useKeyLevels ? 25 : 3, width: 20, height: 20,
+                  background: "#fff", borderRadius: "50%", transition: "0.3s"
+                }} />
+              </label>
+            </div>
+
+            {/* レンジ逆張りモード トグル */}
+            <div style={{ background: "#1e293b", border: `1px solid ${useRangeMode ? "#f59e0b" : "#334155"}`, borderRadius: 8, padding: "10px 14px", marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: 13, color: "#cbd5e1", fontWeight: "bold" }}>📊 レンジ逆張りモード</div>
+                <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
+                  {useRangeMode ? "ON: S/R間の反転エントリー（ADX<25）" : "OFF: トレンドフォロー専用"}
+                </div>
+              </div>
+              <label style={{ position: "relative", display: "inline-block", width: 48, height: 26, cursor: "pointer" }}>
+                <input type="checkbox" checked={useRangeMode} onChange={e => setUseRangeMode(e.target.checked)} style={{ opacity: 0, width: 0, height: 0 }} />
+                <span style={{
+                  position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+                  background: useRangeMode ? "#f59e0b" : "#475569",
+                  borderRadius: 26, transition: "0.3s"
+                }} />
+                <span style={{
+                  position: "absolute", top: 3, left: useRangeMode ? 25 : 3, width: 20, height: 20,
                   background: "#fff", borderRadius: "50%", transition: "0.3s"
                 }} />
               </label>

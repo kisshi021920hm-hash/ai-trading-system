@@ -57,6 +57,7 @@ _hybrid_sl_config = {
 # AI_CLOSE_MODE: エントリーは信頼度判定 + ポジション監視で決済判定を実行
 TRADING_MODE = os.environ.get("TRADING_MODE", "MANUAL")
 USE_KEY_LEVELS = True  # レジスタンス・サポート水準をGemini判断に含めるか
+USE_RANGE_MODE = False  # レンジ逆張りモード（S/R間の反転エントリー）
 AUTO_CONFIDENCE_THRESHOLD = int(os.environ.get("AUTO_CONFIDENCE_THRESHOLD", "70"))
 ENTRY_CONFIDENCE_THRESHOLD = int(os.environ.get("ENTRY_CONFIDENCE_THRESHOLD", "60"))
 CLOSE_CONFIDENCE_THRESHOLD = int(os.environ.get("CLOSE_CONFIDENCE_THRESHOLD", "70"))
@@ -962,7 +963,14 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
     if not crossover:
         return {'valid': False, 'confidence': 0, 'reason': 'シグナルなし',
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
-    direction = "買い（ロング）" if crossover == "UP_CROSS" else "売り（ショート）"
+
+    is_range_signal = crossover in ('RANGE_SHORT', 'RANGE_LONG')
+    if crossover in ('UP_CROSS', 'RANGE_LONG'):
+        direction = "買い（ロング）"
+    elif crossover in ('DOWN_CROSS', 'RANGE_SHORT'):
+        direction = "売り（ショート）"
+    else:
+        direction = "買い（ロング）"
 
     # 過去取引実績をプロンプトに追加
     stats = get_recent_trade_stats()
@@ -1043,6 +1051,31 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
         res_levels, sup_levels, broken_res_levels = find_key_levels(highs, lows, current_price)
         key_level_context = format_key_level_context(res_levels, sup_levels, current_price,
                                                      crossover, broken_res_levels)
+
+    # レンジ逆張りシグナル専用コンテキスト
+    if is_range_signal:
+        broken_res_lvl = float(ea_data.get('broken_resistance', 0))
+        sup_lvl = float(ea_data.get('support_level', 0))
+        if crossover == 'RANGE_SHORT':
+            dist_to_res = broken_res_lvl - current_price if broken_res_lvl > 0 else 0
+            key_level_context += (
+                f"\n\n📊【レンジ逆張り売りシグナル】ADX<25のレンジ相場でレジスタンス付近に到達"
+                f"\n  ・レジスタンス水準: ${broken_res_lvl:.2f}（現在価格から+{dist_to_res:.1f}pips）"
+                f"\n  ・戦略: レジスタンス天井での売り → サポートで決済"
+                f"\n  ・ADXが低く（{ea_data.get('adx', 0):.1f}）トレンドが弱いため逆張りが有効な局面"
+                f"\n  ・ただしブレイクアウトに転換するリスクに注意（RSIや勢いを確認）"
+                f"\n  ・ブレイクアウト気配がなければvalid=true / confidence=65以上を推奨"
+            )
+        elif crossover == 'RANGE_LONG':
+            dist_to_sup = current_price - sup_lvl if sup_lvl > 0 else 0
+            key_level_context += (
+                f"\n\n📊【レンジ逆張り買いシグナル】ADX<25のレンジ相場でサポート付近に到達"
+                f"\n  ・サポート水準: ${sup_lvl:.2f}（現在価格から-{dist_to_sup:.1f}pips）"
+                f"\n  ・戦略: サポート底での買い → レジスタンスで決済"
+                f"\n  ・ADXが低く（{ea_data.get('adx', 0):.1f}）トレンドが弱いため逆張りが有効な局面"
+                f"\n  ・RSI過売り・スローストキャスティクス反転があれば強い買い場"
+                f"\n  ・valid=true / confidence=65以上を推奨"
+            )
 
     # ブレイクアウト直接検出（クロスと同時にレジスタンスを上抜け）
     if ea_data.get('breakout_direct'):
@@ -2155,6 +2188,22 @@ def settings_key_levels():
     print(f"📐 レジスタンス・サポート判断: {state}")
     log_system("INFO", f"⚙️ 設定変更: レジスタンス・サポート判断 → {state}")
     return jsonify({"status": "ok", "use_key_levels": USE_KEY_LEVELS})
+
+@app.route("/api/settings/range-mode", methods=["GET", "POST", "OPTIONS"])
+def settings_range_mode():
+    global USE_RANGE_MODE
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if request.method == "GET":
+        return jsonify({"use_range_mode": USE_RANGE_MODE})
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON body"}), 400
+    USE_RANGE_MODE = bool(data.get("use_range_mode", False))
+    state = "ON" if USE_RANGE_MODE else "OFF"
+    print(f"📊 レンジ逆張りモード: {state}")
+    log_system("INFO", f"⚙️ 設定変更: レンジ逆張りモード → {state}")
+    return jsonify({"status": "ok", "use_range_mode": USE_RANGE_MODE})
 
 @app.route("/api/execute-order", methods=["POST", "OPTIONS"])
 def execute_order():

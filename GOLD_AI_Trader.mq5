@@ -26,6 +26,7 @@ input bool     SHOW_SR_LEVELS    = true;  // チャートにS/R水準を表示�
 input int      SR_LOOKBACK       = 100;   // S/R検索対象の過去ローソク足数
 input int      SR_SWING_BARS     = 3;     // スイングポイント判定に使うバー数（左右各N本）
 input int      SR_MAX_LEVELS     = 3;     // 表示するS/Rラインの最大本数
+input bool     RANGE_MODE        = false; // レンジ逆張りモード（ADX<20時にS/R逆張りエントリー）
 
 //--- グローバル変数
 int      g_last_signal_id    = -1;
@@ -477,7 +478,51 @@ void ComputeAndPushSignal()
         {
             double prev_rsi_val = rsi_buf[1];
 
-            // ① ブレイクアウト単独検出（クロスなしでも即時エントリーシグナル）
+            // ① レンジ逆張り検出（RANGE_MODE=trueかつADX<25時）
+            if (RANGE_MODE)
+            {
+                double range_res = 0, range_sup = 0;
+                string range_signal = DetectRangeEntry(cur_close, cur_adx, cur_atr, range_res, range_sup);
+                static datetime s_last_range_push_time = 0;
+                static string   s_last_range_signal    = "";
+                bool range_too_soon = (TimeCurrent() - s_last_range_push_time < SIGNAL_PUSH_INTERVAL);
+                bool range_same     = (range_signal == s_last_range_signal && range_too_soon);
+
+                if (range_signal != "" && !range_same)
+                {
+                    // ブレイクアウト検出時はレンジシグナルを無効化（ガード）
+                    double prev_close_val2 = iClose(_Symbol, PERIOD_M15, 1);
+                    double bo_check = 0;
+                    if (range_signal == "RANGE_SHORT" &&
+                        DetectResistanceBreakout(cur_close, prev_close_val2, bo_check))
+                    {
+                        // ブレイクアウト中のレンジ売りは無効
+                    }
+                    else
+                    {
+                        s_last_range_push_time = TimeCurrent();
+                        s_last_range_signal    = range_signal;
+                        Print("📊 レンジ逆張り検出: ", range_signal,
+                              " 価格=", DoubleToString(cur_close, 2),
+                              " RES=", DoubleToString(range_res, 2),
+                              " SUP=", DoubleToString(range_sup, 2));
+                        PushSignalToServer(range_signal, cur_close, cur_open, cur_high, cur_low,
+                                           cur_rsi, cur_macd, cur_macd_sig,
+                                           cur_ema20, cur_ema50, cur_ema200,
+                                           cur_bb_upper, cur_bb_lower,
+                                           cur_stoch_k, cur_stoch_d,
+                                           cur_adx, cur_di_plus, cur_di_minus, cur_atr,
+                                           buy_score, sell_score, buy_reasons, sell_reasons,
+                                           false, range_signal == "RANGE_LONG" ? range_sup : 0.0,
+                                           false, range_signal == "RANGE_SHORT" ? range_res : 0.0);
+                        g_last_pushed_crossover = range_signal;
+                        g_last_signal_push_time = TimeCurrent();
+                        return;
+                    }
+                }
+            }
+
+            // ② ブレイクアウト単独検出（クロスなしでも即時エントリーシグナル）
             {
                 double prev_close_val = iClose(_Symbol, PERIOD_M15, 1);
                 double bo_broken_lvl  = 0;
@@ -753,7 +798,7 @@ void PollAndTrade()
     int open_buy  = CountPositions(POSITION_TYPE_BUY);
     int open_sell = CountPositions(POSITION_TYPE_SELL);
 
-    if (crossover == "UP_CROSS")
+    if (crossover == "UP_CROSS" || crossover == "RANGE_LONG")
     {
         if (open_sell > 0 && FLIP_ON_REVERSE)
         {
@@ -761,11 +806,22 @@ void PollAndTrade()
             ClosePositions(POSITION_TYPE_SELL);
         }
         if (open_buy == 0)
-            ExecuteOrder(ORDER_TYPE_BUY, sl_price, tp_price);
+        {
+            // RANGE_LONG: TPをレジスタンス水準に自動設定
+            double use_tp = tp_price;
+            if (crossover == "RANGE_LONG" && use_tp <= 0)
+            {
+                double rng_res = 0, rng_sup = 0;
+                FindNearestSR(SymbolInfoDouble(_Symbol, SYMBOL_ASK), rng_res, rng_sup);
+                if (rng_res > 0) use_tp = rng_res;
+                Print("📊 RANGE_LONG TP自動設定: ", DoubleToString(use_tp, 2));
+            }
+            ExecuteOrder(ORDER_TYPE_BUY, sl_price, use_tp);
+        }
         else
             Print("ℹ️  BUYポジション既存のためスキップ");
     }
-    else if (crossover == "DOWN_CROSS")
+    else if (crossover == "DOWN_CROSS" || crossover == "RANGE_SHORT")
     {
         if (open_buy > 0 && FLIP_ON_REVERSE)
         {
@@ -773,7 +829,18 @@ void PollAndTrade()
             ClosePositions(POSITION_TYPE_BUY);
         }
         if (open_sell == 0)
-            ExecuteOrder(ORDER_TYPE_SELL, sl_price, tp_price);
+        {
+            // RANGE_SHORT: TPをサポート水準に自動設定
+            double use_tp = tp_price;
+            if (crossover == "RANGE_SHORT" && use_tp <= 0)
+            {
+                double rng_res = 0, rng_sup = 0;
+                FindNearestSR(SymbolInfoDouble(_Symbol, SYMBOL_BID), rng_res, rng_sup);
+                if (rng_sup > 0) use_tp = rng_sup;
+                Print("📊 RANGE_SHORT TP自動設定: ", DoubleToString(use_tp, 2));
+            }
+            ExecuteOrder(ORDER_TYPE_SELL, sl_price, use_tp);
+        }
         else
             Print("ℹ️  SELLポジション既存のためスキップ");
     }
@@ -1019,6 +1086,63 @@ void DeleteSRLevels()
 }
 
 // S/R水準を計算してチャートに描画
+// S/R水準を取得する共通関数（DrawSRLevels・DetectRangeEntry 両方で使用）
+void FindNearestSR(double current_price, double &nearest_res, double &nearest_sup)
+{
+    nearest_res = 0;
+    nearest_sup = 0;
+    int total = MathMin(SR_LOOKBACK, Bars(_Symbol, PERIOD_CURRENT) - SR_SWING_BARS - 1);
+    double best_res_dist = DBL_MAX;
+    double best_sup_dist = DBL_MAX;
+
+    for (int i = SR_SWING_BARS; i < total - SR_SWING_BARS; i++)
+    {
+        double h = iHigh(_Symbol, PERIOD_CURRENT, i);
+        double l = iLow (_Symbol, PERIOD_CURRENT, i);
+
+        bool is_high = true;
+        for (int j = i - SR_SWING_BARS; j <= i + SR_SWING_BARS && is_high; j++)
+            if (j != i && iHigh(_Symbol, PERIOD_CURRENT, j) >= h) is_high = false;
+
+        bool is_low = true;
+        for (int j = i - SR_SWING_BARS; j <= i + SR_SWING_BARS && is_low; j++)
+            if (j != i && iLow(_Symbol, PERIOD_CURRENT, j) <= l) is_low = false;
+
+        if (is_high && h > current_price)
+        {
+            double d = h - current_price;
+            if (d < best_res_dist) { best_res_dist = d; nearest_res = h; }
+        }
+        if (is_low && l < current_price)
+        {
+            double d = current_price - l;
+            if (d < best_sup_dist) { best_sup_dist = d; nearest_sup = l; }
+        }
+    }
+}
+
+// レンジ逆張りエントリー検出（RANGE_MODE=true時のみ使用）
+// 戻り値: "RANGE_SHORT" / "RANGE_LONG" / ""
+string DetectRangeEntry(double cur_price, double cur_adx, double cur_atr,
+                        double &res_level, double &sup_level)
+{
+    res_level = 0;
+    sup_level = 0;
+    if (!RANGE_MODE) return "";
+    if (cur_adx >= 25) return "";  // トレンド相場はスキップ（ADX<25をレンジ判定）
+
+    FindNearestSR(cur_price, res_level, sup_level);
+    if (res_level <= 0 || sup_level <= 0) return "";  // S/R両方必要
+
+    double range_width = res_level - sup_level;
+    if (range_width < 3.0) return "";  // レンジ幅が3$/oz未満はスキップ
+
+    double threshold = cur_atr * 0.5;
+    if (cur_price >= res_level - threshold) return "RANGE_SHORT";  // レジスタンス付近
+    if (cur_price <= sup_level + threshold) return "RANGE_LONG";   // サポート付近
+    return "";
+}
+
 void DrawSRLevels()
 {
     if (!SHOW_SR_LEVELS) { DeleteSRLevels(); return; }
