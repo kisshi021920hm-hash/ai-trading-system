@@ -1942,7 +1942,8 @@ def set_trading_mode():
     old_mode = TRADING_MODE
     TRADING_MODE = mode
     print(f"🔄 トレードモード変更: {mode}")
-    log_system("INFO", f"⚙️ 設定変更: トレードモード {old_mode} → {mode}")
+    if old_mode != mode:
+        log_system("INFO", f"⚙️ 設定変更: トレードモード {old_mode} → {mode}")
     settings_changed.set()  # signal_loop の即座再開を通知
     return jsonify({
         "status": "ok",
@@ -1968,7 +1969,8 @@ def set_auto_threshold():
     old_threshold = AUTO_CONFIDENCE_THRESHOLD
     AUTO_CONFIDENCE_THRESHOLD = threshold
     print(f"🎯 自動実行閾値変更: {threshold}%")
-    log_system("INFO", f"⚙️ 設定変更: 自動実行閾値 {old_threshold}% → {threshold}%")
+    if old_threshold != threshold:
+        log_system("INFO", f"⚙️ 設定変更: 自動実行閾値 {old_threshold}% → {threshold}%")
     return jsonify({"status": "ok", "threshold": threshold})
 
 @app.route("/api/settings/entry-threshold", methods=["POST", "OPTIONS"])
