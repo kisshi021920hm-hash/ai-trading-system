@@ -6,7 +6,7 @@
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.28"
+#property version   "1.29"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -68,7 +68,7 @@ datetime g_last_hybrid_sl_fetch        = 0;    // 最後にFlaskから取得し�
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.28 起動 ===");
+    Print("=== GOLD AI Trader EA v1.29 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
@@ -915,6 +915,7 @@ void TrailingStopUpdate()
                           " 旧SL=", DoubleToString(current_sl, 2),
                           " 新SL=", DoubleToString(new_sl, 2),
                           " (スプレッド$", DoubleToString(trailing_sl_usd, 2), "保護)");
+                    current_sl = new_sl;  // ライン描画に最新SLを反映
                 }
                 else
                 {
@@ -922,7 +923,84 @@ void TrailingStopUpdate()
                 }
             }
         }
+
+        // チャートにSL/トレーリングラインを描画
+        DrawPositionLines(pos_type, entry_price, current_sl,
+                          current_price, unrealized_usd,
+                          trailing_trigger_usd, trailing_sl_usd, usd_per_pip);
     }
+
+    // ポジションがない場合はラインを削除
+    if (PositionsTotal() == 0)
+        DeletePositionLines();
+}
+
+//+------------------------------------------------------------------+
+//  チャートライン描画ユーティリティ（v1.29: SL/トレーリング可視化）
+//+------------------------------------------------------------------+
+void DrawHLine(string name, double price, color clr, ENUM_LINE_STYLE style, int width, string label)
+{
+    if (ObjectFind(0, name) < 0)
+        ObjectCreate(0, name, OBJ_HLINE, 0, 0, price);
+    ObjectSetDouble(0, name, OBJPROP_PRICE, price);
+    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+    ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+    ObjectSetInteger(0, name, OBJPROP_WIDTH, width);
+    ObjectSetString(0, name, OBJPROP_TOOLTIP, label);
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, name, OBJPROP_BACK, true);
+    ChartRedraw(0);
+}
+
+void DeletePositionLines()
+{
+    string names[] = {"EA_Entry", "EA_SL", "EA_TrailStart", "EA_TrailSL"};
+    for (int i = 0; i < ArraySize(names); i++)
+        ObjectDelete(0, names[i]);
+    ChartRedraw(0);
+}
+
+void DrawPositionLines(ENUM_POSITION_TYPE pos_type,
+                       double entry_price, double current_sl,
+                       double current_price, double unrealized_usd,
+                       double trailing_trigger_usd, double trailing_sl_usd, double usd_per_pip)
+{
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+
+    // エントリーライン（水色 実線）
+    DrawHLine("EA_Entry", entry_price, clrDodgerBlue, STYLE_SOLID, 1,
+              "エントリー: " + DoubleToString(entry_price, digits));
+
+    // 現在のSLライン（赤 太実線）
+    if (current_sl > 0)
+        DrawHLine("EA_SL", current_sl, clrRed, STYLE_SOLID, 2,
+                  "SL: " + DoubleToString(current_sl, digits));
+
+    // トレーリング開始レベル（オレンジ 点線）- 含み益がこの水準に達するとトレーリング開始
+    if (usd_per_pip > 0)
+    {
+        double trigger_points = trailing_trigger_usd / usd_per_pip;
+        double trail_start_price = (pos_type == POSITION_TYPE_BUY)
+                                   ? entry_price + trigger_points
+                                   : entry_price - trigger_points;
+        trail_start_price = NormalizeDouble(trail_start_price, digits);
+        DrawHLine("EA_TrailStart", trail_start_price, clrOrange, STYLE_DOT, 1,
+                  "トレーリング開始 (+" + DoubleToString(trailing_trigger_usd, 0) + "$利益で発動)");
+    }
+
+    // 現在のトレーリングSLライン（オレンジレッド 破線）- トレーリング中のみ表示
+    if (unrealized_usd >= trailing_trigger_usd && usd_per_pip > 0)
+    {
+        double trail_sl_points = trailing_sl_usd / usd_per_pip;
+        double trail_sl_price  = (pos_type == POSITION_TYPE_BUY)
+                                 ? current_price - trail_sl_points
+                                 : current_price + trail_sl_points;
+        trail_sl_price = NormalizeDouble(trail_sl_price, digits);
+        DrawHLine("EA_TrailSL", trail_sl_price, clrOrangeRed, STYLE_DASH, 2,
+                  "トレーリングSL (" + DoubleToString(trailing_sl_usd, 0) + "$幅 | 現在: " + DoubleToString(trail_sl_price, digits) + ")");
+    }
+    else
+        ObjectDelete(0, "EA_TrailSL");  // トレーリング未発動中は非表示
 }
 
 // ポジション強制決済（含み損時の損切り）
