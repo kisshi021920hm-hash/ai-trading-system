@@ -44,6 +44,9 @@ int      g_h_atr    = INVALID_HANDLE;
 string   g_last_pushed_crossover = "";  // 最後にサーバーに送ったクロス方向
 datetime g_last_signal_push_time = 0;   // 最後に/ea-signalにPOSTした時刻
 
+//--- アプリスライダー連動: サーバーから取得した動的信頼度閾値
+int      g_dynamic_min_confidence = -1; // -1=未取得（未取得時はEA入力のMIN_CONFIDENCEを使用）
+
 //--- 最新スコア（ハートビートでサーバーに送るためグローバル保存）
 int    g_latest_buy_score  = 0;
 int    g_latest_sell_score = 0;
@@ -484,6 +487,16 @@ void PollAndTrade()
     double tp_price   = JsonDouble(json, "\"ai_tp_suggestion\":");
     bool   force_close = JsonBool(json,  "\"force_close\":");
 
+    // アプリスライダーの信頼度閾値を取得（サーバーから配信）
+    int server_min_conf = JsonInt(json, "\"min_confidence\":");
+    if (server_min_conf > 0)
+    {
+        if (g_dynamic_min_confidence != server_min_conf)
+            Print("🎯 信頼度閾値をアプリ設定に同期: ", g_dynamic_min_confidence, "% → ", server_min_conf, "%");
+        g_dynamic_min_confidence = server_min_conf;
+    }
+    int effective_min_confidence = (g_dynamic_min_confidence > 0) ? g_dynamic_min_confidence : MIN_CONFIDENCE;
+
     //--- AI_CLOSE_MODE: Geminiからの決済指示（force_close）チェック（signal_idに依存しない）
     if (force_close)
     {
@@ -515,9 +528,10 @@ void PollAndTrade()
     }
     // Geminiが実際に動いた場合(confidence>=0)のみ信頼度チェック
     // クールダウン中(confidence=-1)はREQUIRE_AI_VALIDに従う
-    if (confidence >= 0 && confidence < MIN_CONFIDENCE)
+    // effective_min_confidence = アプリスライダー値（未取得時はEA入力パラメータ）
+    if (confidence >= 0 && confidence < effective_min_confidence)
     {
-        Print("⛔ 信頼度不足: ", confidence, "% < ", MIN_CONFIDENCE, "%");
+        Print("⛔ 信頼度不足: ", confidence, "% < ", effective_min_confidence, "%（アプリ設定値）");
         return;
     }
 

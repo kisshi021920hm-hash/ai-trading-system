@@ -2063,6 +2063,11 @@ def latest_signal():
             print("⏱️ force_close フラグ自動リセット（120秒経過）")
         signal["force_close"] = _force_close_pending
 
+        # アプリスライダーの信頼度閾値をEAに配信（EA側のMIN_CONFIDENCEと連動）
+        entry_threshold = ENTRY_CONFIDENCE_THRESHOLD if TRADING_MODE == "AI_CLOSE_MODE" \
+                          else AUTO_CONFIDENCE_THRESHOLD
+        signal["min_confidence"] = entry_threshold
+
         return jsonify(signal)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
