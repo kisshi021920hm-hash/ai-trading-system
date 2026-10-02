@@ -1014,9 +1014,11 @@ DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr
         log_system("ERROR", f"❌ Gemini API エラー: {err_str[:150]}")
         is_quota = "クォータ制限中" in err_str or "429" in err_str or "quota" in err_str.lower()
         if is_quota:
-            # クォータ時: valid=None/confidence=None で「判定不能」扱い（ダマシ扱いしない）
-            log_system("WARNING", f"⏳ Gemini クォータ制限: {direction}シグナルは一時スキップ")
-            return {'valid': None, 'confidence': None, 'reason': 'クォータ制限中 - 数分後に自動回復します',
+            # クォータ/クールダウン時: confidence=-1 でEAに「クールダウン中」を伝える
+            # EA側: confidence=-1 は信頼度チェックをスキップ（REQUIRE_AI_VALIDに従う）
+            # confidence=None→0だとEAが「信頼度0%」と解釈しエントリーがブロックされるため-1を使用
+            log_system("WARNING", f"⏳ Gemini クォータ/クールダウン: {direction}シグナルは制限中")
+            return {'valid': None, 'confidence': -1, 'reason': 'クォータ制限中 - 数分後に自動回復します',
                     'sl_suggestion': None, 'tp_suggestion': None, 'key_level': '', 'quota_error': True}
         return {'valid': False, 'confidence': 0, 'reason': err_str[:200],
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
@@ -1967,6 +1969,22 @@ def set_auto_threshold():
     AUTO_CONFIDENCE_THRESHOLD = threshold
     print(f"🎯 自動実行閾値変更: {threshold}%")
     log_system("INFO", f"⚙️ 設定変更: 自動実行閾値 {old_threshold}% → {threshold}%")
+    return jsonify({"status": "ok", "threshold": threshold})
+
+@app.route("/api/settings/entry-threshold", methods=["POST", "OPTIONS"])
+def set_entry_threshold():
+    global ENTRY_CONFIDENCE_THRESHOLD
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    data = request.get_json()
+    if not data: return jsonify({"error": "No JSON body"}), 400
+    threshold = int(data.get("threshold", 60))
+    if not (0 <= threshold <= 100):
+        return jsonify({"error": "threshold must be 0-100"}), 400
+    old = ENTRY_CONFIDENCE_THRESHOLD
+    ENTRY_CONFIDENCE_THRESHOLD = threshold
+    print(f"🎯 全自動エントリー閾値変更: {threshold}%")
+    log_system("INFO", f"⚙️ 設定変更: 全自動エントリー閾値 {old}% → {threshold}%")
     return jsonify({"status": "ok", "threshold": threshold})
 
 @app.route("/api/execute-order", methods=["POST", "OPTIONS"])

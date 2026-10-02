@@ -119,6 +119,9 @@ export default function App() {
   const [autoThreshold, setAutoThreshold] = useState<number>(() => {
     try { return parseInt(localStorage.getItem("gt_auto_threshold") ?? "70"); } catch { return 70; }
   });
+  const [entryThreshold, setEntryThreshold] = useState<number>(() => {
+    try { return parseInt(localStorage.getItem("gt_entry_threshold") ?? "60"); } catch { return 60; }
+  });
   const [executing, setExecuting] = useState(false);
   const [execMsg, setExecMsg] = useState("");
   const [saving, setSaving] = useState(false);
@@ -222,6 +225,7 @@ export default function App() {
         const savedCrossover = (localStorage.getItem("gt_crossover") ?? "RSI") as "RSI" | "MACD" | "RSI_MACD" | "COMPOSITE";
         const savedTradingMode = (localStorage.getItem("gt_trading_mode") ?? "MANUAL") as "MANUAL" | "SEMI_AUTO" | "FULL_AUTO";
         const savedThreshold = parseInt(localStorage.getItem("gt_auto_threshold") ?? "70");
+        const savedEntryThreshold = parseInt(localStorage.getItem("gt_entry_threshold") ?? "60");
 
         await Promise.all([
           fetch(`${RENDER_URL}/api/settings/timeframe`, {
@@ -244,6 +248,10 @@ export default function App() {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ threshold: savedThreshold }),
           }),
+          fetch(`${RENDER_URL}/api/settings/entry-threshold`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ threshold: savedEntryThreshold }),
+          }),
         ]);
 
         setTf(savedTf);
@@ -251,6 +259,7 @@ export default function App() {
         setCrossoverMode(savedCrossover);
         setTradingMode(savedTradingMode);
         setAutoThreshold(savedThreshold);
+        setEntryThreshold(savedEntryThreshold);
 
         const sigRes = await fetch(`${RENDER_URL}/latest-signal`);
         const data = await sigRes.json();
@@ -353,6 +362,10 @@ export default function App() {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ threshold: autoThreshold }),
         }),
+        fetch(`${RENDER_URL}/api/settings/entry-threshold`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threshold: entryThreshold }),
+        }),
       ]);
       try {
         localStorage.setItem("gt_tf", String(tf));
@@ -360,6 +373,7 @@ export default function App() {
         localStorage.setItem("gt_crossover", crossoverMode);
         localStorage.setItem("gt_trading_mode", tradingMode);
         localStorage.setItem("gt_auto_threshold", String(autoThreshold));
+        localStorage.setItem("gt_entry_threshold", String(entryThreshold));
       } catch (_) {}
       setSaveMsg("✅ 保存しました");
       setTimeout(() => { setSaveMsg(""); setSettingsOpen(false); }, 1500);
@@ -848,9 +862,15 @@ export default function App() {
               )}
               {tradingMode === "AI_CLOSE_MODE" && (
                 <div style={{ marginTop: 10, padding: "8px 12px", background: "#7f1d1d", borderRadius: 6, fontSize: 12, color: "#fca5a5" }}>
-                  🤖 <b>Gemini判定</b>でエントリー（信頼度 60% 以上）<br/>
+                  🤖 <b>Gemini判定</b>でエントリー（信頼度 {entryThreshold}% 以上）<br/>
                   🤖 <b>クロス発生ごと</b>にGemini決済判断（60秒クールダウン）<br/>
                   🤖 決済指示はEAへ自動送信（force_close）
+                  <div style={{ marginTop: 8 }}>
+                    <label style={styles.inputLabel}>エントリー閾値: <b style={{ color: "#fca5a5" }}>{entryThreshold}%</b></label>
+                    <input type="range" min={50} max={95} step={5} value={entryThreshold}
+                      onChange={e => setEntryThreshold(parseInt(e.target.value))}
+                      style={{ width: "100%", accentColor: "#ef4444" }} />
+                  </div>
                 </div>
               )}
             </div>

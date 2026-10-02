@@ -800,11 +800,17 @@ void ClosePosition(ulong ticket, ENUM_POSITION_TYPE pos_type)
 
 void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
 {
-    //--- 最小取引間隔チェック（チョッピー相場のノイズシグナル排除）
-    if (g_last_trade_time > 0 && TimeCurrent() - g_last_trade_time < MIN_TRADE_INTERVAL)
+    //--- 最小取引間隔チェック（ポジションなし時はスキップ）
+    // ポジションがない状態では即エントリー可能（SLヒット後も素早く再エントリー）
+    int total_open = CountPositions(POSITION_TYPE_BUY) + CountPositions(POSITION_TYPE_SELL);
+    if (total_open == 0)
+    {
+        // ポジションなし: 間隔制限なしで即エントリー
+    }
+    else if (g_last_trade_time > 0 && TimeCurrent() - g_last_trade_time < MIN_TRADE_INTERVAL)
     {
         int remaining = (int)(MIN_TRADE_INTERVAL - (TimeCurrent() - g_last_trade_time));
-        Print("⏳ 最小取引間隔中: あと", remaining, "秒 スキップ");
+        Print("⏳ 最小取引間隔中: あと", remaining, "秒 スキップ（ポジション保有中）");
         return;
     }
 
