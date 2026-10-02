@@ -253,7 +253,7 @@ export default function App() {
 
     socket.on("connect", async () => {
       setConnected(true);
-      // FCMトークンを先に登録してから設定送信（競合防止）
+      // FCMトークン登録のみ（設定POSTは行わない→「設定変更」ログ連発を防止）
       try {
         const savedFcmToken = localStorage.getItem("gt_fcm_token");
         if (savedFcmToken) {
@@ -264,56 +264,8 @@ export default function App() {
           }).catch(() => {});
         }
       } catch (_) {}
+      // 最新シグナルとS/R水準のみ取得
       try {
-        const savedTf = parseInt(localStorage.getItem("gt_tf") ?? "30");
-        const savedMode = (localStorage.getItem("gt_mode") ?? "PRODUCTION") as "PRODUCTION" | "TEST";
-        const savedCrossover = (localStorage.getItem("gt_crossover") ?? "RSI") as "RSI" | "MACD" | "RSI_MACD" | "COMPOSITE";
-        const savedTradingMode = (localStorage.getItem("gt_trading_mode") ?? "MANUAL") as "MANUAL" | "SEMI_AUTO" | "FULL_AUTO";
-        const savedThreshold = parseInt(localStorage.getItem("gt_auto_threshold") ?? "70");
-        const savedEntryThreshold = parseInt(localStorage.getItem("gt_entry_threshold") ?? "60");
-
-        await Promise.all([
-          fetch(`${RENDER_URL}/api/settings/timeframe`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ timeframe: savedTf }),
-          }),
-          fetch(`${RENDER_URL}/api/settings/mode`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ mode: savedMode }),
-          }),
-          fetch(`${RENDER_URL}/api/settings/crossover`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ crossover_mode: savedCrossover }),
-          }),
-          fetch(`${RENDER_URL}/api/settings/trading-mode`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ trading_mode: savedTradingMode }),
-          }),
-          fetch(`${RENDER_URL}/api/settings/auto-threshold`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ threshold: savedThreshold }),
-          }),
-          fetch(`${RENDER_URL}/api/settings/entry-threshold`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ threshold: savedEntryThreshold }),
-          }),
-          fetch(`${RENDER_URL}/api/settings/key-levels`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ use_key_levels: (localStorage.getItem("gt_use_key_levels") ?? "true") === "true" }),
-          }),
-          fetch(`${RENDER_URL}/api/settings/range-mode`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ use_range_mode: (localStorage.getItem("gt_use_range_mode") ?? "false") === "true" }),
-          }).catch(() => {}),
-        ]);
-
-        setTf(savedTf);
-        setMode(savedMode);
-        setCrossoverMode(savedCrossover);
-        setTradingMode(savedTradingMode);
-        setAutoThreshold(savedThreshold);
-        setEntryThreshold(savedEntryThreshold);
-
         const [sigRes, srRes] = await Promise.all([
           fetch(`${RENDER_URL}/latest-signal`),
           fetch(`${RENDER_URL}/api/sr-levels`).catch(() => null),
