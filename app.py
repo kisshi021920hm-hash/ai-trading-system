@@ -2202,8 +2202,9 @@ def set_entry_threshold():
         return jsonify({"error": "threshold must be 0-100"}), 400
     old = ENTRY_CONFIDENCE_THRESHOLD
     ENTRY_CONFIDENCE_THRESHOLD = threshold
-    print(f"🎯 全自動エントリー閾値変更: {threshold}%")
-    log_system("INFO", f"⚙️ 設定変更: 全自動エントリー閾値 {old}% → {threshold}%")
+    if old != threshold:
+        print(f"🎯 全自動エントリー閾値変更: {threshold}%")
+        log_system("INFO", f"⚙️ 設定変更: 全自動エントリー閾値 {old}% → {threshold}%")
     return jsonify({"status": "ok", "threshold": threshold})
 
 @app.route("/api/settings/key-levels", methods=["GET", "POST", "OPTIONS"])
@@ -2216,10 +2217,12 @@ def settings_key_levels():
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON body"}), 400
+    old_key = USE_KEY_LEVELS
     USE_KEY_LEVELS = bool(data.get("use_key_levels", True))
-    state = "ON" if USE_KEY_LEVELS else "OFF"
-    print(f"📐 レジスタンス・サポート判断: {state}")
-    log_system("INFO", f"⚙️ 設定変更: レジスタンス・サポート判断 → {state}")
+    if old_key != USE_KEY_LEVELS:
+        state = "ON" if USE_KEY_LEVELS else "OFF"
+        print(f"📐 レジスタンス・サポート判断: {state}")
+        log_system("INFO", f"⚙️ 設定変更: レジスタンス・サポート判断 → {state}")
     return jsonify({"status": "ok", "use_key_levels": USE_KEY_LEVELS})
 
 @app.route("/api/sr-levels", methods=["GET", "OPTIONS"])
@@ -2239,10 +2242,12 @@ def settings_range_mode():
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON body"}), 400
+    old_range = USE_RANGE_MODE
     USE_RANGE_MODE = bool(data.get("use_range_mode", False))
-    state = "ON" if USE_RANGE_MODE else "OFF"
-    print(f"📊 レンジ逆張りモード: {state}")
-    log_system("INFO", f"⚙️ 設定変更: レンジ逆張りモード → {state}")
+    if old_range != USE_RANGE_MODE:
+        state = "ON" if USE_RANGE_MODE else "OFF"
+        print(f"📊 レンジ逆張りモード: {state}")
+        log_system("INFO", f"⚙️ 設定変更: レンジ逆張りモード → {state}")
     return jsonify({"status": "ok", "use_range_mode": USE_RANGE_MODE})
 
 @app.route("/api/execute-order", methods=["POST", "OPTIONS"])
