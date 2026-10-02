@@ -334,6 +334,10 @@ def send_mt5_order(signal_id, direction, entry_price, sl_price=None, tp_price=No
             result = response.json()
             print(f"✅ MT5注文成功: {direction} @{entry_price} SL={sl_price} TP={tp_price} Trailing={trailing_stop_pips}pips")
             log_system("INFO", f"✅ エントリー実行: {direction} @{entry_price}円 SL={sl_price}円 TP={tp_price}円 TrailingSL={trailing_sl}円 (Signal#{signal_id})")
+            send_position_alert_push(
+                f"✅ {'BUY' if direction == 'BUY' else 'SELL'} エントリー実行",
+                f"@{entry_price} | SL:{sl_price} TP:{tp_price}"
+            )
             log_system("INFO", f"📊 トレーリングストップ: {trailing_stop_pips}pips 設定完了（初期値={trailing_sl}円）")
             # Supabase にトレード記録
             req.post(
@@ -1611,6 +1615,10 @@ def position_monitor_loop():
                         _force_close_pending = True
                         _force_close_set_time = time.time()
                         log_system("INFO", f"🔴 force_close フラグセット: Gemini決済指示（信頼度={close_decision['confidence']}%）")
+                        send_position_alert_push(
+                            "🔴 決済指示 送信",
+                            f"Gemini決済判断: 信頼度{close_decision['confidence']}% | {close_decision.get('reason','')[:40]}"
+                        )
                         # Supabase で status を CLOSED に更新
                         req.patch(
                             f"{SUPABASE_URL}/rest/v1/trades",
@@ -1856,10 +1864,10 @@ def signal_loop():
 
             if signal_data.get('crossover'):
                 # クールダウン中(ai_conf=None)のみFCMスキップ
-                # クォータ制限・実分析結果はどちらも通知する
                 ai_conf = signal_data.get('ai_confidence')
                 if ai_conf is not None:
-                    send_fcm_push(signal_data)
+                    # AI_CLOSE_MODEはクロスでは振動なし（エントリー/決済時のみ振動）
+                    send_fcm_push(signal_data, vibrate=(TRADING_MODE != "AI_CLOSE_MODE"))
 
         except Exception as e:
             print(f"❌ シグナルループエラー: {e}")
@@ -1869,41 +1877,34 @@ def signal_loop():
         settings_changed.clear()
 
 # ==================== FCM プッシュ送信 ====================
-def send_fcm_push(signal_data):
+# チャンネルID:
+#   "gold-trade-v3"  — エントリー/決済専用（強振動）
+#   "gold-signal-v3" — クロスオーバー通知のみ（振動なし）
+_FCM_VIBRATE_PATTERN = [0, 800, 200, 800, 200, 800]  # 0.8秒×3回
+
+def _send_fcm(title: str, body: str, channel: str):
+    """共通FCM送信処理"""
     if not FCM_ENABLED or not fcm_tokens:
         return []
-    direction = "📈 買いシグナル" if signal_data.get('crossover') == "UP_CROSS" else "📉 売りシグナル"
-    confidence = signal_data.get('ai_confidence')
-    reason = signal_data.get('ai_reason', '')
-    sl = signal_data.get('ai_sl_suggestion')
-    tp = signal_data.get('ai_tp_suggestion')
-    sl_tp = f" | SL:{sl} TP:{tp}" if sl and tp else ""
-    if confidence is not None:
-        body = f"{'✅' if signal_data.get('ai_valid') else '⚠️'} 信頼度:{confidence}% {reason}{sl_tp}"
-    else:
-        body = f"シグナル検出{sl_tp}"
+    vibrate = channel == "gold-trade-v3"
     invalid_tokens = set()
     results = []
     for token in list(fcm_tokens):
         try:
             msg = messaging.Message(
-                notification=messaging.Notification(
-                    title=f"GOLD {direction}",
-                    body=body,
-                ),
+                notification=messaging.Notification(title=title, body=body),
                 android=messaging.AndroidConfig(
                     priority="high",
                     notification=messaging.AndroidNotification(
-                        channel_id="gold-trading",
+                        channel_id=channel,
                         notification_count=1,
-                        vibrate_timings_millis=[0, 2000, 300, 2000, 300, 2000, 300, 2000, 300, 2000],
-                        default_vibrate_timings=False,
+                        vibrate_timings_millis=_FCM_VIBRATE_PATTERN if vibrate else [0],
+                        default_vibrate_timings=not vibrate,
                     ),
                 ),
                 token=token,
             )
             msg_id = messaging.send(msg)
-            print(f"✓ FCMプッシュ送信完了 msg_id={msg_id}: {token[:20]}...")
             results.append({"token": token[:20], "status": "ok", "msg_id": msg_id})
         except Exception as e:
             print(f"⚠️  FCM送信エラー ({token[:20]}...): {e}")
@@ -1915,36 +1916,31 @@ def send_fcm_push(signal_data):
         delete_fcm_token(t)
     return results
 
-# ==================== ポジション警告FCM ====================
+def send_fcm_push(signal_data, vibrate: bool = True):
+    """クロスオーバー通知。AI_CLOSE_MODEではvibrate=Falseで呼び出す"""
+    direction = "📈 買いシグナル" if signal_data.get('crossover') == "UP_CROSS" else "📉 売りシグナル"
+    confidence = signal_data.get('ai_confidence')
+    reason = signal_data.get('ai_reason', '')
+    sl = signal_data.get('ai_sl_suggestion')
+    tp = signal_data.get('ai_tp_suggestion')
+    sl_tp = f" | SL:{sl} TP:{tp}" if sl and tp else ""
+    if confidence is not None:
+        body = f"{'✅' if signal_data.get('ai_valid') else '⚠️'} 信頼度:{confidence}% {reason}{sl_tp}"
+    else:
+        body = f"シグナル検出{sl_tp}"
+    channel = "gold-trade-v3" if vibrate else "gold-signal-v3"
+    results = _send_fcm(f"GOLD {direction}", body, channel)
+    print(f"✓ FCMプッシュ送信: {channel} {len(results)}件")
+    return results
+
+# ==================== ポジション警告/トレードイベントFCM ====================
 def send_position_alert_push(title: str, body: str):
-    """ポジション監視専用のFCM通知（カスタムタイトル・本文）"""
+    """エントリー・決済・ポジション警告の通知（常に強振動）"""
     if not FCM_ENABLED or not fcm_tokens:
         return []
-    invalid_tokens = set()
-    results = []
-    for token in list(fcm_tokens):
-        try:
-            msg = messaging.Message(
-                notification=messaging.Notification(title=title, body=body),
-                android=messaging.AndroidConfig(
-                    priority="high",
-                    notification=messaging.AndroidNotification(
-                        channel_id="gold-trading",
-                        notification_count=1,
-                        vibrate_timings_millis=[0, 2000, 300, 2000, 300, 2000, 300, 2000, 300, 2000],
-                        default_vibrate_timings=False,
-                    ),
-                ),
-                token=token,
-            )
-            msg_id = messaging.send(msg)
-            print(f"✓ ポジション警告FCM送信完了 msg_id={msg_id}: {token[:20]}...")
-            results.append({"token": token[:20], "status": "ok", "msg_id": msg_id})
-        except Exception as e:
-            print(f"⚠️  ポジション警告FCM送信エラー ({token[:20]}...): {e}")
-            results.append({"token": token[:20], "status": "error", "error": str(e)})
-            if "registration-token-not-registered" in str(e) or "invalid-argument" in str(e):
-                invalid_tokens.add(token)
+    results = _send_fcm(title, body, "gold-trade-v3")
+    print(f"✓ トレードイベントFCM送信: {len(results)}件")
+    return results
     fcm_tokens.difference_update(invalid_tokens)
     for t in invalid_tokens:
         delete_fcm_token(t)
@@ -2778,6 +2774,10 @@ def ea_signal_push():
                         f"(信頼度{close_result.get('confidence')}% 理由:{close_result.get('reason','')})")
                     print(f"🔴 AI_CLOSE_MODE: クロス時決済指示 → force_close=True "
                           f"(conf={close_result.get('confidence')}%)")
+                    send_position_alert_push(
+                        "🔴 決済指示 送信",
+                        f"Gemini決済判断: 信頼度{close_result.get('confidence')}% | {str(close_result.get('reason',''))[:40]}"
+                    )
                     break
             _last_gemini_close_call_time = time.time()
         except Exception as e:
@@ -2936,7 +2936,7 @@ def ea_signal_push():
 
     # FCM通知（クールダウン中 = confidence=None のみスキップ）
     if ai['confidence'] is not None:
-        send_fcm_push(signal_data)
+        send_fcm_push(signal_data, vibrate=(TRADING_MODE != "AI_CLOSE_MODE"))
 
     # WebSocket配信（スマホアプリ向け）
     socketio.emit('signal', signal_data)

@@ -83,7 +83,7 @@ interface TodayStats {
 
 // ==================== 設定 ====================
 // v3B-rebuild
-const APP_VERSION = "1.18";
+const APP_VERSION = "1.19";
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -151,6 +151,9 @@ export default function App() {
     try { localStorage.setItem("gt_pause_refresh", String(pauseSignalRefresh)); } catch {}
   }, [pauseSignalRefresh]);
 
+  const tradingModeRef = useRef(tradingMode);
+  useEffect(() => { tradingModeRef.current = tradingMode; }, [tradingMode]);
+
   const vibDurationRef = useRef(vibDuration);
   const vibCountRef = useRef(vibCount);
   const vibGapRef = useRef(vibGap);
@@ -209,14 +212,23 @@ export default function App() {
     }
 
     LocalNotifications.requestPermissions();
-    // チャンネルIDをv2に更新（振動設定を確実に反映させるため）
+    // gold-trade-v3: エントリー/決済（強振動）
     LocalNotifications.createChannel({
-      id: "gold-trading",
-      name: "GOLDシグナル通知",
+      id: "gold-trade-v3",
+      name: "エントリー/決済通知",
       importance: 5,
       vibration: true,
       lights: true,
-      description: "GOLDトレードシグナルの通知（振動あり）",
+      description: "エントリー・決済時の通知（強振動）",
+    });
+    // gold-signal-v3: クロスオーバー通知（AI_CLOSE_MODEでは振動なし）
+    LocalNotifications.createChannel({
+      id: "gold-signal-v3",
+      name: "シグナル通知",
+      importance: 4,
+      vibration: false,
+      lights: true,
+      description: "クロスオーバーシグナルの通知",
     });
 
     const socket: Socket = io(RENDER_URL, {
@@ -324,8 +336,11 @@ export default function App() {
       }
 
       if (data.crossover) {
-        // 振動（アプリが前面にある場合）
-        doVibrate(vibDurationRef.current, vibCountRef.current, vibGapRef.current);
+        const isAiCloseMode = tradingModeRef.current === "AI_CLOSE_MODE";
+        // AI_CLOSE_MODEではクロス時はHaptics振動しない（エントリー/決済FCM通知で振動）
+        if (!isAiCloseMode) {
+          doVibrate(vibDurationRef.current, vibCountRef.current, vibGapRef.current);
+        }
 
         const direction = data.crossover === "UP_CROSS" ? "📈 買いシグナル" : "📉 売りシグナル";
         const label = data.test_mode ? "🧪 TEST " : "";
@@ -336,13 +351,15 @@ export default function App() {
         const aiBody = data.ai_valid !== null
           ? `${data.ai_valid ? "✅" : "⚠️"} 信頼度:${data.ai_confidence}% ${data.ai_reason ?? ""}${slTp}`
           : `シグナル検出${slTp}`;
+        // AI_CLOSE_MODEはシグナルチャンネル（振動なし）、それ以外はトレードチャンネル（振動あり）
+        const channelId = isAiCloseMode ? "gold-signal-v3" : "gold-trade-v3";
         LocalNotifications.schedule({
           notifications: [{
             id: notifId,
             title: `${label}GOLD ${direction}`,
             body: aiBody,
             schedule: { at: new Date() },
-            channelId: "gold-trading",
+            channelId,
             sound: "default",
           }],
         });
@@ -1111,7 +1128,7 @@ export default function App() {
                           title: "🔔 テスト通知",
                           body: `振動 ${vibDuration}ms × ${vibCount}回`,
                           schedule: { at: new Date(Date.now() + 300) },
-                          channelId: "gold-trading",
+                          channelId: "gold-trade-v3",
                           sound: "default",
                         }],
                       });
