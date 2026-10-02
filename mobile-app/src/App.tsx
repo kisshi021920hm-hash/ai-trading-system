@@ -100,6 +100,7 @@ export default function App() {
   const [signal, setSignal] = useState<Signal | null>(null);
   const [history, setHistory] = useState<Signal[]>([]);
   const [connected, setConnected] = useState(false);
+  const [lastSocketReceived, setLastSocketReceived] = useState<Date | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"signal" | "analytics" | "dashboard">("signal");
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -309,11 +310,13 @@ export default function App() {
     socket.on("candle_update", (data: Signal) => {
       setSignal(data);
       setHistory((prev) => [data, ...prev].slice(0, 50));
+      setLastSocketReceived(new Date());
     });
 
     socket.on("signal", (data: Signal) => {
       setSignal(data);
       setHistory((prev) => [data, ...prev].slice(0, 50));
+      setLastSocketReceived(new Date());
       // シグナル受信時にS/R水準も更新
       fetch(`${RENDER_URL}/api/sr-levels`).then(r => r.json()).then(sr => {
         if (sr && sr.current_price > 0) setSrLevels(sr);
@@ -353,8 +356,21 @@ export default function App() {
       }
     });
 
+    // 15分ごとに最新シグナルを再取得（EAが同じデータを送っていても表示を更新）
+    const refreshInterval = setInterval(async () => {
+      try {
+        const res = await fetch(`${RENDER_URL}/latest-signal`);
+        const data = await res.json();
+        if (data && data.rsi) {
+          setSignal(data);
+          setLastSocketReceived(new Date());
+        }
+      } catch (_) {}
+    }, 15 * 60 * 1000);
+
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      clearInterval(refreshInterval);
       socket.disconnect();
       if (Capacitor.isNativePlatform()) {
         PushNotifications.removeAllListeners();
@@ -641,6 +657,11 @@ export default function App() {
                 </>
               )}
               <p style={styles.timestamp}>{new Date(signal.generated_at).toLocaleString("ja-JP")}</p>
+              {lastSocketReceived && (
+                <p style={{ fontSize: 10, color: "#22c55e", textAlign: "right" as const, margin: "2px 0 0" }}>
+                  ✅ 最終受信: {lastSocketReceived.toLocaleTimeString("ja-JP")}
+                </p>
+              )}
               {signal.crossover && signal.ai_valid && (
                 <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
                   {/* SEMI_AUTO: MT5自動注文ボタン */}
