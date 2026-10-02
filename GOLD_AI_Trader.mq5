@@ -6,7 +6,7 @@
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.27"
+#property version   "1.28"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -54,6 +54,10 @@ double g_latest_rsi        = 0.0;
 double g_latest_adx        = 0.0;
 double g_latest_close      = 0.0;
 string g_latest_crossover  = "NONE";  // 最新のクロスオーバー方向（NONE/UP_CROSS/DOWN_CROSS）
+
+//--- ブレイクアウト→リテスト追跡（v1.28新機能）
+double   g_broken_resistance      = 0.0;  // ブレイクアウトしたレジスタンス水準（0=未ブレイク）
+datetime g_broken_resistance_time = 0;    // ブレイクアウト検出時刻（有効期限管理）
 
 //--- ハイブリッドSL設定キャッシュ（固定4変数・上書き更新のみで増えない）
 double   g_cached_initial_sl_usd       = 2.0;
@@ -181,7 +185,8 @@ void PushSignalToServer(string crossover, double close_price,
                         double adx, double di_plus, double di_minus,
                         double atr, int buy_score, int sell_score,
                         string buy_reasons, string sell_reasons,
-                        bool support_bounce = false, double support_level_price = 0.0)
+                        bool support_bounce = false, double support_level_price = 0.0,
+                        bool breakout_retest = false, double broken_resistance_price = 0.0)
 {
     // 過去20本のローソク足データを取得（テクニカル強化用）
     MqlRates rates[20];
@@ -228,8 +233,10 @@ void PushSignalToServer(string crossover, double close_price,
         + ",\"atr\":"           + DoubleToString(atr,          4)
         + ",\"buy_score\":"       + IntegerToString(buy_score)
         + ",\"sell_score\":"      + IntegerToString(sell_score)
-        + ",\"support_bounce\":"  + (support_bounce ? "true" : "false")
-        + ",\"support_level\":"   + DoubleToString(support_level_price, 2)
+        + ",\"support_bounce\":"      + (support_bounce ? "true" : "false")
+        + ",\"support_level\":"       + DoubleToString(support_level_price, 2)
+        + ",\"breakout_retest\":"     + (breakout_retest ? "true" : "false")
+        + ",\"broken_resistance\":"   + DoubleToString(broken_resistance_price, 2)
         + "}";
 
     string headers = "Content-Type: application/json\r\n";
@@ -282,6 +289,44 @@ bool DetectSupportBounce(double cur_price, double cur_rsi, double prev_rsi,
         }
     }
     return false;
+}
+
+// レジスタンスブレイクアウト検出（前足がレジスタンス以下 → 現足が上抜け）
+bool DetectResistanceBreakout(double cur_close, double prev_close, double &broken_level)
+{
+    int bars = 50, swing_len = 3;
+    for (int i = swing_len + 1; i < bars - swing_len; i++)
+    {
+        double high_i = iHigh(_Symbol, PERIOD_M15, i);
+        if (high_i <= prev_close) continue;  // 前足がすでにこのレジスタンスを超えていたらスキップ
+        bool is_swing_high = true;
+        for (int j = i - swing_len; j <= i + swing_len; j++)
+        {
+            if (j == i) continue;
+            if (iHigh(_Symbol, PERIOD_M15, j) > high_i) { is_swing_high = false; break; }
+        }
+        if (!is_swing_high) continue;
+        // 前足がレジスタンス以下 → 現足がレジスタンスを上抜け
+        if (prev_close < high_i && cur_close > high_i)
+        {
+            broken_level = high_i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// ブレイクアウト→リテスト検出（旧レジスタンスが新サポートとして機能し反発）
+bool DetectBreakoutRetest(double cur_price, double cur_rsi, double prev_rsi, double cur_atr)
+{
+    if (g_broken_resistance <= 0) return false;
+    // ブレイクアウトから48時間以内のみ有効（M15×192本=48h）
+    if ((int)(TimeCurrent() - g_broken_resistance_time) > 192 * 900) return false;
+    // 旧レジスタンス（新サポート）への接近チェック: ATR×0.5以内かつ価格が上
+    double dist = cur_price - g_broken_resistance;
+    if (dist < 0 || dist > cur_atr * 0.5) return false;
+    // RSI反転確認（反発の底確認）
+    return (cur_rsi < 60.0 && cur_rsi > prev_rsi);
 }
 
 void ComputeAndPushSignal()
@@ -413,12 +458,39 @@ void ComputeAndPushSignal()
 
     if (crossover == "")
     {
-        // 通常クロスなし → ポジションなし時のみサポートバウンス検出
+        // 通常クロスなし → ポジションなし時のみ再エントリー検出
         int total_open = CountPositions(POSITION_TYPE_BUY) + CountPositions(POSITION_TYPE_SELL);
         if (total_open == 0)
         {
-            double support_lvl = 0;
             double prev_rsi_val = rsi_buf[1];
+
+            // ① ブレイクアウト→リテスト検出（優先: 最も強いシグナル）
+            if (g_broken_resistance > 0 && DetectBreakoutRetest(cur_close, cur_rsi, prev_rsi_val, cur_atr))
+            {
+                static datetime s_last_retest_time = 0;
+                if (TimeCurrent() - s_last_retest_time >= SIGNAL_PUSH_INTERVAL)
+                {
+                    s_last_retest_time    = TimeCurrent();
+                    double saved_res      = g_broken_resistance;
+                    g_broken_resistance   = 0;  // 1回のみトリガー
+                    Print("⭐ ブレイクアウト→リテスト検出! 旧レジスタンス=", DoubleToString(saved_res, 2),
+                          " 価格=", DoubleToString(cur_close, 2));
+                    PushSignalToServer("UP_CROSS", cur_close, cur_open, cur_high, cur_low,
+                                       cur_rsi, cur_macd, cur_macd_sig,
+                                       cur_ema20, cur_ema50, cur_ema200,
+                                       cur_bb_upper, cur_bb_lower,
+                                       cur_stoch_k, cur_stoch_d,
+                                       cur_adx, cur_di_plus, cur_di_minus, cur_atr,
+                                       buy_score, sell_score, buy_reasons, sell_reasons,
+                                       false, 0.0, true, saved_res);
+                    g_last_pushed_crossover = "BREAKOUT_RETEST";
+                    g_last_signal_push_time = TimeCurrent();
+                }
+                return;
+            }
+
+            // ② サポートバウンス検出（通常クロスなしの底反発）
+            double support_lvl = 0;
             if (DetectSupportBounce(cur_close, cur_rsi, prev_rsi_val, cur_atr, support_lvl))
             {
                 static double   s_last_bounce_support = 0;
@@ -463,6 +535,20 @@ void ComputeAndPushSignal()
 
     g_last_pushed_crossover = crossover;
     g_last_signal_push_time = TimeCurrent();
+
+    // UP_CROSSでレジスタンスブレイクアウトを記録（次のリテストを待機）
+    if (crossover == "UP_CROSS")
+    {
+        double prev_close_val = iClose(_Symbol, PERIOD_M15, 1);
+        double broken_lvl     = 0;
+        if (DetectResistanceBreakout(cur_close, prev_close_val, broken_lvl))
+        {
+            g_broken_resistance      = broken_lvl;
+            g_broken_resistance_time = TimeCurrent();
+            Print("🔴 レジスタンスブレイクアウト記録: 水準=", DoubleToString(broken_lvl, 2),
+                  " → リテスト待機中");
+        }
+    }
 }
 
 //+------------------------------------------------------------------+

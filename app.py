@@ -1020,6 +1020,20 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
         res_levels, sup_levels = find_key_levels(highs, lows, current_price)
         key_level_context = format_key_level_context(res_levels, sup_levels, current_price, crossover)
 
+    # ブレイクアウト→リテスト（最高優先度：旧レジスタンスが新サポートに転換）
+    if ea_data.get('breakout_retest'):
+        broken_res = float(ea_data.get('broken_resistance', 0))
+        dist = current_price - broken_res if broken_res > 0 else 0
+        key_level_context += (
+            f"\n\n⭐⭐【ブレイクアウト→リテスト検出】ユーザーが最重視するパターンです！"
+            f"\n  ・旧レジスタンス水準: ${broken_res:.2f}（現在価格から+{dist:.1f}pips）"
+            f"\n  ・このレジスタンスをブレイクアウトし、リテスト（戻り）中です"
+            f"\n  ・旧レジスタンスが新サポートとして機能している可能性が極めて高い"
+            f"\n  ・このパターンはユーザーが最も積極的にBUYエントリーしたい場面です"
+            f"\n  ・レジスタンス付近でなければ信頼度を20-30pt高く評価してください"
+            f"\n  ・valid=true かつ confidence=80以上を強く推奨します"
+        )
+
     # サポートバウンス（EAが通常クロスなしで検出した底からの反発）
     if ea_data.get('support_bounce'):
         support_lvl = float(ea_data.get('support_level', 0))
