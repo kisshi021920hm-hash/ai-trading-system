@@ -899,25 +899,38 @@ def find_key_levels(highs, lows, current_price, n_swing=3, max_levels=3):
     """直近スイングポイントからレジスタンス・サポート水準を返す"""
     resistance = []
     support = []
+    broken_resistance = []  # 旧レジスタンス → 現在はサポートに転換済み
     n = len(highs)
     for i in range(n_swing, n - n_swing):
         window = list(range(i - n_swing, i + n_swing + 1))
         if all(highs[i] >= highs[j] for j in window if j != i):
             if highs[i] > current_price:
                 resistance.append(round(highs[i], 2))
+            elif current_price - 50 < highs[i] < current_price:
+                # 現在価格より下にある旧スイング高値 = 旧レジスタンス → 新サポート
+                broken_resistance.append(round(highs[i], 2))
         if all(lows[i] <= lows[j] for j in window if j != i):
             if lows[i] < current_price:
                 support.append(round(lows[i], 2))
     resistance = sorted(set(resistance))[:max_levels]
     support = sorted(set(support), reverse=True)[:max_levels]
-    return resistance, support
+    broken_resistance = sorted(set(broken_resistance), reverse=True)[:max_levels]
+    return resistance, support, broken_resistance
 
 
-def format_key_level_context(resistance_levels, support_levels, current_price, crossover=None):
+def format_key_level_context(resistance_levels, support_levels, current_price,
+                              crossover=None, broken_resistance_levels=None):
     """レジスタンス・サポート水準をプロンプト用テキストに整形"""
-    if not resistance_levels and not support_levels:
+    if not resistance_levels and not support_levels and not broken_resistance_levels:
         return ""
     ctx = "\n【直近レジスタンス・サポート水準】"
+
+    # 旧レジスタンス → 新サポート（最優先・強気材料）
+    for br in (broken_resistance_levels or []):
+        dist = current_price - br
+        ctx += (f"\n  ✅ 旧レジスタンス→サポート転換: ${br:.2f}"
+                f"（現在から-{dist:.1f}pips）← ブレイクアウト確認済み・強気サポート")
+
     for r in resistance_levels:
         dist = r - current_price
         warn = " ⚠️ 近接！エントリー慎重" if dist < 8 else ""
@@ -926,6 +939,11 @@ def format_key_level_context(resistance_levels, support_levels, current_price, c
         dist = current_price - s
         note = " ✅ サポート確認なら反発期待" if dist < 8 else ""
         ctx += f"\n  サポート: ${s:.2f}（現在から-{dist:.1f}pips）{note}"
+
+    if crossover == "UP_CROSS" and broken_resistance_levels:
+        ctx += (f"\n  📈 価格は旧レジスタンス${broken_resistance_levels[0]:.2f}を上抜け済み。"
+                f"このレベルが強固なサポートとして機能している場合、上昇継続の可能性が高い。"
+                f"信頼度を10-20pt高く評価してください。")
     if crossover == "UP_CROSS" and resistance_levels:
         dist = resistance_levels[0] - current_price
         if dist < 8:
@@ -1022,20 +1040,34 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
     if USE_KEY_LEVELS and candle_history and len(candle_history) >= 10:
         highs = [float(c.get('high', c.get('close', 0))) for c in candle_history]
         lows  = [float(c.get('low',  c.get('close', 0))) for c in candle_history]
-        res_levels, sup_levels = find_key_levels(highs, lows, current_price)
-        key_level_context = format_key_level_context(res_levels, sup_levels, current_price, crossover)
+        res_levels, sup_levels, broken_res_levels = find_key_levels(highs, lows, current_price)
+        key_level_context = format_key_level_context(res_levels, sup_levels, current_price,
+                                                     crossover, broken_res_levels)
 
-    # ブレイクアウト→リテスト（最高優先度：旧レジスタンスが新サポートに転換）
+    # ブレイクアウト直接検出（クロスと同時にレジスタンスを上抜け）
+    if ea_data.get('breakout_direct'):
+        broken_res = float(ea_data.get('broken_resistance', 0))
+        dist = current_price - broken_res if broken_res > 0 else 0
+        key_level_context += (
+            f"\n\n⭐⭐⭐【ブレイクアウト直接検出】今まさにレジスタンスを上抜けました！"
+            f"\n  ・突破したレジスタンス水準: ${broken_res:.2f}（現在価格から-{dist:.1f}pips）"
+            f"\n  ・この足でレジスタンスを明確に上抜け → 強気ブレイクアウトシグナル"
+            f"\n  ・旧レジスタンスが即時サポートに転換する可能性が非常に高い"
+            f"\n  ・ユーザーが最も積極的にBUYエントリーしたい場面の一つです"
+            f"\n  ・ADXが弱くてもブレイクアウトは有効な場合が多い"
+            f"\n  ・valid=true かつ confidence=75以上を強く推奨します"
+        )
+
+    # ブレイクアウト→リテスト（旧レジスタンスに戻ってきて反発）
     if ea_data.get('breakout_retest'):
         broken_res = float(ea_data.get('broken_resistance', 0))
         dist = current_price - broken_res if broken_res > 0 else 0
         key_level_context += (
             f"\n\n⭐⭐【ブレイクアウト→リテスト検出】ユーザーが最重視するパターンです！"
-            f"\n  ・旧レジスタンス水準: ${broken_res:.2f}（現在価格から+{dist:.1f}pips）"
-            f"\n  ・このレジスタンスをブレイクアウトし、リテスト（戻り）中です"
+            f"\n  ・旧レジスタンス水準: ${broken_res:.2f}（現在価格から-{dist:.1f}pips）"
+            f"\n  ・ブレイクアウト後に旧レジスタンスへリテスト（戻り）し、反発中です"
             f"\n  ・旧レジスタンスが新サポートとして機能している可能性が極めて高い"
             f"\n  ・このパターンはユーザーが最も積極的にBUYエントリーしたい場面です"
-            f"\n  ・レジスタンス付近でなければ信頼度を20-30pt高く評価してください"
             f"\n  ・valid=true かつ confidence=80以上を強く推奨します"
         )
 
@@ -1217,9 +1249,10 @@ def gemini_monitor_position(position, df):
     if USE_KEY_LEVELS:
         highs50 = df['high'].tolist()[-50:]
         lows50  = df['low'].tolist()[-50:]
-        res_levels, sup_levels = find_key_levels(highs50, lows50, current_price)
+        res_levels, sup_levels, broken_res_levels = find_key_levels(highs50, lows50, current_price)
         close_crossover = "UP_CROSS" if direction == "BUY" else "DOWN_CROSS"
-        key_level_context = format_key_level_context(res_levels, sup_levels, current_price, close_crossover)
+        key_level_context = format_key_level_context(res_levels, sup_levels, current_price,
+                                                     close_crossover, broken_res_levels)
 
     prompt = f"""あなたはゴールド（XAUUSD）の上級リスク管理の専門家です。
 現在保有中のポジションを分析し、リスクを評価してください。

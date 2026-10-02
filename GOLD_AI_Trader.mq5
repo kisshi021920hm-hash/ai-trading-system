@@ -72,7 +72,7 @@ datetime g_last_hybrid_sl_fetch          = 0;     // 最後にFlaskから取得�
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.29 起動 ===");
+    Print("=== GOLD AI Trader EA v1.33 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
@@ -197,7 +197,8 @@ void PushSignalToServer(string crossover, double close_price,
                         double atr, int buy_score, int sell_score,
                         string buy_reasons, string sell_reasons,
                         bool support_bounce = false, double support_level_price = 0.0,
-                        bool breakout_retest = false, double broken_resistance_price = 0.0)
+                        bool breakout_retest = false, double broken_resistance_price = 0.0,
+                        bool breakout_direct = false)
 {
     // 過去20本のローソク足データを取得（テクニカル強化用）
     MqlRates rates[20];
@@ -248,6 +249,7 @@ void PushSignalToServer(string crossover, double close_price,
         + ",\"support_level\":"       + DoubleToString(support_level_price, 2)
         + ",\"breakout_retest\":"     + (breakout_retest ? "true" : "false")
         + ",\"broken_resistance\":"   + DoubleToString(broken_resistance_price, 2)
+        + ",\"breakout_direct\":"     + (breakout_direct ? "true" : "false")
         + "}";
 
     string headers = "Content-Type: application/json\r\n";
@@ -535,31 +537,42 @@ void ComputeAndPushSignal()
     if (crossover == g_last_pushed_crossover &&
         TimeCurrent() - g_last_signal_push_time < SIGNAL_PUSH_INTERVAL) return;
 
-    // サーバーにプッシュ
+    // ブレイクアウト検出をプッシュ前に実行（direct情報をGeminiに渡す）
+    bool   is_direct_breakout = false;
+    double direct_broken_lvl  = 0;
+    if (crossover == "UP_CROSS")
+    {
+        double prev_close_val = iClose(_Symbol, PERIOD_M15, 1);
+        if (DetectResistanceBreakout(cur_close, prev_close_val, direct_broken_lvl))
+        {
+            is_direct_breakout       = true;
+            g_broken_resistance      = direct_broken_lvl;
+            g_broken_resistance_time = TimeCurrent();
+            Print("🔴 レジスタンスブレイクアウト直接検出: 水準=", DoubleToString(direct_broken_lvl, 2),
+                  " → Geminiへ即時通知");
+        }
+    }
+
+    // 過去のブレイクアウトが有効かつ価格がその上にいる場合もコンテキスト付与
+    bool   has_broken_context = (!is_direct_breakout && g_broken_resistance > 0
+                                 && cur_close > g_broken_resistance
+                                 && (int)(TimeCurrent() - g_broken_resistance_time) < 192 * 900);
+    double context_broken_lvl = has_broken_context ? g_broken_resistance : 0;
+
+    // サーバーにプッシュ（ブレイクアウト情報を含む）
     PushSignalToServer(crossover, cur_close, cur_open, cur_high, cur_low,
                        cur_rsi, cur_macd, cur_macd_sig,
                        cur_ema20, cur_ema50, cur_ema200,
                        cur_bb_upper, cur_bb_lower,
                        cur_stoch_k, cur_stoch_d,
                        cur_adx, cur_di_plus, cur_di_minus, cur_atr,
-                       buy_score, sell_score, buy_reasons, sell_reasons);
+                       buy_score, sell_score, buy_reasons, sell_reasons,
+                       false, 0.0,
+                       false, is_direct_breakout ? direct_broken_lvl : context_broken_lvl,
+                       is_direct_breakout);
 
     g_last_pushed_crossover = crossover;
     g_last_signal_push_time = TimeCurrent();
-
-    // UP_CROSSでレジスタンスブレイクアウトを記録（次のリテストを待機）
-    if (crossover == "UP_CROSS")
-    {
-        double prev_close_val = iClose(_Symbol, PERIOD_M15, 1);
-        double broken_lvl     = 0;
-        if (DetectResistanceBreakout(cur_close, prev_close_val, broken_lvl))
-        {
-            g_broken_resistance      = broken_lvl;
-            g_broken_resistance_time = TimeCurrent();
-            Print("🔴 レジスタンスブレイクアウト記録: 水準=", DoubleToString(broken_lvl, 2),
-                  " → リテスト待機中");
-        }
-    }
 }
 
 //+------------------------------------------------------------------+
