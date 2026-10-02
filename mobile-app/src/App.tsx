@@ -83,7 +83,7 @@ interface TodayStats {
 
 // ==================== 設定 ====================
 // v3B-rebuild
-const APP_VERSION = "1.21";
+const APP_VERSION = "1.22";
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -128,6 +128,9 @@ export default function App() {
   });
   const [entryThreshold, setEntryThreshold] = useState<number>(() => {
     try { return parseInt(localStorage.getItem("gt_entry_threshold") ?? "60"); } catch { return 60; }
+  });
+  const [useKeyLevels, setUseKeyLevels] = useState<boolean>(() => {
+    try { return (localStorage.getItem("gt_use_key_levels") ?? "true") === "true"; } catch { return true; }
   });
   const [executing, setExecuting] = useState(false);
   const [execMsg, setExecMsg] = useState("");
@@ -287,6 +290,10 @@ export default function App() {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ threshold: savedEntryThreshold }),
           }),
+          fetch(`${RENDER_URL}/api/settings/key-levels`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ use_key_levels: (localStorage.getItem("gt_use_key_levels") ?? "true") === "true" }),
+          }),
         ]);
 
         setTf(savedTf);
@@ -415,6 +422,10 @@ export default function App() {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ threshold: entryThreshold }),
         }),
+        fetch(`${RENDER_URL}/api/settings/key-levels`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ use_key_levels: useKeyLevels }),
+        }),
       ]);
       try {
         localStorage.setItem("gt_tf", String(tf));
@@ -423,6 +434,7 @@ export default function App() {
         localStorage.setItem("gt_trading_mode", tradingMode);
         localStorage.setItem("gt_auto_threshold", String(autoThreshold));
         localStorage.setItem("gt_entry_threshold", String(entryThreshold));
+        localStorage.setItem("gt_use_key_levels", String(useKeyLevels));
       } catch (_) {}
       setSaveMsg("✅ 保存しました");
       setTimeout(() => { setSaveMsg(""); setSettingsOpen(false); }, 1500);
@@ -1047,6 +1059,28 @@ export default function App() {
               </p>
             </div>
 
+
+            {/* レジスタンス・サポート判断トグル */}
+            <div style={{ background: "#1e293b", border: `1px solid ${useKeyLevels ? "#334155" : "#f59e0b"}`, borderRadius: 8, padding: "10px 14px", marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: 13, color: "#cbd5e1", fontWeight: "bold" }}>📐 S/R水準をGemini判断に含める</div>
+                <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
+                  {useKeyLevels ? "ON: レジスタンス・サポート近接を考慮" : "OFF: 以前のロジック（テクニカルのみ）"}
+                </div>
+              </div>
+              <label style={{ position: "relative", display: "inline-block", width: 48, height: 26, cursor: "pointer" }}>
+                <input type="checkbox" checked={useKeyLevels} onChange={e => setUseKeyLevels(e.target.checked)} style={{ opacity: 0, width: 0, height: 0 }} />
+                <span style={{
+                  position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+                  background: useKeyLevels ? "#22c55e" : "#475569",
+                  borderRadius: 26, transition: "0.3s"
+                }} />
+                <span style={{
+                  position: "absolute", top: 3, left: useKeyLevels ? 25 : 3, width: 20, height: 20,
+                  background: "#fff", borderRadius: "50%", transition: "0.3s"
+                }} />
+              </label>
+            </div>
 
             {saveMsg && <div style={styles.saveMsg}>{saveMsg}</div>}
 

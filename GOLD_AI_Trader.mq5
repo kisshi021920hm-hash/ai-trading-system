@@ -6,7 +6,7 @@
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.31"
+#property version   "1.32"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -22,6 +22,10 @@ input bool     FLIP_ON_REVERSE  = true;  // 逆クロスでドテン
 input int      MIN_TRADE_INTERVAL = 900; // 最短取引間隔（秒）= 15分
 input int      MAGIC_NUMBER     = 20260929;
 input int      SIGNAL_PUSH_INTERVAL = 900; // 同方向シグナルの最小プッシュ間隔（秒）
+input bool     SHOW_SR_LEVELS    = true;  // チャートにS/R水準を表示する
+input int      SR_LOOKBACK       = 100;   // S/R検索対象の過去ローソク足数
+input int      SR_SWING_BARS     = 3;     // スイングポイント判定に使うバー数（左右各N本）
+input int      SR_MAX_LEVELS     = 3;     // 表示するS/Rラインの最大本数
 
 //--- グローバル変数
 int      g_last_signal_id    = -1;
@@ -170,6 +174,13 @@ void OnTick()
     {
         ComputeAndPushSignal();
         PollAndTrade();
+    }
+    // S/R水準を60秒ごとに再計算・描画
+    static datetime s_last_sr_tick = 0;
+    if (TimeCurrent() - s_last_sr_tick >= 60)
+    {
+        s_last_sr_tick = TimeCurrent();
+        DrawSRLevels();
     }
 }
 
@@ -953,6 +964,93 @@ void DeletePositionLines()
     for (int i = 0; i < ArraySize(names); i++)
         ObjectDelete(0, names[i]);
     ChartRedraw(0);
+}
+
+// S/R水準のラインを全削除
+void DeleteSRLevels()
+{
+    for (int i = ObjectsTotal(0) - 1; i >= 0; i--)
+    {
+        string name = ObjectName(0, i);
+        if (StringFind(name, "EA_RES_") == 0 || StringFind(name, "EA_SUP_") == 0)
+            ObjectDelete(0, name);
+    }
+    ChartRedraw(0);
+}
+
+// S/R水準を計算してチャートに描画
+void DrawSRLevels()
+{
+    if (!SHOW_SR_LEVELS) { DeleteSRLevels(); return; }
+
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    int total = MathMin(SR_LOOKBACK, Bars(_Symbol, PERIOD_CURRENT) - SR_SWING_BARS - 1);
+
+    // スイング高値・安値を収集
+    double res_buf[], sup_buf[];
+    ArrayResize(res_buf, 0);
+    ArrayResize(sup_buf, 0);
+
+    for (int i = SR_SWING_BARS; i < total - SR_SWING_BARS; i++)
+    {
+        double h = iHigh(_Symbol, PERIOD_CURRENT, i);
+        double l = iLow(_Symbol, PERIOD_CURRENT, i);
+
+        // スイング高値チェック（左右SR_SWING_BARS本より高い）
+        bool is_high = true;
+        for (int j = i - SR_SWING_BARS; j <= i + SR_SWING_BARS && is_high; j++)
+            if (j != i && iHigh(_Symbol, PERIOD_CURRENT, j) >= h) is_high = false;
+
+        // スイング安値チェック（左右SR_SWING_BARS本より低い）
+        bool is_low = true;
+        for (int j = i - SR_SWING_BARS; j <= i + SR_SWING_BARS && is_low; j++)
+            if (j != i && iLow(_Symbol, PERIOD_CURRENT, j) <= l) is_low = false;
+
+        if (is_high && h > current_price)
+        {
+            int sz = ArraySize(res_buf);
+            ArrayResize(res_buf, sz + 1);
+            res_buf[sz] = h;
+        }
+        if (is_low && l < current_price)
+        {
+            int sz = ArraySize(sup_buf);
+            ArrayResize(sup_buf, sz + 1);
+            sup_buf[sz] = l;
+        }
+    }
+
+    // 旧ラインを削除してから再描画
+    DeleteSRLevels();
+
+    // レジスタンス: 現在価格に近い順に最大SR_MAX_LEVELS本
+    ArraySort(res_buf);  // 昇順（現在価格に近いものが先頭）
+    int res_count = MathMin(SR_MAX_LEVELS, ArraySize(res_buf));
+    for (int k = 0; k < res_count; k++)
+    {
+        string name = "EA_RES_" + IntegerToString(k);
+        double price = NormalizeDouble(res_buf[k], digits);
+        double dist  = price - current_price;
+        DrawHLine(name, price, clrLightCoral, STYLE_DASH, 1,
+                  "レジスタンス: " + DoubleToString(price, digits)
+                  + " (+" + DoubleToString(dist, 2) + "$/oz)");
+    }
+
+    // サポート: 現在価格に近い順に最大SR_MAX_LEVELS本（降順で先頭が近い）
+    ArraySort(sup_buf);
+    int sup_total = ArraySize(sup_buf);
+    int sup_count = MathMin(SR_MAX_LEVELS, sup_total);
+    for (int k = 0; k < sup_count; k++)
+    {
+        int idx = sup_total - 1 - k;  // 配列末尾（最大値=現在価格に最も近いサポート）から
+        string name = "EA_SUP_" + IntegerToString(k);
+        double price = NormalizeDouble(sup_buf[idx], digits);
+        double dist  = current_price - price;
+        DrawHLine(name, price, clrLightGreen, STYLE_DASH, 1,
+                  "サポート: " + DoubleToString(price, digits)
+                  + " (-" + DoubleToString(dist, 2) + "$/oz)");
+    }
 }
 
 void DrawPositionLines(ENUM_POSITION_TYPE pos_type,

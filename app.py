@@ -56,6 +56,7 @@ _hybrid_sl_config = {
 # FULL_AUTO: Gemini 信頼度で自動エントリー（レガシー）
 # AI_CLOSE_MODE: エントリーは信頼度判定 + ポジション監視で決済判定を実行
 TRADING_MODE = os.environ.get("TRADING_MODE", "MANUAL")
+USE_KEY_LEVELS = True  # レジスタンス・サポート水準をGemini判断に含めるか
 AUTO_CONFIDENCE_THRESHOLD = int(os.environ.get("AUTO_CONFIDENCE_THRESHOLD", "70"))
 ENTRY_CONFIDENCE_THRESHOLD = int(os.environ.get("ENTRY_CONFIDENCE_THRESHOLD", "60"))
 CLOSE_CONFIDENCE_THRESHOLD = int(os.environ.get("CLOSE_CONFIDENCE_THRESHOLD", "70"))
@@ -1016,9 +1017,9 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
         trend_direction = "📈 上昇傾向" if is_uptrend else "📉 下降傾向"
         technical_analysis += f"\n【過去5足の方向】{trend_direction}"
 
-    # レジスタンス・サポート水準計算
+    # レジスタンス・サポート水準計算（USE_KEY_LEVELS=Trueの場合のみ）
     key_level_context = ""
-    if candle_history and len(candle_history) >= 10:
+    if USE_KEY_LEVELS and candle_history and len(candle_history) >= 10:
         highs = [float(c.get('high', c.get('close', 0))) for c in candle_history]
         lows  = [float(c.get('low',  c.get('close', 0))) for c in candle_history]
         res_levels, sup_levels = find_key_levels(highs, lows, current_price)
@@ -1211,12 +1212,14 @@ def gemini_monitor_position(position, df):
     recent = df.tail(20)[['time', 'open', 'high', 'low', 'close']].copy()
     recent['time'] = recent['time'].astype(str)
 
-    # レジスタンス・サポート水準計算（直近50本）
-    highs50 = df['high'].tolist()[-50:]
-    lows50  = df['low'].tolist()[-50:]
-    res_levels, sup_levels = find_key_levels(highs50, lows50, current_price)
-    close_crossover = "UP_CROSS" if direction == "BUY" else "DOWN_CROSS"
-    key_level_context = format_key_level_context(res_levels, sup_levels, current_price, close_crossover)
+    # レジスタンス・サポート水準計算（USE_KEY_LEVELS=Trueの場合のみ）
+    key_level_context = ""
+    if USE_KEY_LEVELS:
+        highs50 = df['high'].tolist()[-50:]
+        lows50  = df['low'].tolist()[-50:]
+        res_levels, sup_levels = find_key_levels(highs50, lows50, current_price)
+        close_crossover = "UP_CROSS" if direction == "BUY" else "DOWN_CROSS"
+        key_level_context = format_key_level_context(res_levels, sup_levels, current_price, close_crossover)
 
     prompt = f"""あなたはゴールド（XAUUSD）の上級リスク管理の専門家です。
 現在保有中のポジションを分析し、リスクを評価してください。
@@ -2103,6 +2106,22 @@ def set_entry_threshold():
     print(f"🎯 全自動エントリー閾値変更: {threshold}%")
     log_system("INFO", f"⚙️ 設定変更: 全自動エントリー閾値 {old}% → {threshold}%")
     return jsonify({"status": "ok", "threshold": threshold})
+
+@app.route("/api/settings/key-levels", methods=["GET", "POST", "OPTIONS"])
+def settings_key_levels():
+    global USE_KEY_LEVELS
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if request.method == "GET":
+        return jsonify({"use_key_levels": USE_KEY_LEVELS})
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON body"}), 400
+    USE_KEY_LEVELS = bool(data.get("use_key_levels", True))
+    state = "ON" if USE_KEY_LEVELS else "OFF"
+    print(f"📐 レジスタンス・サポート判断: {state}")
+    log_system("INFO", f"⚙️ 設定変更: レジスタンス・サポート判断 → {state}")
+    return jsonify({"status": "ok", "use_key_levels": USE_KEY_LEVELS})
 
 @app.route("/api/execute-order", methods=["POST", "OPTIONS"])
 def execute_order():
