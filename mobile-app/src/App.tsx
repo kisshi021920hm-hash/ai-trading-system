@@ -1311,6 +1311,33 @@ export default function App() {
               )}
             </div>
 
+            {/* RSIフィルター */}
+            <div style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <div style={{ fontSize: 13, color: "#f1f5f9", fontWeight: "bold" }}>📉 RSIフィルター</div>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 3 }}>
+                    RSI&lt;35のシグナルをスキップ（勝率+3.3%実証）
+                  </div>
+                </div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                  <span style={{ fontSize: 12, color: rsiFilterEnabled ? "#22c55e" : "#64748b" }}>
+                    {rsiFilterEnabled ? "ON" : "OFF"}
+                  </span>
+                  <span style={{ position: "relative", display: "inline-block", width: 44, height: 24 }}>
+                    <input type="checkbox" checked={rsiFilterEnabled}
+                      onChange={e => setRsiFilterEnabled(e.target.checked)}
+                      style={{ opacity: 0, width: 0, height: 0 }} />
+                    <span style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+                      background: rsiFilterEnabled ? "#22c55e" : "#475569",
+                      borderRadius: 24, transition: "0.3s" }} />
+                    <span style={{ position: "absolute", top: 2, left: rsiFilterEnabled ? 22 : 2,
+                      width: 20, height: 20, background: "#fff", borderRadius: "50%", transition: "0.3s" }} />
+                  </span>
+                </label>
+              </div>
+            </div>
+
             <hr style={styles.divider} />
 
             {saveMsg && <div style={styles.saveMsg}>{saveMsg}</div>}
