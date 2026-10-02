@@ -1175,8 +1175,12 @@ DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr
 6. サポート確認後のUP_CROSSは信頼度を上げる（底値確認・反発期待）
 7. サポート8pips以内でのDOWN_CROSSは信頼度を大幅に下げる（底で反転するリスク）
 
-以下のJSON形式のみで回答:
-{{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "key_level": "注目水準50文字以内"}}"""
+以下のJSON形式のみで回答（全フィールド必須）:
+{{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "trailing_trigger": トレーリング開始距離$/oz(例:5.0), "trailing_width": トレーリングSL幅$/oz(例:3.0), "key_level": "注目水準50文字以内"}}
+
+【トレーリング設定の指針】
+- trailing_trigger: エントリーから何$/oz有利方向に動いたらトレーリング開始（ATRやレジ距離を考慮。短期利確推奨なら3-5、強トレンドなら5-8）
+- trailing_width: 高値/安値から何$/oz戻したらSL発動（低ボラなら2-3、高ボラなら3-5）"""
 
     try:
         text = _gemini_generate(prompt)
@@ -1188,8 +1192,15 @@ DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr
         reason = str(result.get('reason', ''))
         sl_sugg = result.get('sl_suggestion')
         tp_sugg = result.get('tp_suggestion')
+        trailing_trigger = result.get('trailing_trigger', 5.0)
+        trailing_width = result.get('trailing_width', 3.0)
+        try:
+            trailing_trigger = float(trailing_trigger) if trailing_trigger else 5.0
+            trailing_width = float(trailing_width) if trailing_width else 3.0
+        except (TypeError, ValueError):
+            trailing_trigger, trailing_width = 5.0, 3.0
 
-        log_system("INFO", f"🤖 Gemini判定: {direction} → 有効={valid} 信頼度={confidence}% (SL={sl_sugg}, TP={tp_sugg})")
+        log_system("INFO", f"🤖 Gemini判定: {direction} → 有効={valid} 信頼度={confidence}% (SL={sl_sugg}, TP={tp_sugg}, TT={trailing_trigger}, TW={trailing_width})")
         log_system("INFO", f"📝 判定理由: {reason}")
 
         return {
@@ -1198,6 +1209,8 @@ DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr
             'reason': reason,
             'sl_suggestion': sl_sugg,
             'tp_suggestion': tp_sugg,
+            'trailing_trigger': trailing_trigger,
+            'trailing_width': trailing_width,
             'key_level': str(result.get('key_level', '')),
         }
     except Exception as e:
@@ -1211,9 +1224,9 @@ DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr
             # confidence=None→0だとEAが「信頼度0%」と解釈しエントリーがブロックされるため-1を使用
             log_system("WARNING", f"⏳ Gemini クォータ/クールダウン: {direction}シグナルは制限中")
             return {'valid': None, 'confidence': -1, 'reason': 'クォータ制限中 - 数分後に自動回復します',
-                    'sl_suggestion': None, 'tp_suggestion': None, 'key_level': '', 'quota_error': True}
+                    'sl_suggestion': None, 'tp_suggestion': None, 'trailing_trigger': 5.0, 'trailing_width': 3.0, 'key_level': '', 'quota_error': True}
         return {'valid': False, 'confidence': 0, 'reason': err_str[:200],
-                'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
+                'sl_suggestion': None, 'tp_suggestion': None, 'trailing_trigger': 5.0, 'trailing_width': 3.0, 'key_level': ''}
 
 # ==================== ポジション決済判定 Gemini 分析（AI_CLOSE_MODE用）====================
 def gemini_position_close_decision(position, current_scores):
@@ -2006,6 +2019,8 @@ def signal_loop():
                 'ai_reason': ai['reason'],
                 'ai_sl_suggestion': ai.get('sl_suggestion'),
                 'ai_tp_suggestion': ai.get('tp_suggestion'),
+                'ai_trailing_trigger': ai.get('trailing_trigger', 5.0),
+                'ai_trailing_width': ai.get('trailing_width', 3.0),
                 'ai_key_level': ai.get('key_level', ''),
                 'timeframe': tf,
                 'test_mode': TEST_MODE,
@@ -2057,8 +2072,9 @@ def signal_loop():
                 else:
                     sl = signal_data.get('ai_sl_suggestion')
                     tp = signal_data.get('ai_tp_suggestion')
-                    trail_pips = 15
-                    print(f"💡 HybridSL OFF → AI提案SL={sl} TP={tp}")
+                    trail_w = float(signal_data.get('ai_trailing_width', 3.0) or 3.0)
+                    trail_pips = max(1, int(round(trail_w / 0.1)))
+                    print(f"💡 HybridSL OFF → Gemini全設定: SL={sl} TP={tp} TrailW={trail_w}$/oz({trail_pips}pips)")
                 mt5_result = send_mt5_order(
                     signal_id=db_id,
                     direction=direction,
@@ -3230,15 +3246,17 @@ def ea_signal_push():
         'latest_close':     ea_data.get('latest_close'),
         'time':             datetime.now(timezone.utc).isoformat(),
         'composite':        comp,
-        'ai_valid':         ai['valid'],
-        'ai_confidence':    ai['confidence'],
-        'ai_reason':        ai['reason'],
-        'ai_sl_suggestion': ai.get('sl_suggestion'),
-        'ai_tp_suggestion': ai.get('tp_suggestion'),
-        'ai_key_level':     ai.get('key_level', ''),
-        'timeframe':        TIMEFRAME_MINUTES,
-        'test_mode':        TEST_MODE,
-        'source':           'EA_PUSH',
+        'ai_valid':             ai['valid'],
+        'ai_confidence':        ai['confidence'],
+        'ai_reason':            ai['reason'],
+        'ai_sl_suggestion':     ai.get('sl_suggestion'),
+        'ai_tp_suggestion':     ai.get('tp_suggestion'),
+        'ai_trailing_trigger':  ai.get('trailing_trigger', 5.0),
+        'ai_trailing_width':    ai.get('trailing_width', 3.0),
+        'ai_key_level':         ai.get('key_level', ''),
+        'timeframe':            TIMEFRAME_MINUTES,
+        'test_mode':            TEST_MODE,
+        'source':               'EA_PUSH',
         'generated_at':     datetime.now(timezone.utc).isoformat(),
     }
 

@@ -37,6 +37,8 @@ interface Signal {
   ai_reason: string | null;
   ai_sl_suggestion?: number | null;
   ai_tp_suggestion?: number | null;
+  ai_trailing_trigger?: number | null;
+  ai_trailing_width?: number | null;
   ai_key_level?: string;
   composite?: CompositeData;
   generated_at: string;
@@ -669,8 +671,26 @@ export default function App() {
                   />
                   {signal.ai_confidence != null && <Row label="信頼度" value={`${signal.ai_confidence}%`} />}
                   <Row label="理由" value={signal.ai_reason ?? ""} />
-                  {signal.ai_sl_suggestion != null && <Row label="推奨SL" value={String(signal.ai_sl_suggestion)} highlight="#fca5a5" />}
-                  {signal.ai_tp_suggestion != null && <Row label="推奨TP" value={String(signal.ai_tp_suggestion)} highlight="#86efac" />}
+                  {/* Gemini設定パネル（SL/TP提案・トレーリング設定） */}
+                  {signal.ai_valid && (signal.ai_sl_suggestion != null || signal.ai_trailing_trigger != null) && (
+                    <div style={{ background: "#0f2a1a", border: "1px solid #166534", borderRadius: 8, padding: "10px 12px", marginTop: 4 }}>
+                      <div style={{ fontSize: 11, color: "#4ade80", fontWeight: "bold", marginBottom: 6 }}>🤖 Gemini設定（SL/TPオフ時に適用）</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", fontSize: 12 }}>
+                        {signal.ai_sl_suggestion != null && (
+                          <><span style={{ color: "#94a3b8" }}>初期SL</span><span style={{ color: "#fca5a5", fontWeight: "bold" }}>${signal.ai_sl_suggestion}</span></>
+                        )}
+                        {signal.ai_tp_suggestion != null && (
+                          <><span style={{ color: "#94a3b8" }}>初期TP</span><span style={{ color: "#86efac", fontWeight: "bold" }}>${signal.ai_tp_suggestion}</span></>
+                        )}
+                        {signal.ai_trailing_trigger != null && (
+                          <><span style={{ color: "#94a3b8" }}>トレイル開始</span><span style={{ color: "#38bdf8", fontWeight: "bold" }}>{signal.ai_trailing_trigger}$/oz</span></>
+                        )}
+                        {signal.ai_trailing_width != null && (
+                          <><span style={{ color: "#94a3b8" }}>トレイル幅</span><span style={{ color: "#38bdf8", fontWeight: "bold" }}>{signal.ai_trailing_width}$/oz</span></>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   {signal.ai_key_level && <Row label="注目水準" value={signal.ai_key_level} />}
                 </>
               )}
