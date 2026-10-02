@@ -288,9 +288,16 @@ export default function App() {
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
+    // クロスなし（EA稼働中の定期更新）- 履歴には追加しない
+    socket.on("candle_update", (data: Signal) => {
+      setSignal(data);
+    });
+
     socket.on("signal", (data: Signal) => {
       setSignal(data);
-      setHistory((prev) => [data, ...prev].slice(0, 50));
+      if (data.crossover) {
+        setHistory((prev) => [data, ...prev].slice(0, 50));
+      }
 
       if (data.crossover) {
         // 振動（アプリが前面にある場合）
@@ -509,7 +516,7 @@ export default function App() {
                 {signal.timeframe && <span style={styles.tfBadge}>{signal.timeframe}分足</span>}
                 {signal.crossover_mode && <span style={styles.modeBadge}>{signal.crossover_mode}</span>}
               </div>
-              <Row label="クロスオーバー" value={signal.crossover ?? "なし"} />
+              {signal.crossover && <Row label="クロスオーバー" value={signal.crossover} />}
               <Row label="RSI" value={signal.rsi?.toFixed(2)} />
               <Row
                 label={signal.crossover_mode === "MACD" || signal.crossover_mode === "COMPOSITE" ? "MACDライン" : "RSIライン"}
@@ -548,6 +555,14 @@ export default function App() {
                     ))}
                   </div>
                   <Row label="ADX" value={`${signal.composite.adx} (${signal.composite.is_trending ? "トレンド相場" : "レンジ相場"})`} />
+                </>
+              )}
+              {!signal.crossover && (
+                <>
+                  <hr style={styles.divider} />
+                  <Row label="状態" value="待機中（クロスなし）" highlight="#64748b" />
+                  <Row label="AI 判定" value="— 判定なし" highlight="#64748b" />
+                  <Row label="信頼度" value="0%" highlight="#64748b" />
                 </>
               )}
               {signal.crossover && (

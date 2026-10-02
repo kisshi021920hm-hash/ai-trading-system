@@ -1699,8 +1699,19 @@ def signal_loop():
             }
 
             # EA稼働中は保存・配信をスキップ（Yahoo Finance計算中にEAが接続した場合の対策）
+            # ただし「クロスなし」の最新指標はcandle_updateとしてemit（アプリ死活確認用）
             if _ea_last_heartbeat > 0 and time.time() - _ea_last_heartbeat < 300:
                 print("⏸️  EA稼働中（保存前チェック）→ Yahoo Financeシグナルの保存・配信をスキップ")
+                if not signal_data.get('crossover'):
+                    candle_update = {
+                        **signal_data,
+                        'is_candle_update': True,
+                        'ai_valid': None,
+                        'ai_confidence': 0,
+                        'ai_reason': 'クロスなし / Gemini判定なし',
+                    }
+                    socketio.emit('candle_update', candle_update)
+                    print(f"📊 クロスなし更新配信: RSI={signal_data.get('rsi')} close={signal_data.get('latest_close')}")
                 settings_changed.wait(timeout=TIMEFRAME_MINUTES * 60)
                 settings_changed.clear()
                 continue
