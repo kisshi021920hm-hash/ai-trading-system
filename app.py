@@ -2024,6 +2024,40 @@ def get_current_settings():
         "hybrid_sl": _hybrid_sl_config
     })
 
+def save_hybrid_sl_to_supabase():
+    """ハイブリッドSL設定をSupabaseに永続化"""
+    try:
+        req.post(
+            f"{SUPABASE_URL}/rest/v1/system_settings",
+            json={"key": "hybrid_sl_config", "value": json.dumps(_hybrid_sl_config)},
+            headers={**supabase_headers(), "Prefer": "resolution=merge-duplicates"},
+            timeout=5
+        )
+    except Exception as e:
+        print(f"⚠️  ハイブリッドSL保存エラー: {e}")
+
+
+def load_hybrid_sl_from_supabase():
+    """起動時にSupabaseからハイブリッドSL設定を復元"""
+    global _hybrid_sl_config
+    try:
+        resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/system_settings",
+            params={"key": "eq.hybrid_sl_config", "select": "value"},
+            headers=supabase_headers(),
+            timeout=5
+        )
+        rows = resp.json()
+        if rows:
+            loaded = json.loads(rows[0]["value"])
+            _hybrid_sl_config.update(loaded)
+            print(f"✅ ハイブリッドSL設定をSupabaseから復元: {_hybrid_sl_config}")
+        else:
+            print("ℹ️  Supabaseにハイブリッドワークフローなし、デフォルト値を使用")
+    except Exception as e:
+        print(f"⚠️  ハイブリッドSL読み込みエラー: {e}")
+
+
 @app.route("/api/settings/hybrid-sl", methods=["GET", "POST", "OPTIONS"])
 def hybrid_sl_settings():
     """ハイブリッドSL設定（v1.25）- アプリから動的に調整可能"""
@@ -2049,6 +2083,7 @@ def hybrid_sl_settings():
         if "enabled" in data:
             _hybrid_sl_config["enabled"] = bool(data["enabled"])
 
+        save_hybrid_sl_to_supabase()
         log_system("INFO", f"⚙️ ハイブリッドSL設定変更: {old_config} → {_hybrid_sl_config}")
         print(f"🎯 ハイブリッドSL設定変更: {_hybrid_sl_config}")
 
@@ -3188,6 +3223,7 @@ def on_disconnect():
 # ==================== 起動 ====================
 # gunicorn でも直接起動でも必ず実行されるモジュールレベル初期化
 load_fcm_tokens()
+load_hybrid_sl_from_supabase()
 start_background_jobs()
 
 if __name__ == "__main__":
