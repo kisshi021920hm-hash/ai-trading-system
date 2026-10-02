@@ -709,15 +709,21 @@ void TrailingStopUpdate()
         // ======== 2. トレーリング条件チェック: 含み益 >= $2 ========
         if (unrealized_usd >= trailing_trigger_usd)
         {
-            // トレーリング中: SLを引き上げ（$0.5を保護）
+            // トレーリング中: SLを引き上げ（ドル→価格幅に正しく変換）
+            double trailing_sl_points = (usd_per_pip > 0) ? (trailing_sl_usd / usd_per_pip) : trailing_sl_usd;
+            // ブローカーの最低ストップ距離を確保
+            double min_stop_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL)
+                                     * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+            trailing_sl_points = MathMax(trailing_sl_points, min_stop_points + SymbolInfoDouble(_Symbol, SYMBOL_POINT));
+
             double new_sl = 0;
             if (pos_type == POSITION_TYPE_BUY)
             {
-                new_sl = current_price - trailing_sl_usd;  // 現在値から$0.5下
+                new_sl = current_price - trailing_sl_points;
             }
             else
             {
-                new_sl = current_price + trailing_sl_usd;  // 現在値から$0.5上
+                new_sl = current_price + trailing_sl_points;
             }
 
             int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
