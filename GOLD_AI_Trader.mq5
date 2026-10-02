@@ -6,7 +6,7 @@
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.30"
+#property version   "1.31"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -59,11 +59,11 @@ string g_latest_crossover  = "NONE";  // 最新のクロスオーバー方向（
 double   g_broken_resistance      = 0.0;  // ブレイクアウトしたレジスタンス水準（0=未ブレイク）
 datetime g_broken_resistance_time = 0;    // ブレイクアウト検出時刻（有効期限管理）
 
-//--- ハイブリッドSL設定キャッシュ（固定4変数・上書き更新のみで増えない）
-double   g_cached_initial_sl_usd       = 200.0;
-double   g_cached_trailing_trigger_usd = 100.0;
-double   g_cached_trailing_sl_usd      = 40.0;
-datetime g_last_hybrid_sl_fetch        = 0;    // 最後にFlaskから取得した時刻
+//--- ハイブリッドSL設定キャッシュ（価格差 $/oz 単位・ロット非依存）
+double   g_cached_initial_sl_price       = 2.0;   // エントリーからSLまでの価格差 ($/oz)
+double   g_cached_trailing_trigger_price = 2.0;   // トレーリング開始の価格上昇幅 ($/oz)
+double   g_cached_trailing_sl_price      = 1.5;   // トレーリングSL幅 ($/oz)
+datetime g_last_hybrid_sl_fetch          = 0;     // 最後にFlaskから取得した時刻
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -802,20 +802,20 @@ void FetchHybridSlConfig()
     }
 
     string json = CharArrayToString(result);
-    double new_initial_sl       = JsonDouble(json, "\"initial_sl_usd\":");
-    double new_trailing_trigger = JsonDouble(json, "\"trailing_trigger_usd\":");
-    double new_trailing_sl      = JsonDouble(json, "\"trailing_sl_usd\":");
+    double new_initial_sl       = JsonDouble(json, "\"initial_sl_price\":");
+    double new_trailing_trigger = JsonDouble(json, "\"trailing_trigger_price\":");
+    double new_trailing_sl      = JsonDouble(json, "\"trailing_sl_price\":");
 
     // 値が有効な場合のみ上書き（0や負の値は無視してキャッシュを保持）
-    if (new_initial_sl > 0)       g_cached_initial_sl_usd       = new_initial_sl;
-    if (new_trailing_trigger > 0) g_cached_trailing_trigger_usd = new_trailing_trigger;
-    if (new_trailing_sl > 0)      g_cached_trailing_sl_usd      = new_trailing_sl;
+    if (new_initial_sl > 0)       g_cached_initial_sl_price       = new_initial_sl;
+    if (new_trailing_trigger > 0) g_cached_trailing_trigger_price = new_trailing_trigger;
+    if (new_trailing_sl > 0)      g_cached_trailing_sl_price      = new_trailing_sl;
 
     g_last_hybrid_sl_fetch = TimeCurrent();  // 取得時刻を更新（次回は60秒後）
 
-    Print("🔧 ハイブリッドSL設定更新: 初期SL=$", g_cached_initial_sl_usd,
-          " トレーリング開始=$", g_cached_trailing_trigger_usd,
-          " トレーリングSL=$", g_cached_trailing_sl_usd);
+    Print("🔧 ハイブリッドSL設定更新(価格差): 初期SL=", g_cached_initial_sl_price,
+          "$/oz トレーリング開始=+", g_cached_trailing_trigger_price,
+          "$/oz トレーリングSL幅=", g_cached_trailing_sl_price, "$/oz");
 }
 
 //+------------------------------------------------------------------+
@@ -825,9 +825,9 @@ void TrailingStopUpdate()
 {
     FetchHybridSlConfig();  // 60秒ごとにFlaskから設定を取得（キャッシュ制御済み）
 
-    double initial_sl_usd       = g_cached_initial_sl_usd;
-    double trailing_trigger_usd = g_cached_trailing_trigger_usd;
-    double trailing_sl_usd      = g_cached_trailing_sl_usd;
+    double initial_sl_price       = g_cached_initial_sl_price;
+    double trailing_trigger_price = g_cached_trailing_trigger_price;
+    double trailing_sl_price      = g_cached_trailing_sl_price;
 
     for (int i = PositionsTotal() - 1; i >= 0; i--)
     {
@@ -845,35 +845,34 @@ void TrailingStopUpdate()
         double current_price = (pos_type == POSITION_TYPE_BUY) ? bid : ask;
         double volume       = PositionGetDouble(POSITION_VOLUME);
 
-        // 含み益/含み損計算（USD）
-        double unrealized_pips = 0;
-        if (pos_type == POSITION_TYPE_BUY)
-            unrealized_pips = (current_price - entry_price);
-        else
-            unrealized_pips = (entry_price - current_price);
+        // 価格変動（$/oz）: 正=含み益方向、負=含み損方向
+        double price_move = (pos_type == POSITION_TYPE_BUY)
+                            ? (current_price - entry_price)
+                            : (entry_price - current_price);
 
+        // 参考用P&L（ログ表示のみ）
         double contract_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-        double usd_per_pip    = volume * contract_size;  // ブローカー依存のコントラクトサイズ
-        double unrealized_usd = unrealized_pips * usd_per_pip;
+        double usd_per_pip    = volume * contract_size;
+        double unrealized_usd = price_move * usd_per_pip;
 
         Print("📊 ポジション監視: ", _Symbol, " ", (pos_type == POSITION_TYPE_BUY ? "BUY" : "SELL"),
               " volume=", volume, " entry=", entry_price, " current=", current_price,
-              " P&L=", DoubleToString(unrealized_usd, 2), "$ (", DoubleToString(unrealized_pips, 2), " pips)");
+              " 価格変動=", DoubleToString(price_move, 2), "$/oz (P&L=", DoubleToString(unrealized_usd, 2), "$)");
 
         // ======== 1. 含み損が初期SL超過 → 強制決済 ========
-        if (unrealized_usd < -initial_sl_usd)
+        if (price_move < -initial_sl_price)
         {
-            Print("🚨 含み損限界超過: ", DoubleToString(unrealized_usd, 2), "$ < -", initial_sl_usd,
-                  "$ → 強制決済実行");
+            Print("🚨 初期SL発動: 価格変動=", DoubleToString(price_move, 2),
+                  "$/oz < -", initial_sl_price, "$/oz → 強制決済実行");
             ClosePosition(ticket, pos_type);
             continue;
         }
 
-        // ======== 2. トレーリング条件チェック: 含み益 >= $2 ========
-        if (unrealized_usd >= trailing_trigger_usd)
+        // ======== 2. トレーリング条件チェック: 価格上昇 >= trigger_price ========
+        if (price_move >= trailing_trigger_price)
         {
-            // トレーリング中: SLを引き上げ（ドル→価格幅に正しく変換）
-            double trailing_sl_points = (usd_per_pip > 0) ? (trailing_sl_usd / usd_per_pip) : trailing_sl_usd;
+            // トレーリング中: SLを trailing_sl_price 分だけ現在価格から引いた位置に設定
+            double trailing_sl_points = trailing_sl_price;
             // ブローカーの最低ストップ距離を確保
             double min_stop_points = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL)
                                      * SymbolInfoDouble(_Symbol, SYMBOL_POINT);
@@ -881,13 +880,9 @@ void TrailingStopUpdate()
 
             double new_sl = 0;
             if (pos_type == POSITION_TYPE_BUY)
-            {
                 new_sl = current_price - trailing_sl_points;
-            }
             else
-            {
                 new_sl = current_price + trailing_sl_points;
-            }
 
             int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
             new_sl = NormalizeDouble(new_sl, digits);
@@ -911,10 +906,10 @@ void TrailingStopUpdate()
                 if (OrderSend(req, res))
                 {
                     Print("✅ トレーリングストップ更新: ticket=", ticket,
-                          " 含み益=$", DoubleToString(unrealized_usd, 2),
+                          " 価格変動=+", DoubleToString(price_move, 2), "$/oz",
                           " 旧SL=", DoubleToString(current_sl, 2),
                           " 新SL=", DoubleToString(new_sl, 2),
-                          " (スプレッド$", DoubleToString(trailing_sl_usd, 2), "保護)");
+                          " (幅=", trailing_sl_price, "$/oz)");
                     current_sl = new_sl;  // ライン描画に最新SLを反映
                 }
                 else
@@ -926,8 +921,8 @@ void TrailingStopUpdate()
 
         // チャートにSL/トレーリングラインを描画
         DrawPositionLines(pos_type, entry_price, current_sl,
-                          current_price, unrealized_usd,
-                          trailing_trigger_usd, trailing_sl_usd, usd_per_pip);
+                          current_price, price_move,
+                          trailing_trigger_price, trailing_sl_price);
     }
 
     // ポジションがない場合はラインを削除
@@ -962,8 +957,8 @@ void DeletePositionLines()
 
 void DrawPositionLines(ENUM_POSITION_TYPE pos_type,
                        double entry_price, double current_sl,
-                       double current_price, double unrealized_usd,
-                       double trailing_trigger_usd, double trailing_sl_usd, double usd_per_pip)
+                       double current_price, double price_move,
+                       double trailing_trigger_price, double trailing_sl_price)
 {
     int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
 
@@ -976,28 +971,23 @@ void DrawPositionLines(ENUM_POSITION_TYPE pos_type,
         DrawHLine("EA_SL", current_sl, clrRed, STYLE_SOLID, 2,
                   "SL: " + DoubleToString(current_sl, digits));
 
-    // トレーリング開始レベル（オレンジ 点線）- 含み益がこの水準に達するとトレーリング開始
-    if (usd_per_pip > 0)
-    {
-        double trigger_points = trailing_trigger_usd / usd_per_pip;
-        double trail_start_price = (pos_type == POSITION_TYPE_BUY)
-                                   ? entry_price + trigger_points
-                                   : entry_price - trigger_points;
-        trail_start_price = NormalizeDouble(trail_start_price, digits);
-        DrawHLine("EA_TrailStart", trail_start_price, clrOrange, STYLE_DOT, 1,
-                  "トレーリング開始 (+" + DoubleToString(trailing_trigger_usd, 0) + "$利益で発動)");
-    }
+    // トレーリング開始レベル（オレンジ 点線）- 価格がこの水準に達するとトレーリング開始
+    double trail_start_price = (pos_type == POSITION_TYPE_BUY)
+                               ? entry_price + trailing_trigger_price
+                               : entry_price - trailing_trigger_price;
+    trail_start_price = NormalizeDouble(trail_start_price, digits);
+    DrawHLine("EA_TrailStart", trail_start_price, clrOrange, STYLE_DOT, 1,
+              "トレーリング開始 (+" + DoubleToString(trailing_trigger_price, 2) + "$/oz で発動)");
 
     // 現在のトレーリングSLライン（オレンジレッド 破線）- トレーリング中のみ表示
-    if (unrealized_usd >= trailing_trigger_usd && usd_per_pip > 0)
+    if (price_move >= trailing_trigger_price)
     {
-        double trail_sl_points = trailing_sl_usd / usd_per_pip;
-        double trail_sl_price  = (pos_type == POSITION_TYPE_BUY)
-                                 ? current_price - trail_sl_points
-                                 : current_price + trail_sl_points;
-        trail_sl_price = NormalizeDouble(trail_sl_price, digits);
-        DrawHLine("EA_TrailSL", trail_sl_price, clrOrangeRed, STYLE_DASH, 2,
-                  "トレーリングSL (" + DoubleToString(trailing_sl_usd, 0) + "$幅 | 現在: " + DoubleToString(trail_sl_price, digits) + ")");
+        double trail_sl_val = (pos_type == POSITION_TYPE_BUY)
+                              ? current_price - trailing_sl_price
+                              : current_price + trailing_sl_price;
+        trail_sl_val = NormalizeDouble(trail_sl_val, digits);
+        DrawHLine("EA_TrailSL", trail_sl_val, clrOrangeRed, STYLE_DASH, 2,
+                  "トレーリングSL (幅=" + DoubleToString(trailing_sl_price, 2) + "$/oz | 現在: " + DoubleToString(trail_sl_val, digits) + ")");
     }
     else
         ObjectDelete(0, "EA_TrailSL");  // トレーリング未発動中は非表示
@@ -1129,32 +1119,25 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
                    MathFloor(lot_size / lot_step) * lot_step));
     lot_size = NormalizeDouble(lot_size, 2);
 
-    // ======== 初期SLをアプリ設定値(-$X)に相当する価格に上書き ========
-    // ロット確定後に計算することで price_distance = initial_sl_usd / (lot × contract) が正確になる
-    double cs = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-    if (lot_size > 0 && cs > 0)
-    {
-        FetchHybridSlConfig();  // 最新設定を確認（キャッシュ済みなら即return）
-        double sl_price_dist  = g_cached_initial_sl_usd / (lot_size * cs);
-        double initial_sl_price = NormalizeDouble(
-            (order_type == ORDER_TYPE_BUY) ? price - sl_price_dist
-                                           : price + sl_price_dist, digits);
+    // ======== 初期SLをアプリ設定値(価格差 $/oz)で上書き ========
+    FetchHybridSlConfig();  // 最新設定を確認（キャッシュ済みなら即return）
+    double sl_price_dist = g_cached_initial_sl_price;  // ロット非依存: $/oz 直接使用
+    double initial_sl_price_val = NormalizeDouble(
+        (order_type == ORDER_TYPE_BUY) ? price - sl_price_dist
+                                       : price + sl_price_dist, digits);
 
-        // より保護的な（エントリー価格に近い）SLを採用
-        bool initial_is_tighter = (order_type == ORDER_TYPE_BUY) ? (initial_sl_price > sl)
-                                                                  : (initial_sl_price < sl);
-        if (initial_is_tighter)
-        {
-            Print("🛡️ 初期SL上書き: -$", g_cached_initial_sl_usd,
-                  " → SL価格=", initial_sl_price,
-                  " (価格幅=", NormalizeDouble(sl_price_dist, 2), ")");
-            sl = initial_sl_price;
-        }
-        else
-        {
-            Print("🛡️ 初期SL: -$", g_cached_initial_sl_usd, " 相当=", initial_sl_price,
-                  " / Gemini/デフォルトSL=", sl, " → 既存SLの方が保護的");
-        }
+    // より保護的な（エントリー価格に近い）SLを採用
+    bool initial_is_tighter = (order_type == ORDER_TYPE_BUY) ? (initial_sl_price_val > sl)
+                                                              : (initial_sl_price_val < sl);
+    if (initial_is_tighter)
+    {
+        Print("🛡️ 初期SL上書き: エントリー", price, " -", sl_price_dist, "$/oz → SL=", initial_sl_price_val);
+        sl = initial_sl_price_val;
+    }
+    else
+    {
+        Print("🛡️ 初期SL: ", sl_price_dist, "$/oz相当=", initial_sl_price_val,
+              " / Gemini/デフォルトSL=", sl, " → 既存SLの方が保護的");
     }
 
     Print("💰 残高:", balance, currency,

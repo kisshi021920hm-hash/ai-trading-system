@@ -42,9 +42,9 @@ interface StatusDashboardProps {
 }
 
 interface HybridSlConfig {
-  initial_sl_usd: number;
-  trailing_trigger_usd: number;
-  trailing_sl_usd: number;
+  initial_sl_price: number;
+  trailing_trigger_price: number;
+  trailing_sl_price: number;
   enabled: boolean;
 }
 
@@ -57,9 +57,9 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
 
   // ハイブリッドSL設定
   const [hybridSlConfig, setHybridSlConfig] = useState<HybridSlConfig>({
-    initial_sl_usd: 200.0,
-    trailing_trigger_usd: 100.0,
-    trailing_sl_usd: 40.0,
+    initial_sl_price: 2.0,
+    trailing_trigger_price: 2.0,
+    trailing_sl_price: 1.5,
     enabled: true
   });
   const [saving, setSaving] = useState(false);
@@ -293,17 +293,17 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
 
       {/* ハイブリッドSL設定 */}
       <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", marginBottom: "20px", color: "#f1f5f9" }}>
-        <h3 style={{ marginTop: 0, marginBottom: "12px", color: "#94a3b8" }}>⚙️ ハイブリッドSL設定（v1.25）</h3>
+        <h3 style={{ marginTop: 0, marginBottom: "12px", color: "#94a3b8" }}>⚙️ ハイブリッドSL設定</h3>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "12px", fontSize: "13px" }}>
           <div>
-            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>初期SL（-$）</label>
+            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>初期SL（$/oz）</label>
             <input
               type="number"
-              step="1"
-              min="1"
-              max="1000"
-              value={hybridSlConfig.initial_sl_usd}
-              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, initial_sl_usd: v }); }}
+              step="0.1"
+              min="0.1"
+              max="50"
+              value={hybridSlConfig.initial_sl_price}
+              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, initial_sl_price: v }); }}
               style={{
                 width: "100%",
                 padding: "6px",
@@ -313,18 +313,18 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
                 borderRadius: "4px"
               }}
             />
-            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>保険・ノイズ対策</p>
+            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>エントリーから何$/oz下</p>
           </div>
 
           <div>
-            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>トレーリング開始（+$）</label>
+            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>トレーリング開始（$/oz）</label>
             <input
               type="number"
-              step="1"
-              min="1"
-              max="1000"
-              value={hybridSlConfig.trailing_trigger_usd}
-              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_trigger_usd: v }); }}
+              step="0.1"
+              min="0.1"
+              max="50"
+              value={hybridSlConfig.trailing_trigger_price}
+              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_trigger_price: v }); }}
               style={{
                 width: "100%",
                 padding: "6px",
@@ -334,18 +334,18 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
                 borderRadius: "4px"
               }}
             />
-            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>利益が出たら開始</p>
+            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>エントリーから何$/oz上で開始</p>
           </div>
 
           <div>
-            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>トレーリング後SL（+$）</label>
+            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>トレーリングSL幅（$/oz）</label>
             <input
               type="number"
-              step="1"
-              min="1"
-              max="500"
-              value={hybridSlConfig.trailing_sl_usd}
-              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_sl_usd: v }); }}
+              step="0.1"
+              min="0.1"
+              max="20"
+              value={hybridSlConfig.trailing_sl_price}
+              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_sl_price: v }); }}
               style={{
                 width: "100%",
                 padding: "6px",
@@ -355,7 +355,7 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
                 borderRadius: "4px"
               }}
             />
-            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>スプレッド対応</p>
+            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>現在価格から何$/oz下にSL</p>
           </div>
 
           <div>

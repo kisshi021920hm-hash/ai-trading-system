@@ -44,9 +44,9 @@ CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI", "MACD", "RSI_
 # ==================== ハイブリッドSL設定（v1.25新機能） ====================
 # アプリから動的に調整可能
 _hybrid_sl_config = {
-    "initial_sl_usd": 200.0,      # 初期SL（-$200）- 保険・ノイズ対策
-    "trailing_trigger_usd": 100.0, # トレーリング開始条件（+$100）
-    "trailing_sl_usd": 40.0,       # トレーリング後のSL（+$40）- スプレッド対応
+    "initial_sl_price": 2.0,        # 初期SL（エントリーから -2$/oz）
+    "trailing_trigger_price": 2.0,  # トレーリング開始（エントリーから +2$/oz）
+    "trailing_sl_price": 1.5,       # トレーリングSL幅（現在価格から -1.5$/oz）
     "enabled": True
 }
 
@@ -2165,13 +2165,13 @@ def load_hybrid_sl_from_supabase():
         rows = resp.json()
         if rows:
             loaded = json.loads(rows[0]["value"])
-            # 旧バグ値チェック: initial_sl_usd < 10 は100倍ずれの誤り値
-            if float(loaded.get("initial_sl_usd", 0)) < 10:
-                print(f"⚠️  ハイブリッドSL: 旧バグ値を検出({loaded}) → 正しいデフォルト値(200/100/40)で上書き保存")
-                save_hybrid_sl_to_supabase()
-            else:
+            # 新キー(initial_sl_price)があれば復元、旧フォーマット(*_usd)は無視してデフォルト保存
+            if "initial_sl_price" in loaded:
                 _hybrid_sl_config.update(loaded)
                 print(f"✅ ハイブリッドSL設定をSupabaseから復元: {_hybrid_sl_config}")
+            else:
+                print(f"⚠️  ハイブリッドSL: 旧フォーマット検出({list(loaded.keys())}) → 新デフォルト値で上書き保存")
+                save_hybrid_sl_to_supabase()
         else:
             print("ℹ️  Supabaseにハイブリッド設定なし、デフォルト値を保存")
             save_hybrid_sl_to_supabase()
@@ -2195,12 +2195,12 @@ def hybrid_sl_settings():
         old_config = _hybrid_sl_config.copy()
 
         # 設定を更新
-        if "initial_sl_usd" in data:
-            _hybrid_sl_config["initial_sl_usd"] = float(data["initial_sl_usd"])
-        if "trailing_trigger_usd" in data:
-            _hybrid_sl_config["trailing_trigger_usd"] = float(data["trailing_trigger_usd"])
-        if "trailing_sl_usd" in data:
-            _hybrid_sl_config["trailing_sl_usd"] = float(data["trailing_sl_usd"])
+        if "initial_sl_price" in data:
+            _hybrid_sl_config["initial_sl_price"] = float(data["initial_sl_price"])
+        if "trailing_trigger_price" in data:
+            _hybrid_sl_config["trailing_trigger_price"] = float(data["trailing_trigger_price"])
+        if "trailing_sl_price" in data:
+            _hybrid_sl_config["trailing_sl_price"] = float(data["trailing_sl_price"])
         if "enabled" in data:
             _hybrid_sl_config["enabled"] = bool(data["enabled"])
 
