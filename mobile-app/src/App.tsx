@@ -156,6 +156,7 @@ export default function App() {
     initial_sl_price: 5,
     trailing_trigger_price: 5,
     trailing_sl_price: 3,
+    initial_tp_price: 15,
     enabled: true,
   });
 
@@ -1104,43 +1105,63 @@ export default function App() {
               </label>
             </div>
 
-            {/* ハイブリッドSL設定 */}
+            {/* ハイブリッドSL/TP設定 */}
             <div style={styles.settingsSection}>
-              <h3 style={styles.settingsSectionTitle}>🛡️ ハイブリッドSL設定</h3>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                <h3 style={{ ...styles.settingsSectionTitle, margin: 0 }}>🛡️ SL / TP 設定</h3>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <span style={{ fontSize: 12, color: hybridSlConfig.enabled ? "#22c55e" : "#64748b" }}>
+                    {hybridSlConfig.enabled ? "ON（設定値優先）" : "OFF（Gemini任せ）"}
+                  </span>
+                  <span style={{ position: "relative", display: "inline-block", width: 44, height: 24 }}>
+                    <input type="checkbox" checked={hybridSlConfig.enabled}
+                      onChange={e => setHybridSlConfig(c => ({ ...c, enabled: e.target.checked }))}
+                      style={{ opacity: 0, width: 0, height: 0 }} />
+                    <span style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+                      background: hybridSlConfig.enabled ? "#22c55e" : "#475569",
+                      borderRadius: 24, transition: "0.3s" }} />
+                    <span style={{ position: "absolute", top: 2, left: hybridSlConfig.enabled ? 22 : 2,
+                      width: 20, height: 20, background: "#fff", borderRadius: "50%", transition: "0.3s" }} />
+                  </span>
+                </label>
+              </div>
+              {!hybridSlConfig.enabled && (
+                <div style={{ padding: "8px 10px", background: "#1e3a5f", borderRadius: 6, fontSize: 12, color: "#93c5fd", marginBottom: 10 }}>
+                  OFFのとき: SL/TPはGemini提案値を使用。提案がない場合はSL=2$/oz・TP=4$/oz固定。
+                </div>
+              )}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 13 }}>
                 <div>
                   <label style={{ display: "block", marginBottom: 4, color: "#cbd5e1" }}>初期SL（$/oz）</label>
-                  <input type="number" step="0.1" min="0.1" max="50"
+                  <input type="number" step="0.5" min="0.5" max="50"
                     value={hybridSlConfig.initial_sl_price}
                     onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig(c => ({ ...c, initial_sl_price: v })); }}
                     style={{ width: "100%", padding: "6px", background: "#0f172a", color: "#f1f5f9", border: "1px solid #475569", borderRadius: 4, boxSizing: "border-box" }} />
-                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>エントリーから何$/oz下</p>
+                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>エントリーから何$/oz離す</p>
+                </div>
+                <div>
+                  <label style={{ display: "block", marginBottom: 4, color: "#10b981" }}>初期TP（$/oz）</label>
+                  <input type="number" step="0.5" min="0.5" max="200"
+                    value={hybridSlConfig.initial_tp_price ?? 15}
+                    onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig(c => ({ ...c, initial_tp_price: v })); }}
+                    style={{ width: "100%", padding: "6px", background: "#0f172a", color: "#10b981", border: "1px solid #10b981", borderRadius: 4, boxSizing: "border-box" }} />
+                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>エントリーから何$/oz利確</p>
                 </div>
                 <div>
                   <label style={{ display: "block", marginBottom: 4, color: "#cbd5e1" }}>トレーリング開始（$/oz）</label>
-                  <input type="number" step="0.1" min="0.1" max="50"
+                  <input type="number" step="0.5" min="0.5" max="50"
                     value={hybridSlConfig.trailing_trigger_price}
                     onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig(c => ({ ...c, trailing_trigger_price: v })); }}
                     style={{ width: "100%", padding: "6px", background: "#0f172a", color: "#f1f5f9", border: "1px solid #475569", borderRadius: 4, boxSizing: "border-box" }} />
-                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>エントリーから何$/oz上で開始</p>
+                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>有利方向に何$/oz動いたら開始</p>
                 </div>
                 <div>
                   <label style={{ display: "block", marginBottom: 4, color: "#cbd5e1" }}>トレーリングSL幅（$/oz）</label>
-                  <input type="number" step="0.1" min="0.1" max="20"
+                  <input type="number" step="0.5" min="0.5" max="20"
                     value={hybridSlConfig.trailing_sl_price}
                     onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig(c => ({ ...c, trailing_sl_price: v })); }}
                     style={{ width: "100%", padding: "6px", background: "#0f172a", color: "#f1f5f9", border: "1px solid #475569", borderRadius: 4, boxSizing: "border-box" }} />
-                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>現在価格から何$/oz下にSL</p>
-                </div>
-                <div>
-                  <label style={{ display: "block", marginBottom: 4, color: "#cbd5e1" }}>有効</label>
-                  <select value={hybridSlConfig.enabled ? "true" : "false"}
-                    onChange={e => setHybridSlConfig(c => ({ ...c, enabled: e.target.value === "true" }))}
-                    style={{ width: "100%", padding: "6px", background: "#0f172a", color: "#f1f5f9", border: "1px solid #475569", borderRadius: 4 }}>
-                    <option value="true">✅ 有効</option>
-                    <option value="false">❌ 無効</option>
-                  </select>
-                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>機能の有効/無効</p>
+                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>最高値/最安値から何$/oz戻したらSL</p>
                 </div>
               </div>
             </div>

@@ -44,10 +44,11 @@ CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI", "MACD", "RSI_
 # ==================== ハイブリッドSL設定（v1.25新機能） ====================
 # アプリから動的に調整可能
 _hybrid_sl_config = {
-    "initial_sl_price": 2.0,        # 初期SL（エントリーから -2$/oz）
-    "trailing_trigger_price": 2.0,  # トレーリング開始（エントリーから +2$/oz）
-    "trailing_sl_price": 1.5,       # トレーリングSL幅（現在価格から -1.5$/oz）
-    "enabled": True
+    "initial_sl_price": 5.0,        # 初期SL（エントリーから 5$/oz 離れた位置）
+    "trailing_trigger_price": 5.0,  # トレーリング開始（エントリーから 5$/oz 有利方向）
+    "trailing_sl_price": 3.0,       # トレーリングSL幅（最高値/最安値から 3$/oz 戻し）
+    "initial_tp_price": 15.0,       # 初期TP（エントリーから 15$/oz 利確目標）
+    "enabled": True                 # ON=設定値を絶対使用 / OFF=Gemini提案+固定fallback
 }
 
 # トレード自動化設定
@@ -1943,16 +1944,33 @@ def signal_loop():
             auto_result = check_auto_execution(signal_data)
             if auto_result["should_execute"]:
                 print(f"🤖 FULL_AUTO実行: {auto_result['reason']}")
-                # Gemini提案のSL/TPを使用（あれば）
-                sl = signal_data.get('ai_sl_suggestion')
-                tp = signal_data.get('ai_tp_suggestion')
-                print(f"💡 AI提案SL/TP: SL={sl}, TP={tp}")
+                entry_px = signal_data["latest_close"]
+                direction = auto_result["direction"]
+                # ハイブリッドSL ON → 設定値を絶対使用 / OFF → Gemini提案+固定fallback
+                if _hybrid_sl_config.get("enabled"):
+                    init_sl  = _hybrid_sl_config["initial_sl_price"]
+                    init_tp  = _hybrid_sl_config.get("initial_tp_price", 15.0)
+                    trail_w  = _hybrid_sl_config["trailing_sl_price"]
+                    if direction == "BUY":
+                        sl = round(entry_px - init_sl, 2)
+                        tp = round(entry_px + init_tp, 2)
+                    else:
+                        sl = round(entry_px + init_sl, 2)
+                        tp = round(entry_px - init_tp, 2)
+                    trail_pips = max(1, int(round(trail_w / 0.1)))
+                    print(f"🛡️ HybridSL ON → SL={sl} TP={tp} TrailPips={trail_pips}")
+                else:
+                    sl = signal_data.get('ai_sl_suggestion')
+                    tp = signal_data.get('ai_tp_suggestion')
+                    trail_pips = 15
+                    print(f"💡 HybridSL OFF → AI提案SL={sl} TP={tp}")
                 mt5_result = send_mt5_order(
                     signal_id=db_id,
-                    direction=auto_result["direction"],
-                    entry_price=signal_data["latest_close"],
+                    direction=direction,
+                    entry_price=entry_px,
                     sl_price=sl,
-                    tp_price=tp
+                    tp_price=tp,
+                    trailing_stop_pips=trail_pips
                 )
                 signal_data["auto_executed"] = mt5_result.get("success", False)
                 signal_data["auto_result"] = mt5_result
@@ -2347,6 +2365,8 @@ def hybrid_sl_settings():
             _hybrid_sl_config["trailing_trigger_price"] = float(data["trailing_trigger_price"])
         if "trailing_sl_price" in data:
             _hybrid_sl_config["trailing_sl_price"] = float(data["trailing_sl_price"])
+        if "initial_tp_price" in data:
+            _hybrid_sl_config["initial_tp_price"] = float(data["initial_tp_price"])
         if "enabled" in data:
             _hybrid_sl_config["enabled"] = bool(data["enabled"])
 
