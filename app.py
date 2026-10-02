@@ -2818,6 +2818,12 @@ def ea_trade_report():
                 row = resp.json()
                 db_id = row[0]["id"] if row else None
                 print(f"✅ EA注文 Supabase保存完了 trade_id={db_id}")
+                log_system("INFO", f"📈 EA エントリー: {direction} @{price} "
+                           f"SL={data.get('sl')} TP={data.get('tp')} lot={data.get('lot')} ticket={ticket}")
+                socketio.emit("trade_event", {
+                    "type": "ORDER", "direction": direction, "price": price,
+                    "ticket": ticket, "lot": data.get("lot"), "trade_id": db_id
+                })
             else:
                 print(f"⚠️  EA注文 Supabase保存失敗: {resp.text}")
 
@@ -2880,7 +2886,12 @@ def ea_trade_report():
                     timeout=10
                 )
                 print(f"✅ EA決済 Supabase更新完了 trade_id={trade_id} P/L={profit_loss} reason={close_reason} ({status})")
-                log_system("INFO", f"EA決済: {close_dir} ticket={ticket} P/L={profit_loss} reason={close_reason}")
+                log_system("INFO", f"📉 EA決済: {close_dir} @{close_price} P/L={profit_loss:+.2f} reason={close_reason} ({status})")
+                socketio.emit("trade_event", {
+                    "type": "CLOSE", "direction": close_dir, "close_price": close_price,
+                    "profit_loss": profit_loss, "close_reason": close_reason,
+                    "ticket": ticket, "trade_id": trade_id, "status": status
+                })
             else:
                 print(f"⚠️  EA決済: 対応するOPENトレードが見つかりません ticket={ticket} dir={close_dir}")
     except Exception as e:
