@@ -58,6 +58,9 @@ _hybrid_sl_config = {
 TRADING_MODE = os.environ.get("TRADING_MODE", "MANUAL")
 USE_KEY_LEVELS = True  # レジスタンス・サポート水準をGemini判断に含めるか
 USE_RANGE_MODE = False  # レンジ逆張りモード（S/R間の反転エントリー）
+
+# 最新のS/R水準キャッシュ（/api/sr-levels で返す）
+_latest_sr_cache = {"resistance": [], "support": [], "broken_resistance": [], "current_price": 0, "updated_at": ""}
 AUTO_CONFIDENCE_THRESHOLD = int(os.environ.get("AUTO_CONFIDENCE_THRESHOLD", "70"))
 ENTRY_CONFIDENCE_THRESHOLD = int(os.environ.get("ENTRY_CONFIDENCE_THRESHOLD", "60"))
 CLOSE_CONFIDENCE_THRESHOLD = int(os.environ.get("CLOSE_CONFIDENCE_THRESHOLD", "70"))
@@ -2189,6 +2192,13 @@ def settings_key_levels():
     log_system("INFO", f"⚙️ 設定変更: レジスタンス・サポート判断 → {state}")
     return jsonify({"status": "ok", "use_key_levels": USE_KEY_LEVELS})
 
+@app.route("/api/sr-levels", methods=["GET", "OPTIONS"])
+def get_sr_levels():
+    """最新のS/R水準を返す（アプリのチャート表示用）"""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    return jsonify(_latest_sr_cache)
+
 @app.route("/api/settings/range-mode", methods=["GET", "POST", "OPTIONS"])
 def settings_range_mode():
     global USE_RANGE_MODE
@@ -2751,7 +2761,9 @@ def ea_signal_push():
         return jsonify({"error": "No data"}), 400
 
     crossover = ea_data.get('crossover', '')
-    if crossover not in ('UP_CROSS', 'DOWN_CROSS'):
+    VALID_CROSSOVERS = ('UP_CROSS', 'DOWN_CROSS', 'RANGE_SHORT', 'RANGE_LONG',
+                        'BREAKOUT_DIRECT', 'BREAKOUT_RETEST', 'SUPPORT_BOUNCE')
+    if crossover not in VALID_CROSSOVERS:
         return jsonify({"error": f"Invalid crossover: {crossover}"}), 400
 
     # ① 重複防止: 同一キャンドル内の同方向シグナルはスキップ
@@ -2775,6 +2787,22 @@ def ea_signal_push():
     # シグナル受信を詳細ログに記録
     log_system("INFO", f"📡 シグナル受信: {crossover} @ {ea_data.get('latest_close')}円 (買={ea_data.get('buy_score')}, 売={ea_data.get('sell_score')}, ADX={ea_data.get('adx')})")
     _last_ea_signal_time = time.time()
+
+    # S/R水準をキャッシュ（candle_historyがある場合）
+    try:
+        ch = ea_data.get('candle_history', [])
+        cp = float(ea_data.get('latest_close', 0))
+        if ch and len(ch) >= 10 and cp > 0:
+            _highs = [float(c.get('high', c.get('close', 0))) for c in ch]
+            _lows  = [float(c.get('low',  c.get('close', 0))) for c in ch]
+            _res, _sup, _bres = find_key_levels(_highs, _lows, cp)
+            _latest_sr_cache.update({
+                "resistance": _res, "support": _sup,
+                "broken_resistance": _bres, "current_price": cp,
+                "updated_at": datetime.now(timezone.utc).strftime("%H:%M:%S")
+            })
+    except Exception:
+        pass
 
     # 保有中のポジション含み益をログに記録（透明性向上）
     log_position_status()

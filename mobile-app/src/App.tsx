@@ -83,7 +83,7 @@ interface TodayStats {
 
 // ==================== 設定 ====================
 // v3B-rebuild
-const APP_VERSION = "1.24";
+const APP_VERSION = "1.25";
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -135,6 +135,10 @@ export default function App() {
   const [useRangeMode, setUseRangeMode] = useState<boolean>(() => {
     try { return (localStorage.getItem("gt_use_range_mode") ?? "false") === "true"; } catch { return false; }
   });
+  const [srLevels, setSrLevels] = useState<{
+    resistance: number[]; support: number[]; broken_resistance: number[];
+    current_price: number; updated_at: string;
+  }>({ resistance: [], support: [], broken_resistance: [], current_price: 0, updated_at: "" });
   const [executing, setExecuting] = useState(false);
   const [execMsg, setExecMsg] = useState("");
   const [saving, setSaving] = useState(false);
@@ -310,7 +314,10 @@ export default function App() {
         setAutoThreshold(savedThreshold);
         setEntryThreshold(savedEntryThreshold);
 
-        const sigRes = await fetch(`${RENDER_URL}/latest-signal`);
+        const [sigRes, srRes] = await Promise.all([
+          fetch(`${RENDER_URL}/latest-signal`),
+          fetch(`${RENDER_URL}/api/sr-levels`).catch(() => null),
+        ]);
         const data = await sigRes.json();
         if (data && data.rsi) {
           const s: Signal = {
@@ -328,6 +335,10 @@ export default function App() {
           };
           setSignal(s);
           setHistory((prev) => [s, ...prev].slice(0, 50));
+        }
+        if (srRes) {
+          const srData = await srRes.json().catch(() => null);
+          if (srData && srData.current_price > 0) setSrLevels(srData);
         }
       } catch (_) {}
     });
@@ -347,6 +358,10 @@ export default function App() {
       if (!pauseRefreshRef.current) {
         setSignal(data);
         setHistory((prev) => [data, ...prev].slice(0, 50));
+        // シグナル受信時にS/R水準も更新
+        fetch(`${RENDER_URL}/api/sr-levels`).then(r => r.json()).then(sr => {
+          if (sr && sr.current_price > 0) setSrLevels(sr);
+        }).catch(() => {});
       }
 
       if (data.crossover) {
@@ -708,6 +723,46 @@ export default function App() {
             </div>
           ) : (
             <p style={styles.waiting}>シグナル待機中...</p>
+          )}
+
+          {/* S/R水準カード */}
+          {srLevels.current_price > 0 && (
+            <div style={{ ...styles.card, padding: "12px 14px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <h2 style={{ ...styles.cardTitle, margin: 0 }}>📐 S/R水準</h2>
+                <span style={{ fontSize: 10, color: "#475569" }}>{srLevels.updated_at} 更新</span>
+              </div>
+              <div style={{ fontSize: 12, color: "#64748b", marginBottom: 6 }}>
+                現在価格: <span style={{ color: "#f8fafc", fontWeight: "bold" }}>${srLevels.current_price.toFixed(2)}</span>
+              </div>
+              {srLevels.resistance.map((r, i) => (
+                <div key={`r${i}`} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", borderBottom: "1px solid #1e293b" }}>
+                  <span style={{ color: "#f87171", fontSize: 12 }}>🔴 レジスタンス</span>
+                  <span style={{ color: "#f87171", fontSize: 12, fontWeight: "bold" }}>
+                    ${r.toFixed(2)} <span style={{ color: "#64748b", fontWeight: "normal" }}>(+{(r - srLevels.current_price).toFixed(2)})</span>
+                  </span>
+                </div>
+              ))}
+              {srLevels.broken_resistance.map((r, i) => (
+                <div key={`br${i}`} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", borderBottom: "1px solid #1e293b" }}>
+                  <span style={{ color: "#22c55e", fontSize: 12 }}>✅ 旧レジ→サポート</span>
+                  <span style={{ color: "#22c55e", fontSize: 12, fontWeight: "bold" }}>
+                    ${r.toFixed(2)} <span style={{ color: "#64748b", fontWeight: "normal" }}>(-{(srLevels.current_price - r).toFixed(2)})</span>
+                  </span>
+                </div>
+              ))}
+              {srLevels.support.map((s, i) => (
+                <div key={`s${i}`} style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", borderBottom: "1px solid #1e293b" }}>
+                  <span style={{ color: "#4ade80", fontSize: 12 }}>🟢 サポート</span>
+                  <span style={{ color: "#4ade80", fontSize: 12, fontWeight: "bold" }}>
+                    ${s.toFixed(2)} <span style={{ color: "#64748b", fontWeight: "normal" }}>(-{(srLevels.current_price - s).toFixed(2)})</span>
+                  </span>
+                </div>
+              ))}
+              {srLevels.resistance.length === 0 && srLevels.support.length === 0 && (
+                <div style={{ fontSize: 11, color: "#475569" }}>S/R水準なし（EAからのデータ待ち）</div>
+              )}
+            </div>
           )}
 
           {history.length > 0 && (
