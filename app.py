@@ -7,6 +7,7 @@ Render デプロイ用 Flask バックエンド（PC不要・24/7稼働版）
 """
 
 import os
+import re
 import json
 import time
 import threading
@@ -816,9 +817,7 @@ RSI: {signal['rsi']}
 """
     try:
         text = _gemini_generate(prompt)
-        if "```" in text:
-            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
-        result = json.loads(text)
+        result = _parse_gemini_json(text)
         return {
             'valid': bool(result.get('valid', False)),
             'confidence': int(result.get('confidence', 0)),
@@ -866,9 +865,7 @@ ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={
 {{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "key_level": "注目水準50文字以内"}}"""
     try:
         text = _gemini_generate(prompt)
-        if "```" in text:
-            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
-        result = json.loads(text)
+        result = _parse_gemini_json(text)
         return {
             'valid': bool(result.get('valid', False)),
             'confidence': int(result.get('confidence', 0)),
@@ -881,6 +878,16 @@ ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={
         print(f"❌ Gemini Composite エラー: {e}")
         return {'valid': False, 'confidence': 0, 'reason': str(e)[:200],
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
+
+# ==================== Gemini JSON パースヘルパー ====================
+def _parse_gemini_json(text):
+    """Gemini応答からJSONを安全にパース（制御文字・コードブロックを除去）"""
+    if "```" in text:
+        parts = text.split("```")
+        text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
+    # 制御文字（タブ・改行以外）を除去してJSONパース失敗を防止
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    return json.loads(text)
 
 # ==================== レジスタンス・サポート水準計算 ====================
 def find_key_levels(highs, lows, current_price, n_swing=3, max_levels=3):
@@ -1052,9 +1059,7 @@ DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr
 
     try:
         text = _gemini_generate(prompt)
-        if "```" in text:
-            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
-        result = json.loads(text)
+        result = _parse_gemini_json(text)
 
         # Gemini 判定結果をシステムログに記録
         valid = bool(result.get('valid', False))
@@ -1150,9 +1155,7 @@ RSI: {current_scores.get('rsi', 50):.1f}（過買売）
 
     try:
         text = _gemini_generate(prompt, max_retries=1)
-        if "```" in text:
-            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
-        result = json.loads(text)
+        result = _parse_gemini_json(text)
         should_close = bool(result.get('should_close', False))
         confidence = int(result.get('confidence', 0))
         reason = str(result.get('reason', ''))
@@ -1226,9 +1229,7 @@ EMA20={comp_data.get('ema20', 'N/A')} / EMA50={comp_data.get('ema50', 'N/A')}
 
     try:
         text = _gemini_generate(prompt, max_retries=0)
-        if "```" in text:
-            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
-        result = json.loads(text)
+        result = _parse_gemini_json(text)
         return {
             'risk': str(result.get('risk', 'LOW')).upper(),
             'action': str(result.get('action', 'HOLD')).upper(),
@@ -3229,9 +3230,7 @@ MIN_CONFIDENCE=50% / MIN_TRADE_INTERVAL=900秒(15分) / RISK_PERCENT=2%
 
     try:
         text = _gemini_generate(prompt, max_retries=1)
-        if "```" in text:
-            parts = text.split("```"); text = parts[1].replace("json", "").strip() if len(parts) >= 2 else text
-        result = json.loads(text)
+        result = _parse_gemini_json(text)
         return {
             "summary": str(result.get("summary", "")),
             "recommended_min_confidence": int(result.get("recommended_min_confidence", 50)),
