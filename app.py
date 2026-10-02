@@ -952,10 +952,26 @@ def format_key_level_context(resistance_levels, support_levels, current_price,
         dist = resistance_levels[0] - current_price
         if dist < 8:
             ctx += f"\n  ⚠️ レジスタンス${resistance_levels[0]:.2f}まで{dist:.1f}pips。壁で跳ね返るリスク大。信頼度を下げてください。"
-    elif crossover == "DOWN_CROSS" and support_levels:
-        dist = current_price - support_levels[0]
-        if dist < 8:
-            ctx += f"\n  ⚠️ サポート${support_levels[0]:.2f}まで{dist:.1f}pips。底で反転するリスク大。信頼度を下げてください。"
+
+    if crossover == "DOWN_CROSS":
+        # レジスタンス天井反落パターン検出（最優先の売りシグナル）
+        res_rejection = False
+        if resistance_levels:
+            dist_above = resistance_levels[0] - current_price
+            # レジスタンスが現在価格より近く上にある（価格が跳ね返ってきた状態）
+            if 0 <= dist_above < 15:
+                res_rejection = True
+                ctx += (f"\n\n⭐⭐【レジスタンス天井反落】価格がレジスタンス${resistance_levels[0]:.2f}（+{dist_above:.1f}pips上）"
+                        f"で跳ね返されてのダウンクロスです！"
+                        f"\n  ・これは最も信頼性の高い売りパターンの一つです"
+                        f"\n  ・レジスタンスが上値を押さえ、下降トレンド開始の可能性が高い"
+                        f"\n  ・ADXが低くてもレジスタンス反落は有効なシグナルです"
+                        f"\n  ・サポートが近くても、レジスタンス反落の方が優先度高い"
+                        f"\n  ・valid=true かつ confidence=65以上を強く推奨します")
+        if not res_rejection and support_levels:
+            dist = current_price - support_levels[0]
+            if dist < 8:
+                ctx += f"\n  ⚠️ サポート${support_levels[0]:.2f}まで{dist:.1f}pips。底で反転するリスク大。信頼度を下げてください。"
     return ctx
 
 
