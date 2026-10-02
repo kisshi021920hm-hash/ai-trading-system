@@ -68,7 +68,7 @@ datetime g_last_hybrid_sl_fetch        = 0;    // 最後にFlaskから取得し�
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.27 起動 ===");
+    Print("=== GOLD AI Trader EA v1.28 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
