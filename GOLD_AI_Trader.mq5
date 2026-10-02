@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
-//|  GOLD AI Trader EA  v1.33                                        |
+//|  GOLD AI Trader EA  v1.34                                        |
 //|  Render API + Gemini AI シグナルによる自動売買                      |
 //|  対象: XAUUSD (GOLD) M15                                         |
 //|  決済: 逆クロスでドテン（SL/TPでも決済）                             |
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.33"
+#property version   "1.34"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -72,7 +72,7 @@ datetime g_last_hybrid_sl_fetch          = 0;     // 最後にFlaskから取得�
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.33 起動 ===");
+    Print("=== GOLD AI Trader EA v1.34 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
@@ -477,7 +477,34 @@ void ComputeAndPushSignal()
         {
             double prev_rsi_val = rsi_buf[1];
 
-            // ① ブレイクアウト→リテスト検出（優先: 最も強いシグナル）
+            // ① ブレイクアウト単独検出（クロスなしでも即時エントリーシグナル）
+            {
+                double prev_close_val = iClose(_Symbol, PERIOD_M15, 1);
+                double bo_broken_lvl  = 0;
+                static datetime s_last_breakout_push_time = 0;
+                if (DetectResistanceBreakout(cur_close, prev_close_val, bo_broken_lvl)
+                    && TimeCurrent() - s_last_breakout_push_time >= SIGNAL_PUSH_INTERVAL)
+                {
+                    s_last_breakout_push_time = TimeCurrent();
+                    g_broken_resistance       = bo_broken_lvl;
+                    g_broken_resistance_time  = TimeCurrent();
+                    Print("🚀 ブレイクアウト単独検出（クロスなし）: 水準=", DoubleToString(bo_broken_lvl, 2),
+                          " → Geminiへ即時通知");
+                    PushSignalToServer("UP_CROSS", cur_close, cur_open, cur_high, cur_low,
+                                       cur_rsi, cur_macd, cur_macd_sig,
+                                       cur_ema20, cur_ema50, cur_ema200,
+                                       cur_bb_upper, cur_bb_lower,
+                                       cur_stoch_k, cur_stoch_d,
+                                       cur_adx, cur_di_plus, cur_di_minus, cur_atr,
+                                       buy_score, sell_score, buy_reasons, sell_reasons,
+                                       false, 0.0, false, bo_broken_lvl, true);
+                    g_last_pushed_crossover = "BREAKOUT_DIRECT";
+                    g_last_signal_push_time = TimeCurrent();
+                    return;
+                }
+            }
+
+            // ② ブレイクアウト→リテスト検出（優先: 最も強いシグナル）
             if (g_broken_resistance > 0 && DetectBreakoutRetest(cur_close, cur_rsi, prev_rsi_val, cur_atr))
             {
                 static datetime s_last_retest_time = 0;
@@ -502,7 +529,7 @@ void ComputeAndPushSignal()
                 return;
             }
 
-            // ② サポートバウンス検出（通常クロスなしの底反発）
+            // ③ サポートバウンス検出（通常クロスなしの底反発）
             double support_lvl = 0;
             if (DetectSupportBounce(cur_close, cur_rsi, prev_rsi_val, cur_atr, support_lvl))
             {
