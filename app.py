@@ -44,9 +44,9 @@ CROSSOVER_MODE = os.environ.get("CROSSOVER_MODE", "RSI")  # "RSI", "MACD", "RSI_
 # ==================== ハイブリッドSL設定（v1.25新機能） ====================
 # アプリから動的に調整可能
 _hybrid_sl_config = {
-    "initial_sl_usd": 2.0,       # 初期SL（-$2）- 保険・ノイズ対策
-    "trailing_trigger_usd": 2.0, # トレーリング開始条件（+$2）
-    "trailing_sl_usd": 0.5,      # トレーリング後のSL（+$0.5）- スプレッド対応
+    "initial_sl_usd": 200.0,      # 初期SL（-$200）- 保険・ノイズ対策
+    "trailing_trigger_usd": 100.0, # トレーリング開始条件（+$100）
+    "trailing_sl_usd": 40.0,       # トレーリング後のSL（+$40）- スプレッド対応
     "enabled": True
 }
 
@@ -2165,10 +2165,16 @@ def load_hybrid_sl_from_supabase():
         rows = resp.json()
         if rows:
             loaded = json.loads(rows[0]["value"])
-            _hybrid_sl_config.update(loaded)
-            print(f"✅ ハイブリッドSL設定をSupabaseから復元: {_hybrid_sl_config}")
+            # 旧バグ値チェック: initial_sl_usd < 10 は100倍ずれの誤り値
+            if float(loaded.get("initial_sl_usd", 0)) < 10:
+                print(f"⚠️  ハイブリッドSL: 旧バグ値を検出({loaded}) → 正しいデフォルト値(200/100/40)で上書き保存")
+                save_hybrid_sl_to_supabase()
+            else:
+                _hybrid_sl_config.update(loaded)
+                print(f"✅ ハイブリッドSL設定をSupabaseから復元: {_hybrid_sl_config}")
         else:
-            print("ℹ️  Supabaseにハイブリッドワークフローなし、デフォルト値を使用")
+            print("ℹ️  Supabaseにハイブリッド設定なし、デフォルト値を保存")
+            save_hybrid_sl_to_supabase()
     except Exception as e:
         print(f"⚠️  ハイブリッドSL読み込みエラー: {e}")
 

@@ -57,9 +57,9 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
 
   // ハイブリッドSL設定
   const [hybridSlConfig, setHybridSlConfig] = useState<HybridSlConfig>({
-    initial_sl_usd: 2.0,
-    trailing_trigger_usd: 2.0,
-    trailing_sl_usd: 0.5,
+    initial_sl_usd: 200.0,
+    trailing_trigger_usd: 100.0,
+    trailing_sl_usd: 40.0,
     enabled: true
   });
   const [saving, setSaving] = useState(false);
@@ -299,9 +299,9 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>初期SL（-$）</label>
             <input
               type="number"
-              step="0.1"
-              min="0.1"
-              max="10"
+              step="1"
+              min="1"
+              max="1000"
               value={hybridSlConfig.initial_sl_usd}
               onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, initial_sl_usd: v }); }}
               style={{
@@ -320,9 +320,9 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>トレーリング開始（+$）</label>
             <input
               type="number"
-              step="0.1"
-              min="0.1"
-              max="10"
+              step="1"
+              min="1"
+              max="1000"
               value={hybridSlConfig.trailing_trigger_usd}
               onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_trigger_usd: v }); }}
               style={{
@@ -341,9 +341,9 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>トレーリング後SL（+$）</label>
             <input
               type="number"
-              step="0.1"
-              min="0.1"
-              max="5"
+              step="1"
+              min="1"
+              max="500"
               value={hybridSlConfig.trailing_sl_usd}
               onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_sl_usd: v }); }}
               style={{

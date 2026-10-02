@@ -6,7 +6,7 @@
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.29"
+#property version   "1.30"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -60,9 +60,9 @@ double   g_broken_resistance      = 0.0;  // ブレイクアウトしたレジ�
 datetime g_broken_resistance_time = 0;    // ブレイクアウト検出時刻（有効期限管理）
 
 //--- ハイブリッドSL設定キャッシュ（固定4変数・上書き更新のみで増えない）
-double   g_cached_initial_sl_usd       = 2.0;
-double   g_cached_trailing_trigger_usd = 2.0;
-double   g_cached_trailing_sl_usd      = 0.5;
+double   g_cached_initial_sl_usd       = 200.0;
+double   g_cached_trailing_trigger_usd = 100.0;
+double   g_cached_trailing_sl_usd      = 40.0;
 datetime g_last_hybrid_sl_fetch        = 0;    // 最後にFlaskから取得した時刻
 
 //+------------------------------------------------------------------+
