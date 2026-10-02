@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
-//|  GOLD AI Trader EA  v1.25                                        |
+//|  GOLD AI Trader EA  v1.33                                        |
 //|  Render API + Gemini AI シグナルによる自動売買                      |
 //|  対象: XAUUSD (GOLD) M15                                         |
 //|  決済: 逆クロスでドテン（SL/TPでも決済）                             |
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.32"
+#property version   "1.33"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
