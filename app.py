@@ -90,6 +90,7 @@ _ea_trades: list = []  # 直近50件のEA取引レポート
 _position_monitor_last = 0.0  # ポジション監視最終実行時刻
 _last_ea_signal_time = 0.0   # EAから/ea-signalを最後に受信した時刻（signal_loopスキップ判定用）
 _ea_latest_scores: dict = {}  # EAから受信した最新スコア（ハートビート経由）
+_last_broadcast_payload: dict = {}  # 最後にsocketへ配信したシグナルデータ（5分再配信用）
 _ea_signal_dedup: dict = {}  # 重複防止キャッシュ {crossover: last_time}
 _force_close_pending = False   # AI_CLOSE_MODE: Gemini決済指示フラグ
 _force_close_set_time = 0.0    # フラグをセットした時刻（120秒後に自動リセット）
@@ -1486,6 +1487,11 @@ def status_logging_loop():
             save_status_log(status_log)
             print(f"✅ Status log saved: {datetime.now(timezone.utc).isoformat()}")
 
+            # 最後に受信したEAシグナルを candle_update として再配信（EA_PUSHモードでもアプリ表示を更新）
+            if _last_broadcast_payload:
+                socketio.emit('candle_update', _last_broadcast_payload)
+                print(f"📡 candle_update 再配信: crossover={_last_broadcast_payload.get('crossover')}")
+
         except Exception as e:
             print(f"❌ Status logging error: {e}")
 
@@ -2816,7 +2822,7 @@ def ea_heartbeat():
 def ea_signal_push():
     """MT5 EAからリアルタイム指標データを受信 → Gemini分析 → Supabase保存 → FCM通知"""
     global _last_ea_signal_time, _last_gemini_approved, _last_gemini_direction, _ea_signal_dedup, _last_ai_decision
-    global _last_gemini_close_call_time, _force_close_pending, _force_close_set_time
+    global _last_gemini_close_call_time, _force_close_pending, _force_close_set_time, _last_broadcast_payload
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
@@ -3139,6 +3145,7 @@ def ea_signal_push():
 
     # WebSocket配信（スマホアプリ向け）
     socketio.emit('signal', signal_data)
+    _last_broadcast_payload.update(signal_data)  # 5分再配信用に保存
 
     print(f"✅ EAシグナル処理完了: {crossover} "
           f"AI={'✅承認' if ai['valid'] else '❌却下'} {ai['confidence']}% "
