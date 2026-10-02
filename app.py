@@ -1013,6 +1013,18 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
         res_levels, sup_levels = find_key_levels(highs, lows, current_price)
         key_level_context = format_key_level_context(res_levels, sup_levels, current_price, crossover)
 
+    # サポートバウンス（EAが通常クロスなしで検出した底からの反発）
+    if ea_data.get('support_bounce'):
+        support_lvl = float(ea_data.get('support_level', 0))
+        dist = current_price - support_lvl if support_lvl > 0 else 0
+        key_level_context += (
+            f"\n\n⭐【サポートバウンス検出】EAが通常クロスなしでサポート反発を検出しました。"
+            f"\n  確認されたサポート水準: ${support_lvl:.2f}（現在価格から-{dist:.1f}pips）"
+            f"\n  ・このサポートが底として機能している可能性が高い"
+            f"\n  ・レジスタンス付近でなければ積極的なBUYエントリーを強く推奨してください"
+            f"\n  ・通常より信頼度を10-20pt高く評価してください"
+        )
+
     prompt = f"""あなたはゴールド（XAUUSD）の上級テクニカルアナリストです。
 MT5のリアルタイムデータから計算された複合テクニカル指標を総合分析し、このシグナルの有効性を判定してください。
 

@@ -180,7 +180,8 @@ void PushSignalToServer(string crossover, double close_price,
                         double stoch_k, double stoch_d,
                         double adx, double di_plus, double di_minus,
                         double atr, int buy_score, int sell_score,
-                        string buy_reasons, string sell_reasons)
+                        string buy_reasons, string sell_reasons,
+                        bool support_bounce = false, double support_level_price = 0.0)
 {
     // 過去20本のローソク足データを取得（テクニカル強化用）
     MqlRates rates[20];
@@ -225,8 +226,10 @@ void PushSignalToServer(string crossover, double close_price,
         + ",\"di_plus\":"       + DoubleToString(di_plus,      2)
         + ",\"di_minus\":"      + DoubleToString(di_minus,     2)
         + ",\"atr\":"           + DoubleToString(atr,          4)
-        + ",\"buy_score\":"     + IntegerToString(buy_score)
-        + ",\"sell_score\":"    + IntegerToString(sell_score)
+        + ",\"buy_score\":"       + IntegerToString(buy_score)
+        + ",\"sell_score\":"      + IntegerToString(sell_score)
+        + ",\"support_bounce\":"  + (support_bounce ? "true" : "false")
+        + ",\"support_level\":"   + DoubleToString(support_level_price, 2)
         + "}";
 
     string headers = "Content-Type: application/json\r\n";
@@ -240,6 +243,45 @@ void PushSignalToServer(string crossover, double close_price,
               " close=", close_price, " 買い", buy_score, "点 売り", sell_score, "点");
     else
         Print("⚠️  /ea-signal 送信失敗: HTTP ", status, " (EAが稼働中でなければ正常)");
+}
+
+// サポートバウンス検出（ポジションなし・クロスなし時の再エントリー）
+bool DetectSupportBounce(double cur_price, double cur_rsi, double prev_rsi,
+                         double cur_atr, double &support_level)
+{
+    int bars     = 50;
+    int swing_len = 3;
+    double proximity_threshold = cur_atr * 0.5;  // ATRの半分以内をサポート近接と判定
+
+    for (int i = swing_len + 1; i < bars - swing_len; i++)
+    {
+        double low_i = iLow(_Symbol, PERIOD_M15, i);
+        if (low_i >= cur_price) continue;  // サポートは現在価格より下のみ
+
+        bool is_swing_low = true;
+        for (int j = i - swing_len; j <= i + swing_len; j++)
+        {
+            if (j == i) continue;
+            if (iLow(_Symbol, PERIOD_M15, j) < low_i)
+            {
+                is_swing_low = false;
+                break;
+            }
+        }
+        if (!is_swing_low) continue;
+
+        // サポートへの近接チェック（ATR * 0.5以内）
+        if ((cur_price - low_i) <= proximity_threshold)
+        {
+            // RSI反転確認: 過売られ域から上昇中（底確認）
+            if (cur_rsi < 50.0 && cur_rsi > prev_rsi)
+            {
+                support_level = low_i;
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 void ComputeAndPushSignal()
@@ -364,18 +406,53 @@ void ComputeAndPushSignal()
               " | ", (crossover != "" ? crossover : "クロスなし"));
     }
 
-    if (crossover == "") return;  // シグナルなし
+    // 現在足の OHLC を取得
+    double cur_open  = iOpen (_Symbol, PERIOD_M15, 0);
+    double cur_high  = iHigh (_Symbol, PERIOD_M15, 0);
+    double cur_low   = iLow  (_Symbol, PERIOD_M15, 0);
+
+    if (crossover == "")
+    {
+        // 通常クロスなし → ポジションなし時のみサポートバウンス検出
+        int total_open = CountPositions(POSITION_TYPE_BUY) + CountPositions(POSITION_TYPE_SELL);
+        if (total_open == 0)
+        {
+            double support_lvl = 0;
+            double prev_rsi_val = rsi_buf[1];
+            if (DetectSupportBounce(cur_close, cur_rsi, prev_rsi_val, cur_atr, support_lvl))
+            {
+                static double   s_last_bounce_support = 0;
+                static datetime s_last_bounce_time    = 0;
+                bool same_level = (MathAbs(support_lvl - s_last_bounce_support) < 1.0);
+                bool too_soon   = (TimeCurrent() - s_last_bounce_time < SIGNAL_PUSH_INTERVAL);
+                if (!same_level || !too_soon)
+                {
+                    s_last_bounce_support = support_lvl;
+                    s_last_bounce_time    = TimeCurrent();
+                    Print("🌀 サポートバウンス検出: 価格=", DoubleToString(cur_close, 2),
+                          " サポート=", DoubleToString(support_lvl, 2),
+                          " RSI=", DoubleToString(cur_rsi, 1));
+                    PushSignalToServer("UP_CROSS", cur_close, cur_open, cur_high, cur_low,
+                                       cur_rsi, cur_macd, cur_macd_sig,
+                                       cur_ema20, cur_ema50, cur_ema200,
+                                       cur_bb_upper, cur_bb_lower,
+                                       cur_stoch_k, cur_stoch_d,
+                                       cur_adx, cur_di_plus, cur_di_minus, cur_atr,
+                                       buy_score, sell_score, buy_reasons, sell_reasons,
+                                       true, support_lvl);
+                    g_last_pushed_crossover = "SUPPORT_BOUNCE";
+                    g_last_signal_push_time = TimeCurrent();
+                }
+            }
+        }
+        return;
+    }
 
     // 同方向かつプッシュ間隔未満 → スキップ
     if (crossover == g_last_pushed_crossover &&
         TimeCurrent() - g_last_signal_push_time < SIGNAL_PUSH_INTERVAL) return;
 
-    // 現在足の OHLC を取得（v1.24テクニカル強化用）
-    double cur_open  = iOpen (_Symbol, PERIOD_M15, 0);
-    double cur_high  = iHigh (_Symbol, PERIOD_M15, 0);
-    double cur_low   = iLow  (_Symbol, PERIOD_M15, 0);
-
-    // サーバーにプッシュ（v1.24: OHLC + candle_history追加）
+    // サーバーにプッシュ
     PushSignalToServer(crossover, cur_close, cur_open, cur_high, cur_low,
                        cur_rsi, cur_macd, cur_macd_sig,
                        cur_ema20, cur_ema50, cur_ema200,
