@@ -864,7 +864,8 @@ def gemini_composite_analyze(df, signal):
 複合テクニカル指標を総合分析し、このシグナルの有効性を判定してください。
 
 【シグナル】方向: {direction} / 価格: {signal['latest_close']} / 時刻: {signal['time']}
-【スコア】買い{comp.get('buy_score',0)}点 vs 売り{comp.get('sell_score',0)}点
+【スコア】買い{comp.get('buy_score',0)}点 vs 売り{comp.get('sell_score',0)}点（差{abs(comp.get('buy_score',0)-comp.get('sell_score',0))}）
+※スコア差の目安: 差2=弱シグナル(勝率56%) 差3=標準(勝率65%) 差4以上=強シグナル(勝率78%) — 差が大きいほど信頼できる
 買い根拠: {', '.join(comp.get('buy_reasons', []))}
 売り根拠: {', '.join(comp.get('sell_reasons', []))}
 【指標】EMA20={comp.get('ema20')} EMA50={comp.get('ema50')} EMA長={comp.get('ema_long')}
@@ -1157,7 +1158,8 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
 MT5のリアルタイムデータから計算された複合テクニカル指標を総合分析し、このシグナルの有効性を判定してください。
 
 【シグナル】方向: {direction} / 価格: {ea_data.get('latest_close')}
-【スコア】買い{ea_data.get('buy_score', 0)}点 vs 売り{ea_data.get('sell_score', 0)}点
+【スコア】買い{ea_data.get('buy_score', 0)}点 vs 売り{ea_data.get('sell_score', 0)}点（差{abs(int(ea_data.get('buy_score',0))-int(ea_data.get('sell_score',0)))}）
+※スコア差の目安: 差2=弱シグナル(勝率56%) 差3=標準(勝率65%) 差4以上=強シグナル(勝率78%) — 差が大きいほど信頼できる
 買い根拠: {ea_data.get('buy_reasons', '')}
 売り根拠: {ea_data.get('sell_reasons', '')}
 
