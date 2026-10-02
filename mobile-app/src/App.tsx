@@ -296,12 +296,18 @@ export default function App() {
             ai_valid: data.ai_valid,
             ai_confidence: data.ai_confidence,
             ai_reason: data.ai_reason,
+            ai_sl_suggestion: data.ai_sl_suggestion,
+            ai_tp_suggestion: data.ai_tp_suggestion,
+            ai_trailing_trigger: data.ai_trailing_trigger,
+            ai_trailing_width: data.ai_trailing_width,
+            ai_key_level: data.ai_key_level,
             generated_at: data.created_at ?? data.generated_at,
             timeframe: data.timeframe,
             test_mode: data.test_mode,
             db_id: data.db_id,
           };
           setSignal(s);
+          setLastSocketReceived(new Date());
           setHistory((prev) => {
             if (prev.length > 0 && prev[0].generated_at === s.generated_at) return prev;
             return [s, ...prev].slice(0, 50);
@@ -321,8 +327,12 @@ export default function App() {
 
     socket.on("candle_update", (data: Signal) => {
       setSignal(data);
-      setHistory((prev) => [data, ...prev].slice(0, 50));
       setLastSocketReceived(new Date());
+      // 同じgenerated_atの再配信はhistoryに追加しない
+      setHistory((prev) => {
+        if (prev.length > 0 && prev[0].generated_at === data.generated_at) return prev;
+        return [data, ...prev].slice(0, 50);
+      });
     });
 
     socket.on("signal", (data: Signal) => {
