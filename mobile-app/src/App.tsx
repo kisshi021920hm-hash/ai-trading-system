@@ -161,6 +161,7 @@ export default function App() {
     enabled: true,
   });
   const [reentryEnabled, setReentryEnabled] = useState(false);
+  const [aiExitEnabled, setAiExitEnabled] = useState(false);
 
   const tradingModeRef = useRef(tradingMode);
   useEffect(() => { tradingModeRef.current = tradingMode; }, [tradingMode]);
@@ -272,6 +273,10 @@ export default function App() {
       // 再エントリー設定を取得
       fetch(`${RENDER_URL}/api/settings/reentry`).then(r => r.json()).then(cfg => {
         if (cfg && typeof cfg.enabled === "boolean") setReentryEnabled(cfg.enabled);
+      }).catch(() => {});
+      // 5分AI決済監視設定を取得
+      fetch(`${RENDER_URL}/api/settings/ai-exit`).then(r => r.json()).then(cfg => {
+        if (cfg && typeof cfg.enabled === "boolean") setAiExitEnabled(cfg.enabled);
       }).catch(() => {});
       // 最新シグナルとS/R水準のみ取得
       try {
@@ -435,6 +440,10 @@ export default function App() {
         fetch(`${RENDER_URL}/api/settings/reentry`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ enabled: reentryEnabled }),
+        }).catch(() => {}),
+        fetch(`${RENDER_URL}/api/settings/ai-exit`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: aiExitEnabled }),
         }).catch(() => {}),
       ]);
       try {
@@ -1227,6 +1236,38 @@ export default function App() {
               {reentryEnabled && (
                 <div style={{ padding: "8px 10px", background: "#1a3a1a", borderRadius: 6, fontSize: 11, color: "#86efac", marginTop: 8 }}>
                   ⚠️ 同方向クロスが続く限り5分ごとにエントリーを試みます。相場急変時は注意してください。
+                </div>
+              )}
+            </div>
+
+            {/* 5分AI決済監視 */}
+            <div style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", marginBottom: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <div style={{ fontSize: 13, color: "#f1f5f9", fontWeight: "bold" }}>🤖 5分AI決済監視</div>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 3 }}>
+                    保有中ポジションをGeminiが5分ごとに判断。危険と判断したら決済
+                  </div>
+                </div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                  <span style={{ fontSize: 12, color: aiExitEnabled ? "#f87171" : "#64748b" }}>
+                    {aiExitEnabled ? "ON" : "OFF"}
+                  </span>
+                  <span style={{ position: "relative", display: "inline-block", width: 44, height: 24 }}>
+                    <input type="checkbox" checked={aiExitEnabled}
+                      onChange={e => setAiExitEnabled(e.target.checked)}
+                      style={{ opacity: 0, width: 0, height: 0 }} />
+                    <span style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+                      background: aiExitEnabled ? "#ef4444" : "#475569",
+                      borderRadius: 24, transition: "0.3s" }} />
+                    <span style={{ position: "absolute", top: 2, left: aiExitEnabled ? 22 : 2,
+                      width: 20, height: 20, background: "#fff", borderRadius: "50%", transition: "0.3s" }} />
+                  </span>
+                </label>
+              </div>
+              {aiExitEnabled && (
+                <div style={{ padding: "8px 10px", background: "#3a1a1a", borderRadius: 6, fontSize: 11, color: "#fca5a5", marginTop: 8 }}>
+                  ⚠️ AI_CLOSE_MODE（15分監視）と併用すると頻繁にGeminiが呼ばれます。Geminiクォータに注意。
                 </div>
               )}
             </div>

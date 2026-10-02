@@ -92,6 +92,7 @@ _last_ea_signal_time = 0.0   # EAから/ea-signalを最後に受信した時刻�
 _ea_latest_scores: dict = {}  # EAから受信した最新スコア（ハートビート経由）
 _last_broadcast_payload: dict = {}  # 最後にsocketへ配信したシグナルデータ（5分再配信用）
 _reentry_enabled: bool = False     # クロス継続中にポジションなしで再エントリーするか
+_ai_exit_enabled: bool = False     # 5分ごとにGeminiでポジション決済判断するか
 _ea_signal_dedup: dict = {}  # 重複防止キャッシュ {crossover: last_time}
 _force_close_pending = False   # AI_CLOSE_MODE: Gemini決済指示フラグ
 _force_close_set_time = 0.0    # フラグをセットした時刻（120秒後に自動リセット）
@@ -1439,6 +1440,7 @@ def save_signal_to_supabase(signal_data):
 # ==================== Status Logging（ダッシュボード用）====================
 def status_logging_loop():
     """5分ごとに /status データを Supabase に記録"""
+    global _force_close_pending, _force_close_set_time
     while True:
         try:
             time.sleep(STATUS_LOG_INTERVAL)
@@ -1541,6 +1543,34 @@ def status_logging_loop():
                             print(f"⏭️ 再エントリースキップ: ポジション保有中 ({len(open_pos)}件)")
                 except Exception as re_err:
                     print(f"⚠️ 再エントリーエラー: {re_err}")
+
+            # ===== 5分AI決済監視 =====
+            # 条件: ai_exit_enabled ON + オープンポジションあり → Geminiに決済判断を依頼
+            if _ai_exit_enabled:
+                try:
+                    pos_resp = req.get(
+                        f"{SUPABASE_URL}/rest/v1/trades",
+                        params={"status": "eq.OPEN"},
+                        headers=supabase_headers(), timeout=5
+                    )
+                    open_pos = pos_resp.json() if pos_resp.ok else []
+                    for pos in open_pos:
+                        close_decision = gemini_position_close_decision(pos, _ea_latest_scores)
+                        log_system("INFO", f"🤖 5分AI決済監視: ポジション#{pos.get('id')} → {'CLOSE' if close_decision['should_close'] else 'HOLD'} {close_decision['confidence']}% {close_decision.get('reason','')[:60]}")
+                        if close_decision['should_close'] and (close_decision['confidence'] or 0) >= CLOSE_CONFIDENCE_THRESHOLD:
+                            _force_close_pending = True
+                            _force_close_set_time = time.time()
+                            req.patch(
+                                f"{SUPABASE_URL}/rest/v1/trades",
+                                params={"id": f"eq.{pos.get('id')}"},
+                                json={"status": "CLOSED", "close_time": datetime.now(timezone.utc).isoformat()},
+                                headers={**supabase_headers(), "Prefer": "return=minimal"}, timeout=10
+                            )
+                            log_system("INFO", f"🔴 5分AI決済: ポジション#{pos.get('id')} 信頼度={close_decision['confidence']}%")
+                            send_position_alert_push("🔴 AI決済指示（5分監視）", f"信頼度{close_decision['confidence']}% | {close_decision.get('reason','')[:40]}")
+                            break  # 1度に1ポジションのみ決済
+                except Exception as ae_err:
+                    print(f"⚠️ 5分AI決済監視エラー: {ae_err}")
 
         except Exception as e:
             print(f"❌ Status logging error: {e}")
@@ -2444,6 +2474,21 @@ def hybrid_sl_settings():
             "hybrid_sl": _hybrid_sl_config,
             "message": "ハイブリッドSL設定が更新されました"
         })
+
+@app.route("/api/settings/ai-exit", methods=["GET", "POST", "OPTIONS"])
+def ai_exit_settings():
+    """5分AI決済監視設定"""
+    global _ai_exit_enabled
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if request.method == "GET":
+        return jsonify({"enabled": _ai_exit_enabled})
+    data = request.get_json() or {}
+    old = _ai_exit_enabled
+    _ai_exit_enabled = bool(data.get("enabled", False))
+    if old != _ai_exit_enabled:
+        log_system("INFO", f"⚙️ 5分AI決済監視: {'ON' if _ai_exit_enabled else 'OFF'}")
+    return jsonify({"status": "ok", "enabled": _ai_exit_enabled})
 
 @app.route("/api/settings/reentry", methods=["GET", "POST", "OPTIONS"])
 def reentry_settings():
