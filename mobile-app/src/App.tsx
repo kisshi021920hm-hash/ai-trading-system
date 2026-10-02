@@ -152,14 +152,12 @@ export default function App() {
   const [vibGap, setVibGap] = useState<number>(() => {
     try { return parseInt(localStorage.getItem("gt_vib_gap") ?? "150"); } catch { return 150; }
   });
-  const [pauseSignalRefresh, setPauseSignalRefresh] = useState<boolean>(() => {
-    try { return localStorage.getItem("gt_pause_refresh") === "true"; } catch { return false; }
+  const [hybridSlConfig, setHybridSlConfig] = useState({
+    initial_sl_price: 5,
+    trailing_trigger_price: 5,
+    trailing_sl_price: 3,
+    enabled: true,
   });
-  const pauseRefreshRef = useRef(pauseSignalRefresh);
-  useEffect(() => {
-    pauseRefreshRef.current = pauseSignalRefresh;
-    try { localStorage.setItem("gt_pause_refresh", String(pauseSignalRefresh)); } catch {}
-  }, [pauseSignalRefresh]);
 
   const tradingModeRef = useRef(tradingMode);
   useEffect(() => { tradingModeRef.current = tradingMode; }, [tradingMode]);
@@ -264,6 +262,10 @@ export default function App() {
           }).catch(() => {});
         }
       } catch (_) {}
+      // ハイブリッドSL設定を初回接続時に取得
+      fetch(`${RENDER_URL}/api/settings/hybrid-sl`).then(r => r.json()).then(cfg => {
+        if (cfg && typeof cfg.initial_sl_price === "number") setHybridSlConfig(cfg);
+      }).catch(() => {});
       // 最新シグナルとS/R水準のみ取得
       try {
         const [sigRes, srRes] = await Promise.all([
@@ -301,20 +303,17 @@ export default function App() {
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     socket.on("candle_update", (data: Signal) => {
-      if (pauseRefreshRef.current) return;
       setSignal(data);
       setHistory((prev) => [data, ...prev].slice(0, 50));
     });
 
     socket.on("signal", (data: Signal) => {
-      if (!pauseRefreshRef.current) {
-        setSignal(data);
-        setHistory((prev) => [data, ...prev].slice(0, 50));
-        // シグナル受信時にS/R水準も更新
-        fetch(`${RENDER_URL}/api/sr-levels`).then(r => r.json()).then(sr => {
-          if (sr && sr.current_price > 0) setSrLevels(sr);
-        }).catch(() => {});
-      }
+      setSignal(data);
+      setHistory((prev) => [data, ...prev].slice(0, 50));
+      // シグナル受信時にS/R水準も更新
+      fetch(`${RENDER_URL}/api/sr-levels`).then(r => r.json()).then(sr => {
+        if (sr && sr.current_price > 0) setSrLevels(sr);
+      }).catch(() => {});
 
       if (data.crossover) {
         const isAiCloseMode = tradingModeRef.current === "AI_CLOSE_MODE";
@@ -403,7 +402,11 @@ export default function App() {
         fetch(`${RENDER_URL}/api/settings/range-mode`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ use_range_mode: useRangeMode }),
-        }).catch(() => {}),  // 新エンドポイント: デプロイ中でも保存失敗にしない
+        }).catch(() => {}),
+        fetch(`${RENDER_URL}/api/settings/hybrid-sl`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(hybridSlConfig),
+        }).catch(() => {}),
       ]);
       try {
         localStorage.setItem("gt_tf", String(tf));
@@ -944,28 +947,6 @@ export default function App() {
           <div style={styles.settingsPanel}>
             <h2 style={styles.settingsTitle}>⚙️ 設定</h2>
 
-            {/* シグナル自動更新トグル */}
-            <div style={{ background: "#1e293b", border: `1px solid ${pauseSignalRefresh ? "#f59e0b" : "#334155"}`, borderRadius: 8, padding: "10px 14px", marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <div>
-                <div style={{ fontSize: 13, color: "#cbd5e1", fontWeight: "bold" }}>シグナル自動更新</div>
-                <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
-                  {pauseSignalRefresh ? "⏸ 一時停止中（手動確認モード）" : "▶ 更新中（通常動作）"}
-                </div>
-              </div>
-              <label style={{ position: "relative", display: "inline-block", width: 48, height: 26, cursor: "pointer" }}>
-                <input type="checkbox" checked={!pauseSignalRefresh} onChange={e => setPauseSignalRefresh(!e.target.checked)} style={{ opacity: 0, width: 0, height: 0 }} />
-                <span style={{
-                  position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
-                  background: pauseSignalRefresh ? "#475569" : "#22c55e",
-                  borderRadius: 26, transition: "0.3s"
-                }} />
-                <span style={{
-                  position: "absolute", top: 3, left: pauseSignalRefresh ? 3 : 25, width: 20, height: 20,
-                  background: "#fff", borderRadius: "50%", transition: "0.3s"
-                }} />
-              </label>
-            </div>
-
             {/* 自動化モード（最上部に配置） */}
             <div style={styles.settingsSection}>
               <h3 style={styles.settingsSectionTitle}>🤖 自動化モード</h3>
@@ -1122,6 +1103,48 @@ export default function App() {
                 }} />
               </label>
             </div>
+
+            {/* ハイブリッドSL設定 */}
+            <div style={styles.settingsSection}>
+              <h3 style={styles.settingsSectionTitle}>🛡️ ハイブリッドSL設定</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 13 }}>
+                <div>
+                  <label style={{ display: "block", marginBottom: 4, color: "#cbd5e1" }}>初期SL（$/oz）</label>
+                  <input type="number" step="0.1" min="0.1" max="50"
+                    value={hybridSlConfig.initial_sl_price}
+                    onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig(c => ({ ...c, initial_sl_price: v })); }}
+                    style={{ width: "100%", padding: "6px", background: "#0f172a", color: "#f1f5f9", border: "1px solid #475569", borderRadius: 4, boxSizing: "border-box" }} />
+                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>エントリーから何$/oz下</p>
+                </div>
+                <div>
+                  <label style={{ display: "block", marginBottom: 4, color: "#cbd5e1" }}>トレーリング開始（$/oz）</label>
+                  <input type="number" step="0.1" min="0.1" max="50"
+                    value={hybridSlConfig.trailing_trigger_price}
+                    onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig(c => ({ ...c, trailing_trigger_price: v })); }}
+                    style={{ width: "100%", padding: "6px", background: "#0f172a", color: "#f1f5f9", border: "1px solid #475569", borderRadius: 4, boxSizing: "border-box" }} />
+                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>エントリーから何$/oz上で開始</p>
+                </div>
+                <div>
+                  <label style={{ display: "block", marginBottom: 4, color: "#cbd5e1" }}>トレーリングSL幅（$/oz）</label>
+                  <input type="number" step="0.1" min="0.1" max="20"
+                    value={hybridSlConfig.trailing_sl_price}
+                    onChange={e => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig(c => ({ ...c, trailing_sl_price: v })); }}
+                    style={{ width: "100%", padding: "6px", background: "#0f172a", color: "#f1f5f9", border: "1px solid #475569", borderRadius: 4, boxSizing: "border-box" }} />
+                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>現在価格から何$/oz下にSL</p>
+                </div>
+                <div>
+                  <label style={{ display: "block", marginBottom: 4, color: "#cbd5e1" }}>有効</label>
+                  <select value={hybridSlConfig.enabled ? "true" : "false"}
+                    onChange={e => setHybridSlConfig(c => ({ ...c, enabled: e.target.value === "true" }))}
+                    style={{ width: "100%", padding: "6px", background: "#0f172a", color: "#f1f5f9", border: "1px solid #475569", borderRadius: 4 }}>
+                    <option value="true">✅ 有効</option>
+                    <option value="false">❌ 無効</option>
+                  </select>
+                  <p style={{ margin: "4px 0 0", fontSize: 11, color: "#94a3b8" }}>機能の有効/無効</p>
+                </div>
+              </div>
+            </div>
+            <hr style={styles.divider} />
 
             {saveMsg && <div style={styles.saveMsg}>{saveMsg}</div>}
 

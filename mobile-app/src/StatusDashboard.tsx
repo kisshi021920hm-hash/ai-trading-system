@@ -41,12 +41,6 @@ interface StatusDashboardProps {
   renderUrl: string;
 }
 
-interface HybridSlConfig {
-  initial_sl_price: number;
-  trailing_trigger_price: number;
-  trailing_sl_price: number;
-  enabled: boolean;
-}
 
 export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
   const [logs, setLogs] = useState<StatusLog[]>([]);
@@ -54,15 +48,6 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
   const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // ハイブリッドSL設定
-  const [hybridSlConfig, setHybridSlConfig] = useState<HybridSlConfig>({
-    initial_sl_price: 2.0,
-    trailing_trigger_price: 2.0,
-    trailing_sl_price: 1.5,
-    enabled: true
-  });
-  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     const fetchLogs = async () => {
@@ -89,13 +74,6 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
           const sysData = await sysResp.json();
           setSystemLogs(sysData);
         }
-
-        // ハイブリッドSL設定を取得
-        const configResp = await fetch(`${renderUrl}/api/settings/hybrid-sl`);
-        if (configResp.ok) {
-          const config = await configResp.json();
-          setHybridSlConfig(config);
-        }
       } catch (err) {
         setError(`エラー: ${err instanceof Error ? err.message : "不明"}`);
       } finally {
@@ -107,27 +85,6 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
     const interval = setInterval(fetchLogs, 30000); // 30秒ごと
     return () => clearInterval(interval);
   }, [renderUrl]);
-
-  // ハイブリッドSL設定を保存
-  const saveHybridSlConfig = async () => {
-    setSaving(true);
-    try {
-      const resp = await fetch(`${renderUrl}/api/settings/hybrid-sl`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(hybridSlConfig)
-      });
-      if (resp.ok) {
-        alert("✅ ハイブリッドSL設定が保存されました");
-      } else {
-        alert("❌ 設定の保存に失敗しました");
-      }
-    } catch (err) {
-      alert(`エラー: ${err instanceof Error ? err.message : "不明"}`);
-    } finally {
-      setSaving(false);
-    }
-  };
 
   if (loading) {
     return (
@@ -289,112 +246,6 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             <strong>モード:</strong> {latest.test_mode ? "🧪 TEST" : "🚀 PRODUCTION"}
           </p>
         </div>
-      </div>
-
-      {/* ハイブリッドSL設定 */}
-      <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", marginBottom: "20px", color: "#f1f5f9" }}>
-        <h3 style={{ marginTop: 0, marginBottom: "12px", color: "#94a3b8" }}>⚙️ ハイブリッドSL設定</h3>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "12px", fontSize: "13px" }}>
-          <div>
-            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>初期SL（$/oz）</label>
-            <input
-              type="number"
-              step="0.1"
-              min="0.1"
-              max="50"
-              value={hybridSlConfig.initial_sl_price}
-              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, initial_sl_price: v }); }}
-              style={{
-                width: "100%",
-                padding: "6px",
-                backgroundColor: "#0f172a",
-                color: "#f1f5f9",
-                border: "1px solid #475569",
-                borderRadius: "4px"
-              }}
-            />
-            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>エントリーから何$/oz下</p>
-          </div>
-
-          <div>
-            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>トレーリング開始（$/oz）</label>
-            <input
-              type="number"
-              step="0.1"
-              min="0.1"
-              max="50"
-              value={hybridSlConfig.trailing_trigger_price}
-              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_trigger_price: v }); }}
-              style={{
-                width: "100%",
-                padding: "6px",
-                backgroundColor: "#0f172a",
-                color: "#f1f5f9",
-                border: "1px solid #475569",
-                borderRadius: "4px"
-              }}
-            />
-            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>エントリーから何$/oz上で開始</p>
-          </div>
-
-          <div>
-            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>トレーリングSL幅（$/oz）</label>
-            <input
-              type="number"
-              step="0.1"
-              min="0.1"
-              max="20"
-              value={hybridSlConfig.trailing_sl_price}
-              onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) setHybridSlConfig({ ...hybridSlConfig, trailing_sl_price: v }); }}
-              style={{
-                width: "100%",
-                padding: "6px",
-                backgroundColor: "#0f172a",
-                color: "#f1f5f9",
-                border: "1px solid #475569",
-                borderRadius: "4px"
-              }}
-            />
-            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>現在価格から何$/oz下にSL</p>
-          </div>
-
-          <div>
-            <label style={{ display: "block", marginBottom: "4px", color: "#cbd5e1" }}>有効</label>
-            <select
-              value={hybridSlConfig.enabled ? "true" : "false"}
-              onChange={(e) => setHybridSlConfig({ ...hybridSlConfig, enabled: e.target.value === "true" })}
-              style={{
-                width: "100%",
-                padding: "6px",
-                backgroundColor: "#0f172a",
-                color: "#f1f5f9",
-                border: "1px solid #475569",
-                borderRadius: "4px"
-              }}
-            >
-              <option value="true">✅ 有効</option>
-              <option value="false">❌ 無効</option>
-            </select>
-            <p style={{ margin: "4px 0 0 0", fontSize: "11px", color: "#94a3b8" }}>機能の有効/無効</p>
-          </div>
-        </div>
-        <button
-          onClick={saveHybridSlConfig}
-          disabled={saving}
-          style={{
-            width: "100%",
-            padding: "10px",
-            backgroundColor: saving ? "#64748b" : "#3b82f6",
-            color: "#fff",
-            border: "none",
-            borderRadius: "4px",
-            cursor: saving ? "not-allowed" : "pointer",
-            fontSize: "14px",
-            fontWeight: "bold"
-          }}
-        >
-          {saving ? "⏳ 保存中..." : "💾 設定を保存"}
-        </button>
       </div>
 
       {/* シグナルループモード */}
