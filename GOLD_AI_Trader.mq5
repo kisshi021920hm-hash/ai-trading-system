@@ -113,6 +113,43 @@ void OnTimer()
     PollAndTrade();
     TrailingStopUpdate();    // トレーリングストップ更新
 }
+// SL/TP/手動決済をサーバーに報告（Supabase整合性維持）
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest&     request,
+                        const MqlTradeResult&      result)
+{
+    // ポジション決済のみ対象（DEAL_ENTRY_OUT = クローズ）
+    if (trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+    if (trans.deal_type != DEAL_TYPE_BUY && trans.deal_type != DEAL_TYPE_SELL) return;
+
+    ulong deal = trans.deal;
+    if (!HistoryDealSelect(deal)) return;
+
+    ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
+    if (entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT) return;
+
+    // 決済情報を取得
+    double close_price = HistoryDealGetDouble(deal,   DEAL_PRICE);
+    double profit      = HistoryDealGetDouble(deal,   DEAL_PROFIT);
+    ulong  ticket      = HistoryDealGetInteger(deal,  DEAL_POSITION_ID);
+    string symbol      = HistoryDealGetString(deal,   DEAL_SYMBOL);
+    // 決済ディールの方向は保有ポジションと逆なので反転する
+    // BUYポジション決済 → DEAL_TYPE_SELL / SELLポジション決済 → DEAL_TYPE_BUY
+    string dir         = (trans.deal_type == DEAL_TYPE_SELL) ? "BUY" : "SELL";
+
+    // クローズ理由を判定
+    ENUM_DEAL_REASON reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(deal, DEAL_REASON);
+    string close_reason = "MANUAL";
+    if (reason == DEAL_REASON_SL)   close_reason = "SL";
+    else if (reason == DEAL_REASON_TP) close_reason = "TP";
+
+    Print("📤 決済報告: ticket=", ticket, " dir=", dir, " price=", close_price,
+          " profit=", profit, " reason=", close_reason);
+
+    // /ea-trade に CLOSE を報告
+    ReportTradeClose(ticket, dir, close_price, profit, close_reason);
+}
+
 void OnTick()
 {
     // 含み損監視は最低1秒間隔（毎tick実行で過負荷にならないよう制限）
@@ -392,6 +429,29 @@ void ReportTrade(string action, string direction, double price,
     int rep_status = WebRequest("POST", API_BASE + "/ea-trade", rep_headers, 3000, rep_post, rep_result, rep_resp_headers);
     if (rep_status != 200)
         Print("⚠️ 取引レポート送信失敗: HTTP", rep_status, " action=", action, " direction=", direction);
+}
+
+// SL/TP/手動決済をサーバーに報告
+void ReportTradeClose(ulong ticket, string direction, double close_price,
+                      double profit, string close_reason)
+{
+    string json = "{\"action\":\"CLOSE\""
+                + ",\"ticket\":"       + IntegerToString((long)ticket)
+                + ",\"direction\":\"" + direction + "\""
+                + ",\"close_price\":" + DoubleToString(close_price, 2)
+                + ",\"profit\":"      + DoubleToString(profit, 2)
+                + ",\"close_reason\":\"" + close_reason + "\""
+                + ",\"balance\":"     + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2)
+                + "}";
+    string headers = "Content-Type: application/json\r\n";
+    char   post[], res[];
+    string resp_headers;
+    StringToCharArray(json, post, 0, StringLen(json));
+    int status = WebRequest("POST", API_BASE + "/ea-trade", headers, 3000, post, res, resp_headers);
+    if (status != 200)
+        Print("⚠️ 決済レポート送信失敗: HTTP", status, " ticket=", ticket, " reason=", close_reason);
+    else
+        Print("✅ 決済報告完了: ticket=", ticket, " reason=", close_reason, " profit=", profit);
 }
 
 //+------------------------------------------------------------------+

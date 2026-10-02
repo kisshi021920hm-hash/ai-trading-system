@@ -2822,29 +2822,55 @@ def ea_trade_report():
                 print(f"⚠️  EA注文 Supabase保存失敗: {resp.text}")
 
         elif action == "CLOSE":
-            # 決済 → ticket でマッチする OPEN レコードを更新
+            # 決済 → ticket でマッチする OPEN レコードを更新（なければ方向で検索）
             close_dir = direction.replace("_CLOSE", "")
-            existing = req.get(
-                f"{SUPABASE_URL}/rest/v1/trades",
-                params={"status": "eq.OPEN", "direction": f"eq.{close_dir}",
-                        "order": "entry_time.desc", "limit": "1"},
-                headers=supabase_headers(), timeout=10
-            ).json()
+            close_price = float(data.get("close_price") or data.get("price") or 0)
+            mt5_profit = data.get("profit")        # MT5実際の損益（USD）
+            close_reason = data.get("close_reason", "UNKNOWN")
+
+            # ① ticket番号でノートを検索
+            existing = []
+            if ticket and str(ticket) != "?":
+                try:
+                    existing = req.get(
+                        f"{SUPABASE_URL}/rest/v1/trades",
+                        params={"status": "eq.OPEN", "notes": f"like.*ticket={ticket}*"},
+                        headers=supabase_headers(), timeout=10
+                    ).json()
+                except Exception:
+                    pass
+
+            # ② ticket で見つからなければ方向+最新で検索
+            if not existing:
+                existing = req.get(
+                    f"{SUPABASE_URL}/rest/v1/trades",
+                    params={"status": "eq.OPEN", "direction": f"eq.{close_dir}",
+                            "order": "entry_time.desc", "limit": "1"},
+                    headers=supabase_headers(), timeout=10
+                ).json()
+
             if existing:
                 trade_id = existing[0]["id"]
-                entry_price = float(existing[0]["entry_price"])
-                profit_loss = round(
-                    (float(price) - entry_price) * (1 if close_dir == "BUY" else -1), 2
-                )
+                entry_price = float(existing[0].get("entry_price", 0))
+                # MT5の実損益があればそれを優先、なければ価格差から計算
+                if mt5_profit is not None:
+                    profit_loss = round(float(mt5_profit), 2)
+                elif close_price and entry_price:
+                    profit_loss = round(
+                        (close_price - entry_price) * (1 if close_dir == "BUY" else -1), 2
+                    )
+                else:
+                    profit_loss = 0
                 pips = round(profit_loss * 10, 1)
                 status = "CLOSED_PROFIT" if profit_loss >= 0 else "CLOSED_LOSS"
                 patch = {
-                    "exit_price": float(price),
+                    "exit_price": close_price or float(data.get("price", 0)),
                     "exit_time": now_iso,
                     "profit_loss": profit_loss,
                     "pips": pips,
                     "status": status,
                     "updated_at": now_iso,
+                    "notes": existing[0].get("notes", "") + f" | closed_by={close_reason}",
                 }
                 resp = req.patch(
                     f"{SUPABASE_URL}/rest/v1/trades",
@@ -2853,9 +2879,10 @@ def ea_trade_report():
                     headers={**supabase_headers(), "Prefer": "return=minimal"},
                     timeout=10
                 )
-                print(f"✅ EA決済 Supabase更新完了 trade_id={trade_id} P/L={profit_loss} ({status})")
+                print(f"✅ EA決済 Supabase更新完了 trade_id={trade_id} P/L={profit_loss} reason={close_reason} ({status})")
+                log_system("INFO", f"EA決済: {close_dir} ticket={ticket} P/L={profit_loss} reason={close_reason}")
             else:
-                print("⚠️  EA決済: 対応するOPENトレードが見つかりません")
+                print(f"⚠️  EA決済: 対応するOPENトレードが見つかりません ticket={ticket} dir={close_dir}")
     except Exception as e:
         print(f"⚠️  EA取引Supabase保存エラー: {e}")
 
