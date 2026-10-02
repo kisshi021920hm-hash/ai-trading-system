@@ -289,7 +289,10 @@ export default function App() {
             db_id: data.db_id,
           };
           setSignal(s);
-          setHistory((prev) => [s, ...prev].slice(0, 50));
+          setHistory((prev) => {
+            if (prev.length > 0 && prev[0].generated_at === s.generated_at) return prev;
+            return [s, ...prev].slice(0, 50);
+          });
         }
         if (srRes) {
           const srData = await srRes.json().catch(() => null);

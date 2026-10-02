@@ -1500,8 +1500,17 @@ def save_status_log(status_data):
             timeout=10
         )
         if resp.status_code not in [200, 201]:
-            print(f"⚠️  Status log save failed: {resp.status_code} {resp.text}")
-        return resp.status_code in [200, 201]
+            print(f"⚠️  Status log save failed: {resp.status_code} {resp.text[:200]}")
+            # ai_decision フィールドがテーブルに存在しない場合はそれらを除いてリトライ
+            ai_keys = ["ai_decision_timestamp", "ai_decision_type", "ai_confidence_score", "ai_decision_reason", "ai_executed_action"]
+            minimal = {k: v for k, v in status_data.items() if k not in ai_keys}
+            resp2 = req.post(url, json=minimal, headers={**supabase_headers(), "Prefer": "return=minimal"}, timeout=10)
+            if resp2.status_code not in [200, 201]:
+                print(f"⚠️  Status log minimal save also failed: {resp2.status_code} {resp2.text[:200]}")
+            else:
+                print("✅ Status log saved (minimal)")
+            return resp2.status_code in [200, 201]
+        return True
     except Exception as e:
         print(f"⚠️  Status log save error: {e}")
         return False
