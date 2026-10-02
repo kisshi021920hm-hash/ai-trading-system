@@ -62,6 +62,12 @@ interface Trade {
   notes: string | null;
 }
 
+interface ActionLog {
+  timestamp: string;
+  level: string;
+  message: string;
+}
+
 interface TodayStats {
   date: string;
   total_signals: number;
@@ -98,6 +104,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"signal" | "analytics" | "dashboard">("signal");
   const [trades, setTrades] = useState<Trade[]>([]);
   const [todayStats, setTodayStats] = useState<TodayStats | null>(null);
+  const [actionLogs, setActionLogs] = useState<ActionLog[]>([]);
   const [entryModalOpen, setEntryModalOpen] = useState(false);
   const [closeModalTrade, setCloseModalTrade] = useState<Trade | null>(null);
   const [entryPrice, setEntryPrice] = useState("");
@@ -153,6 +160,13 @@ export default function App() {
     try {
       const r = await fetch(`${RENDER_URL}/api/stats/today`);
       if (r.ok) setTodayStats(await r.json());
+    } catch (_) {}
+  };
+
+  const fetchActionLog = async () => {
+    try {
+      const r = await fetch(`${RENDER_URL}/api/action-log?limit=30`);
+      if (r.ok) setActionLogs(await r.json());
     } catch (_) {}
   };
 
@@ -340,6 +354,7 @@ export default function App() {
     if (activeTab === "analytics") {
       fetchTrades();
       fetchTodayStats();
+      fetchActionLog();
     }
   }, [activeTab]);
 
@@ -700,6 +715,35 @@ export default function App() {
           >
             ＋ 注文を手動記録
           </button>
+
+          {/* Gemini実績ログ */}
+          <div style={styles.card}>
+            <div style={styles.cardHeader}>
+              <h2 style={styles.cardTitle}>🤖 Gemini実績ログ</h2>
+              <button style={styles.refreshBtn} onClick={fetchActionLog}>🔄</button>
+            </div>
+            {actionLogs.length === 0 ? (
+              <p style={styles.waiting}>ログなし（エントリー・決済時に記録）</p>
+            ) : (
+              actionLogs.map((log, i) => {
+                const msg = log.message;
+                const isEntry = msg.includes("エントリー実行") || msg.includes("Gemini判定");
+                const isClose = msg.includes("force_close") || msg.includes("決済実行");
+                const isReason = msg.includes("判定理由");
+                const color = isEntry ? "#22c55e" : isClose ? "#ef4444" : "#94a3b8";
+                return (
+                  <div key={i} style={{ borderBottom: "1px solid #334155", paddingBottom: 6, marginBottom: 6 }}>
+                    <div style={{ fontSize: 10, color: "#475569", marginBottom: 2 }}>
+                      {new Date(log.timestamp).toLocaleString("ja-JP")}
+                    </div>
+                    <div style={{ fontSize: 12, color, wordBreak: "break-all" as const }}>
+                      {isReason ? <span style={{ color: "#94a3b8" }}>{msg}</span> : msg}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
 
           {/* トレード一覧 */}
           <div style={styles.card}>

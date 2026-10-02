@@ -1702,6 +1702,24 @@ def get_system_logs():
         log_system("WARNING", f"システムログ取得エラー: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/action-log", methods=["GET", "OPTIONS"])
+def get_action_log():
+    """Gemini判定・エントリー・決済の実績ログを返す（最新50件）"""
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        limit = int(request.args.get('limit', '50'))
+        limit = min(limit, 200)
+        keywords = ["🤖 Gemini", "✅ エントリー", "force_close", "📝 判定理由", "決済実行", "エントリー実行"]
+        with _system_logs_lock:
+            filtered = [
+                log for log in _system_logs
+                if any(kw in log.get("message", "") for kw in keywords)
+            ]
+        return jsonify(list(reversed(filtered[-limit:])))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 # ==================== シグナルループ（24/7自動稼働）====================
 def signal_loop():
     """Yahoo Finance からデータ取得し、時間足ごとにシグナルを計算・配信
