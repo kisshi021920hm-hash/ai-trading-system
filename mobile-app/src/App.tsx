@@ -288,16 +288,15 @@ export default function App() {
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    // クロスなし（EA稼働中の定期更新）- 履歴には追加しない
+    // クロスなし（EA稼働中の定期更新）
     socket.on("candle_update", (data: Signal) => {
       setSignal(data);
+      setHistory((prev) => [data, ...prev].slice(0, 50));
     });
 
     socket.on("signal", (data: Signal) => {
       setSignal(data);
-      if (data.crossover) {
-        setHistory((prev) => [data, ...prev].slice(0, 50));
-      }
+      setHistory((prev) => [data, ...prev].slice(0, 50));
 
       if (data.crossover) {
         // 振動（アプリが前面にある場合）
