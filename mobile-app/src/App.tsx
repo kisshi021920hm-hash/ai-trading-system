@@ -160,6 +160,7 @@ export default function App() {
     initial_tp_price: 15,
     enabled: true,
   });
+  const [reentryEnabled, setReentryEnabled] = useState(false);
 
   const tradingModeRef = useRef(tradingMode);
   useEffect(() => { tradingModeRef.current = tradingMode; }, [tradingMode]);
@@ -267,6 +268,10 @@ export default function App() {
       // ハイブリッドSL設定を初回接続時に取得
       fetch(`${RENDER_URL}/api/settings/hybrid-sl`).then(r => r.json()).then(cfg => {
         if (cfg && typeof cfg.initial_sl_price === "number") setHybridSlConfig(cfg);
+      }).catch(() => {});
+      // 再エントリー設定を取得
+      fetch(`${RENDER_URL}/api/settings/reentry`).then(r => r.json()).then(cfg => {
+        if (cfg && typeof cfg.enabled === "boolean") setReentryEnabled(cfg.enabled);
       }).catch(() => {});
       // 最新シグナルとS/R水準のみ取得
       try {
@@ -426,6 +431,10 @@ export default function App() {
         fetch(`${RENDER_URL}/api/settings/hybrid-sl`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(hybridSlConfig),
+        }).catch(() => {}),
+        fetch(`${RENDER_URL}/api/settings/reentry`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: reentryEnabled }),
         }).catch(() => {}),
       ]);
       try {
@@ -1189,6 +1198,39 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            {/* 再エントリー設定 */}
+            <div style={{ background: "#1e293b", borderRadius: 10, padding: "12px 14px", marginBottom: 10, marginTop: 10 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <div style={{ fontSize: 13, color: "#f1f5f9", fontWeight: "bold" }}>🔄 クロス継続再エントリー</div>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 3 }}>
+                    FULL_AUTO限定。ポジションなし＋クロス継続中に5分ごとに再エントリー
+                  </div>
+                </div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                  <span style={{ fontSize: 12, color: reentryEnabled ? "#22c55e" : "#64748b" }}>
+                    {reentryEnabled ? "ON" : "OFF"}
+                  </span>
+                  <span style={{ position: "relative", display: "inline-block", width: 44, height: 24 }}>
+                    <input type="checkbox" checked={reentryEnabled}
+                      onChange={e => setReentryEnabled(e.target.checked)}
+                      style={{ opacity: 0, width: 0, height: 0 }} />
+                    <span style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+                      background: reentryEnabled ? "#22c55e" : "#475569",
+                      borderRadius: 24, transition: "0.3s" }} />
+                    <span style={{ position: "absolute", top: 2, left: reentryEnabled ? 22 : 2,
+                      width: 20, height: 20, background: "#fff", borderRadius: "50%", transition: "0.3s" }} />
+                  </span>
+                </label>
+              </div>
+              {reentryEnabled && (
+                <div style={{ padding: "8px 10px", background: "#1a3a1a", borderRadius: 6, fontSize: 11, color: "#86efac", marginTop: 8 }}>
+                  ⚠️ 同方向クロスが続く限り5分ごとにエントリーを試みます。相場急変時は注意してください。
+                </div>
+              )}
+            </div>
+
             <hr style={styles.divider} />
 
             {saveMsg && <div style={styles.saveMsg}>{saveMsg}</div>}

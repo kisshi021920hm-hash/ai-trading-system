@@ -91,6 +91,7 @@ _position_monitor_last = 0.0  # ポジション監視最終実行時刻
 _last_ea_signal_time = 0.0   # EAから/ea-signalを最後に受信した時刻（signal_loopスキップ判定用）
 _ea_latest_scores: dict = {}  # EAから受信した最新スコア（ハートビート経由）
 _last_broadcast_payload: dict = {}  # 最後にsocketへ配信したシグナルデータ（5分再配信用）
+_reentry_enabled: bool = False     # クロス継続中にポジションなしで再エントリーするか
 _ea_signal_dedup: dict = {}  # 重複防止キャッシュ {crossover: last_time}
 _force_close_pending = False   # AI_CLOSE_MODE: Gemini決済指示フラグ
 _force_close_set_time = 0.0    # フラグをセットした時刻（120秒後に自動リセット）
@@ -1492,6 +1493,55 @@ def status_logging_loop():
                 socketio.emit('candle_update', _last_broadcast_payload)
                 print(f"📡 candle_update 再配信: crossover={_last_broadcast_payload.get('crossover')}")
 
+            # ===== 再エントリーロジック =====
+            # 条件: 再エントリーON + FULL_AUTO + クロス有効 + AI承認済み + ポジションなし
+            if _reentry_enabled and TRADING_MODE == "FULL_AUTO" and _last_broadcast_payload:
+                try:
+                    crossover = _last_broadcast_payload.get('crossover', '')
+                    ai_valid = _last_broadcast_payload.get('ai_valid', False)
+                    entry_px = float(_last_broadcast_payload.get('latest_close', 0))
+                    db_id = _last_broadcast_payload.get('db_id')
+
+                    VALID_CROSS = ('UP_CROSS', 'DOWN_CROSS', 'RANGE_SHORT', 'RANGE_LONG',
+                                   'BREAKOUT_DIRECT', 'BREAKOUT_RETEST', 'SUPPORT_BOUNCE')
+                    if crossover in VALID_CROSS and ai_valid and entry_px > 0:
+                        # オープンポジション確認
+                        pos_resp = req.get(
+                            f"{SUPABASE_URL}/rest/v1/trades",
+                            params={"status": "eq.OPEN"},
+                            headers=supabase_headers(), timeout=5
+                        )
+                        open_pos = pos_resp.json() if pos_resp.ok else []
+
+                        if not open_pos:
+                            direction = "BUY" if crossover in ('UP_CROSS', 'BREAKOUT_DIRECT', 'BREAKOUT_RETEST', 'SUPPORT_BOUNCE') else "SELL"
+                            if _hybrid_sl_config.get("enabled"):
+                                init_sl = _hybrid_sl_config["initial_sl_price"]
+                                init_tp = _hybrid_sl_config.get("initial_tp_price", 15.0)
+                                trail_w = _hybrid_sl_config["trailing_sl_price"]
+                                if direction == "BUY":
+                                    sl = round(entry_px - init_sl, 2)
+                                    tp = round(entry_px + init_tp, 2)
+                                else:
+                                    sl = round(entry_px + init_sl, 2)
+                                    tp = round(entry_px - init_tp, 2)
+                                trail_pips = max(1, int(round(trail_w / 0.1)))
+                            else:
+                                sl = _last_broadcast_payload.get('ai_sl_suggestion')
+                                tp = _last_broadcast_payload.get('ai_tp_suggestion')
+                                trail_pips = 15
+                            mt5_result = send_mt5_order(
+                                signal_id=db_id, direction=direction,
+                                entry_price=entry_px, sl_price=sl, tp_price=tp,
+                                trailing_stop_pips=trail_pips
+                            )
+                            log_system("INFO", f"🔄 再エントリー実行: {direction} @{entry_px} SL={sl} TP={tp} (crossover={crossover})")
+                            socketio.emit('signal', {**_last_broadcast_payload, 'auto_executed': True})
+                        else:
+                            print(f"⏭️ 再エントリースキップ: ポジション保有中 ({len(open_pos)}件)")
+                except Exception as re_err:
+                    print(f"⚠️ 再エントリーエラー: {re_err}")
+
         except Exception as e:
             print(f"❌ Status logging error: {e}")
 
@@ -2394,6 +2444,21 @@ def hybrid_sl_settings():
             "hybrid_sl": _hybrid_sl_config,
             "message": "ハイブリッドSL設定が更新されました"
         })
+
+@app.route("/api/settings/reentry", methods=["GET", "POST", "OPTIONS"])
+def reentry_settings():
+    """再エントリー設定（クロス継続中にポジションなし時に自動再エントリー）"""
+    global _reentry_enabled
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if request.method == "GET":
+        return jsonify({"enabled": _reentry_enabled})
+    data = request.get_json() or {}
+    old = _reentry_enabled
+    _reentry_enabled = bool(data.get("enabled", False))
+    if old != _reentry_enabled:
+        log_system("INFO", f"⚙️ 再エントリー設定: {'ON' if _reentry_enabled else 'OFF'}")
+    return jsonify({"status": "ok", "enabled": _reentry_enabled})
 
 @app.route("/health", methods=["GET"])
 def health():
