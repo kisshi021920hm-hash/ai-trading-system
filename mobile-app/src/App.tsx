@@ -142,6 +142,9 @@ export default function App() {
   const [vibGap, setVibGap] = useState<number>(() => {
     try { return parseInt(localStorage.getItem("gt_vib_gap") ?? "150"); } catch { return 150; }
   });
+  const settingsOpenRef = useRef(settingsOpen);
+  useEffect(() => { settingsOpenRef.current = settingsOpen; }, [settingsOpen]);
+
   const vibDurationRef = useRef(vibDuration);
   const vibCountRef = useRef(vibCount);
   const vibGapRef = useRef(vibGap);
@@ -302,15 +305,18 @@ export default function App() {
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    // クロスなし（EA稼働中の定期更新）
+    // クロスなし（EA稼働中の定期更新）- 設定パネル開中は更新停止
     socket.on("candle_update", (data: Signal) => {
+      if (settingsOpenRef.current) return;
       setSignal(data);
       setHistory((prev) => [data, ...prev].slice(0, 50));
     });
 
     socket.on("signal", (data: Signal) => {
-      setSignal(data);
-      setHistory((prev) => [data, ...prev].slice(0, 50));
+      if (!settingsOpenRef.current) {
+        setSignal(data);
+        setHistory((prev) => [data, ...prev].slice(0, 50));
+      }
 
       if (data.crossover) {
         // 振動（アプリが前面にある場合）
@@ -884,6 +890,9 @@ export default function App() {
         <div style={styles.overlay}>
           <div style={styles.settingsPanel}>
             <h2 style={styles.settingsTitle}>⚙️ 設定</h2>
+            <div style={{ background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 6, padding: "6px 10px", fontSize: 11, color: "#93c5fd", marginBottom: 12, textAlign: "center" as const }}>
+              ⏸ 設定中はシグナル自動更新を停止中
+            </div>
 
             {/* 自動化モード（最上部に配置） */}
             <div style={styles.settingsSection}>
