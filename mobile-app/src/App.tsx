@@ -85,7 +85,7 @@ interface TodayStats {
 
 // ==================== 設定 ====================
 // v3B-rebuild
-const APP_VERSION = "1.27";
+const APP_VERSION = "1.28";
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -121,7 +121,7 @@ export default function App() {
     try { return (localStorage.getItem("gt_mode") as any) ?? "PRODUCTION"; } catch { return "PRODUCTION"; }
   });
   const [crossoverMode, setCrossoverMode] = useState<"RSI" | "MACD" | "RSI_MACD" | "COMPOSITE">(() => {
-    try { return (localStorage.getItem("gt_crossover") as any) ?? "RSI"; } catch { return "RSI"; }
+    try { return (localStorage.getItem("gt_crossover") as any) ?? "COMPOSITE"; } catch { return "COMPOSITE"; }
   });
   const [tradingMode, setTradingMode] = useState<"MANUAL" | "SEMI_AUTO" | "FULL_AUTO" | "AI_CLOSE_MODE">(() => {
     try { return (localStorage.getItem("gt_trading_mode") as any) ?? "MANUAL"; } catch { return "MANUAL"; }
@@ -147,7 +147,7 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
   const [vibDuration, setVibDuration] = useState<number>(() => {
-    try { return parseInt(localStorage.getItem("gt_vib_duration") ?? "800"); } catch { return 800; }
+    try { return parseInt(localStorage.getItem("gt_vib_duration") ?? "700"); } catch { return 700; }
   });
   const [vibCount, setVibCount] = useState<number>(() => {
     try { return parseInt(localStorage.getItem("gt_vib_count") ?? "3"); } catch { return 3; }
@@ -160,10 +160,11 @@ export default function App() {
     trailing_trigger_price: 5,
     trailing_sl_price: 3,
     initial_tp_price: 15,
-    enabled: true,
+    enabled: false,   // 推奨: OFF（Gemini任せ）
   });
-  const [reentryEnabled, setReentryEnabled] = useState(false);
-  const [aiExitEnabled, setAiExitEnabled] = useState(false);
+  const [reentryEnabled, setReentryEnabled] = useState(true);       // 推奨: ON
+  const [aiExitEnabled, setAiExitEnabled] = useState(true);         // 推奨: ON
+  const [rsiFilterEnabled, setRsiFilterEnabled] = useState(true);   // 推奨: ON (RSI<35スキップ)
 
   const tradingModeRef = useRef(tradingMode);
   useEffect(() => { tradingModeRef.current = tradingMode; }, [tradingMode]);
@@ -279,6 +280,10 @@ export default function App() {
       // 5分AI決済監視設定を取得
       fetch(`${RENDER_URL}/api/settings/ai-exit`).then(r => r.json()).then(cfg => {
         if (cfg && typeof cfg.enabled === "boolean") setAiExitEnabled(cfg.enabled);
+      }).catch(() => {});
+      // RSIフィルター設定を取得
+      fetch(`${RENDER_URL}/api/settings/rsi-filter`).then(r => r.json()).then(cfg => {
+        if (cfg && typeof cfg.enabled === "boolean") setRsiFilterEnabled(cfg.enabled);
       }).catch(() => {});
       // 最新シグナルとS/R水準のみ取得
       try {
@@ -456,6 +461,10 @@ export default function App() {
         fetch(`${RENDER_URL}/api/settings/ai-exit`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ enabled: aiExitEnabled }),
+        }).catch(() => {}),
+        fetch(`${RENDER_URL}/api/settings/rsi-filter`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: rsiFilterEnabled }),
         }).catch(() => {}),
       ]);
       try {

@@ -48,7 +48,7 @@ _hybrid_sl_config = {
     "trailing_trigger_price": 5.0,  # トレーリング開始（エントリーから 5$/oz 有利方向）
     "trailing_sl_price": 3.0,       # トレーリングSL幅（最高値/最安値から 3$/oz 戻し）
     "initial_tp_price": 15.0,       # 初期TP（エントリーから 15$/oz 利確目標）
-    "enabled": True                 # ON=設定値を絶対使用 / OFF=Gemini提案+固定fallback
+    "enabled": False                # 推奨OFF=Gemini任せ（動的SL/TP）/ ON=固定値を使用
 }
 
 # トレード自動化設定
@@ -91,8 +91,9 @@ _position_monitor_last = 0.0  # ポジション監視最終実行時刻
 _last_ea_signal_time = 0.0   # EAから/ea-signalを最後に受信した時刻（signal_loopスキップ判定用）
 _ea_latest_scores: dict = {}  # EAから受信した最新スコア（ハートビート経由）
 _last_broadcast_payload: dict = {}  # 最後にsocketへ配信したシグナルデータ（5分再配信用）
-_reentry_enabled: bool = False     # クロス継続中にポジションなしで再エントリーするか
-_ai_exit_enabled: bool = False     # 5分ごとにGeminiでポジション決済判断するか
+_reentry_enabled: bool = True      # 推奨ON: クロス継続中にポジションなしで再エントリー
+_ai_exit_enabled: bool = True      # 推奨ON: 5分ごとにGeminiでポジション決済判断
+_rsi_filter_enabled: bool = True   # 推奨ON: RSI<35のシグナルをスキップ（勝率+3.3%実証）
 _ea_signal_dedup: dict = {}  # 重複防止キャッシュ {crossover: last_time}
 _force_close_pending = False   # AI_CLOSE_MODE: Gemini決済指示フラグ
 _force_close_set_time = 0.0    # フラグをセットした時刻（120秒後に自動リセット）
@@ -2523,6 +2524,22 @@ def reentry_settings():
         log_system("INFO", f"⚙️ 再エントリー設定: {'ON' if _reentry_enabled else 'OFF'}")
     return jsonify({"status": "ok", "enabled": _reentry_enabled})
 
+@app.route("/api/settings/rsi-filter", methods=["GET", "POST", "OPTIONS"])
+def rsi_filter_settings():
+    """①RSIフィルター設定（RSI<35のシグナルをスキップ）"""
+    global _rsi_filter_enabled
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if request.method == "GET":
+        return jsonify({"enabled": _rsi_filter_enabled})
+    data = request.get_json() or {}
+    old = _rsi_filter_enabled
+    _rsi_filter_enabled = bool(data.get("enabled", True))
+    if old != _rsi_filter_enabled:
+        log_system("INFO", f"⚙️ RSIフィルター: {'ON' if _rsi_filter_enabled else 'OFF'}")
+    return jsonify({"status": "ok", "enabled": _rsi_filter_enabled})
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "time": datetime.now(timezone.utc).isoformat(), "mode": "yahoo-finance"})
@@ -2963,6 +2980,16 @@ def ea_signal_push():
                         'BREAKOUT_DIRECT', 'BREAKOUT_RETEST', 'SUPPORT_BOUNCE')
     if crossover not in VALID_CROSSOVERS:
         return jsonify({"error": f"Invalid crossover: {crossover}"}), 400
+
+    # ==================== バックテスト実証フィルター ====================
+    ea_rsi = float(ea_data.get('rsi', 50) or 50)
+
+    # ①RSIフィルター: RSI<35のシグナルはスキップ（バックテスト実証: 勝率43%→損切原因）
+    if _rsi_filter_enabled and ea_rsi < 35:
+        msg = f"⏭️ RSIフィルター適用: RSI={ea_rsi:.1f}<35 → シグナルスキップ"
+        print(msg)
+        log_system("INFO", msg)
+        return jsonify({"status": "filtered", "reason": "RSI_TOO_LOW", "rsi": ea_rsi}), 200
 
     # ① 重複防止: 同一キャンドル内の同方向シグナルはスキップ
     # TIMEFRAME * 60 - 30秒 以内の同方向は「同キャンドルの再送」として扱う
