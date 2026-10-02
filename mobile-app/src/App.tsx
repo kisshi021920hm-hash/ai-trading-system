@@ -849,7 +849,7 @@ export default function App() {
               {tradingMode === "AI_CLOSE_MODE" && (
                 <div style={{ marginTop: 10, padding: "8px 12px", background: "#7f1d1d", borderRadius: 6, fontSize: 12, color: "#fca5a5" }}>
                   🤖 <b>Gemini判定</b>でエントリー（信頼度 60% 以上）<br/>
-                  🤖 <b>15分ごとGemini監視</b>、決済判断も全てGemini<br/>
+                  🤖 <b>クロス発生ごと</b>にGemini決済判断（60秒クールダウン）<br/>
                   🤖 決済指示はEAへ自動送信（force_close）
                 </div>
               )}
