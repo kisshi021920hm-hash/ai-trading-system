@@ -300,7 +300,7 @@ export default function App() {
           fetch(`${RENDER_URL}/api/settings/range-mode`, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ use_range_mode: (localStorage.getItem("gt_use_range_mode") ?? "false") === "true" }),
-          }),
+          }).catch(() => {}),
         ]);
 
         setTf(savedTf);
@@ -436,7 +436,7 @@ export default function App() {
         fetch(`${RENDER_URL}/api/settings/range-mode`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ use_range_mode: useRangeMode }),
-        }),
+        }).catch(() => {}),  // 新エンドポイント: デプロイ中でも保存失敗にしない
       ]);
       try {
         localStorage.setItem("gt_tf", String(tf));
