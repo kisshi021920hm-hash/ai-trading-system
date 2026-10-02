@@ -882,6 +882,49 @@ ADX={comp.get('adx')} DI+={comp.get('di_plus')} DI-={comp.get('di_minus')} ATR={
         return {'valid': False, 'confidence': 0, 'reason': str(e)[:200],
                 'sl_suggestion': None, 'tp_suggestion': None, 'key_level': ''}
 
+# ==================== レジスタンス・サポート水準計算 ====================
+def find_key_levels(highs, lows, current_price, n_swing=3, max_levels=3):
+    """直近スイングポイントからレジスタンス・サポート水準を返す"""
+    resistance = []
+    support = []
+    n = len(highs)
+    for i in range(n_swing, n - n_swing):
+        window = list(range(i - n_swing, i + n_swing + 1))
+        if all(highs[i] >= highs[j] for j in window if j != i):
+            if highs[i] > current_price:
+                resistance.append(round(highs[i], 2))
+        if all(lows[i] <= lows[j] for j in window if j != i):
+            if lows[i] < current_price:
+                support.append(round(lows[i], 2))
+    resistance = sorted(set(resistance))[:max_levels]
+    support = sorted(set(support), reverse=True)[:max_levels]
+    return resistance, support
+
+
+def format_key_level_context(resistance_levels, support_levels, current_price, crossover=None):
+    """レジスタンス・サポート水準をプロンプト用テキストに整形"""
+    if not resistance_levels and not support_levels:
+        return ""
+    ctx = "\n【直近レジスタンス・サポート水準】"
+    for r in resistance_levels:
+        dist = r - current_price
+        warn = " ⚠️ 近接！エントリー慎重" if dist < 8 else ""
+        ctx += f"\n  レジスタンス: ${r:.2f}（現在から+{dist:.1f}pips）{warn}"
+    for s in support_levels:
+        dist = current_price - s
+        note = " ✅ サポート確認なら反発期待" if dist < 8 else ""
+        ctx += f"\n  サポート: ${s:.2f}（現在から-{dist:.1f}pips）{note}"
+    if crossover == "UP_CROSS" and resistance_levels:
+        dist = resistance_levels[0] - current_price
+        if dist < 8:
+            ctx += f"\n  ⚠️ レジスタンス${resistance_levels[0]:.2f}まで{dist:.1f}pips。壁で跳ね返るリスク大。信頼度を下げてください。"
+    elif crossover == "DOWN_CROSS" and support_levels:
+        dist = current_price - support_levels[0]
+        if dist < 8:
+            ctx += f"\n  ⚠️ サポート${support_levels[0]:.2f}まで{dist:.1f}pips。底で反転するリスク大。信頼度を下げてください。"
+    return ctx
+
+
 # ==================== EA リアルタイムシグナル Gemini 分析（Phase 9）====================
 def gemini_analyze_ea_signal(ea_data, open_positions=None):
     """EAからのMT5リアルタイム指標データをGemini分析（Yahoo Finance不要）"""
@@ -962,6 +1005,14 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
         trend_direction = "📈 上昇傾向" if is_uptrend else "📉 下降傾向"
         technical_analysis += f"\n【過去5足の方向】{trend_direction}"
 
+    # レジスタンス・サポート水準計算
+    key_level_context = ""
+    if candle_history and len(candle_history) >= 10:
+        highs = [float(c.get('high', c.get('close', 0))) for c in candle_history]
+        lows  = [float(c.get('low',  c.get('close', 0))) for c in candle_history]
+        res_levels, sup_levels = find_key_levels(highs, lows, current_price)
+        key_level_context = format_key_level_context(res_levels, sup_levels, current_price, crossover)
+
     prompt = f"""あなたはゴールド（XAUUSD）の上級テクニカルアナリストです。
 MT5のリアルタイムデータから計算された複合テクニカル指標を総合分析し、このシグナルの有効性を判定してください。
 
@@ -973,13 +1024,16 @@ MT5のリアルタイムデータから計算された複合テクニカル指�
 【指標（MT5リアルタイム）】
 EMA20={ea_data.get('ema20')} EMA50={ea_data.get('ema50')} EMA200={ea_data.get('ema_long')}
 ストキャスK={ea_data.get('stoch_k')} D={ea_data.get('stoch_d')}
-DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr')}{technical_analysis}{trade_context}{position_context}
+DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr')}{technical_analysis}{key_level_context}{trade_context}{position_context}
 
 【判定基準】
 1. RSI が 70 以上（買い信号時）または 30 以下（売り信号時）の場合は反転警戒
 2. MACD ヒストグラムがシグナルと逆方向に向かっていたら勢い衰退の兆候
 3. ADX < 20 の場合は弱いトレンドなので信頼度を下げる
 4. ボラティリティが極度に高い場合は危険性を考慮
+5. レジスタンス8pips以内でのUP_CROSSは信頼度を大幅に下げる（壁で跳ね返るリスク）
+6. サポート確認後のUP_CROSSは信頼度を上げる（底値確認・反発期待）
+7. サポート8pips以内でのDOWN_CROSSは信頼度を大幅に下げる（底で反転するリスク）
 
 以下のJSON形式のみで回答:
 {{"valid": true/false, "confidence": 0-100, "reason": "100文字以内", "sl_suggestion": SL価格(数値)またはnull, "tp_suggestion": TP価格(数値)またはnull, "key_level": "注目水準50文字以内"}}"""
@@ -1124,6 +1178,13 @@ def gemini_monitor_position(position, df):
     recent = df.tail(20)[['time', 'open', 'high', 'low', 'close']].copy()
     recent['time'] = recent['time'].astype(str)
 
+    # レジスタンス・サポート水準計算（直近50本）
+    highs50 = df['high'].tolist()[-50:]
+    lows50  = df['low'].tolist()[-50:]
+    res_levels, sup_levels = find_key_levels(highs50, lows50, current_price)
+    close_crossover = "UP_CROSS" if direction == "BUY" else "DOWN_CROSS"
+    key_level_context = format_key_level_context(res_levels, sup_levels, current_price, close_crossover)
+
     prompt = f"""あなたはゴールド（XAUUSD）の上級リスク管理の専門家です。
 現在保有中のポジションを分析し、リスクを評価してください。
 
@@ -1141,13 +1202,15 @@ EMA20={comp_data.get('ema20', 'N/A')} / EMA50={comp_data.get('ema50', 'N/A')}
 買いスコア: {comp_data.get('buy_score', 'N/A')} vs 売りスコア: {comp_data.get('sell_score', 'N/A')}
 買い根拠: {', '.join(comp_data.get('buy_reasons', []))}
 売り根拠: {', '.join(comp_data.get('sell_reasons', []))}
+{key_level_context}
 【直近20本の価格データ（M15）】{json.dumps(recent.to_dict(orient='records'), ensure_ascii=False)}
 
 以下のJSON形式のみで回答してください:
 {{"risk": "HIGH/MEDIUM/LOW", "action": "CLOSE/HOLD", "reason": "100文字以内"}}
-- HIGH: 即座に決済を強く推奨（逆行リスク大・SLブレイクの危険）
+- HIGH: 即座に決済を強く推奨（逆行リスク大・SLブレイクの危険・レジスタンス近接）
 - MEDIUM: 注意が必要（状況悪化の可能性、監視継続）
-- LOW: ポジション維持問題なし"""
+- LOW: ポジション維持問題なし
+※ BUY保有中でレジスタンス近接（5pips以内）の場合はHIGH/CLOSEを強く推奨"""
 
     try:
         text = _gemini_generate(prompt, max_retries=0)
