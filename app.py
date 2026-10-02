@@ -1096,6 +1096,20 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
                 f"\n  ・valid=true / confidence=65以上を推奨"
             )
 
+    # サポートブレイクダウン直接検出（クロスと同時にサポートを下抜け）
+    if ea_data.get('support_breakdown_direct'):
+        broken_sup = float(ea_data.get('broken_support', 0))
+        dist = broken_sup - current_price if broken_sup > 0 else 0
+        key_level_context += (
+            f"\n\n⭐⭐⭐【サポートブレイクダウン直接検出】今まさにサポートを下抜けました！"
+            f"\n  ・突破したサポート水準: ${broken_sup:.2f}（現在価格から+{dist:.1f}pips上）"
+            f"\n  ・この足でサポートを明確に下抜け → 強気ベアリッシュブレイクダウンシグナル"
+            f"\n  ・旧サポートが即時レジスタンスに転換する可能性が非常に高い"
+            f"\n  ・ユーザーが最も積極的にSELLエントリーしたい場面の一つです"
+            f"\n  ・ADXが弱くてもブレイクダウンは有効な場合が多い"
+            f"\n  ・valid=true かつ confidence=75以上を強く推奨します"
+        )
+
     # ブレイクアウト直接検出（クロスと同時にレジスタンスを上抜け）
     if ea_data.get('breakout_direct'):
         broken_res = float(ea_data.get('broken_resistance', 0))

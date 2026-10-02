@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
-//|  GOLD AI Trader EA  v1.35                                        |
+//|  GOLD AI Trader EA  v1.36                                        |
 //|  Render API + Gemini AI シグナルによる自動売買                      |
 //|  対象: XAUUSD (GOLD) M15                                         |
 //|  決済: 逆クロスでドテン（SL/TPでも決済）                             |
 //|  v1.25: ハイブリッドSL + 含み損自動決済 + トレーリング実装             |
 //+------------------------------------------------------------------+
 #property copyright "GOLD AI Trader"
-#property version   "1.35"
+#property version   "1.36"
 
 //--- 入力パラメータ
 input string   API_BASE         = "https://ai-trading-system-81jb.onrender.com";
@@ -64,6 +64,10 @@ string g_latest_crossover  = "NONE";  // 最新のクロスオーバー方向（
 double   g_broken_resistance      = 0.0;  // ブレイクアウトしたレジスタンス水準（0=未ブレイク）
 datetime g_broken_resistance_time = 0;    // ブレイクアウト検出時刻（有効期限管理）
 
+//--- サポートブレイクダウン追跡（v1.36新機能）
+double   g_broken_support      = 0.0;  // ブレイクダウンしたサポート水準（0=未ブレイク）
+datetime g_broken_support_time = 0;    // ブレイクダウン検出時刻
+
 //--- ハイブリッドSL設定キャッシュ（価格差 $/oz 単位・ロット非依存）
 double   g_cached_initial_sl_price       = 2.0;   // エントリーからSLまでの価格差 ($/oz)
 double   g_cached_trailing_trigger_price = 2.0;   // トレーリング開始の価格上昇幅 ($/oz)
@@ -73,7 +77,7 @@ datetime g_last_hybrid_sl_fetch          = 0;     // 最後にFlaskから取得�
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    Print("=== GOLD AI Trader EA v1.35 起動 ===");
+    Print("=== GOLD AI Trader EA v1.36 起動 ===");
     Print("API: ", API_URL);
     Print("ポーリング: ", POLL_SECONDS, "秒  最低信頼度: ", MIN_CONFIDENCE,
           "%  AI承認必須: ", REQUIRE_AI_VALID);
@@ -199,7 +203,8 @@ void PushSignalToServer(string crossover, double close_price,
                         string buy_reasons, string sell_reasons,
                         bool support_bounce = false, double support_level_price = 0.0,
                         bool breakout_retest = false, double broken_resistance_price = 0.0,
-                        bool breakout_direct = false)
+                        bool breakout_direct = false,
+                        bool support_breakdown = false, double broken_support_price = 0.0)
 {
     // 過去20本のローソク足データを取得（テクニカル強化用）
     MqlRates rates[20];
@@ -250,7 +255,9 @@ void PushSignalToServer(string crossover, double close_price,
         + ",\"support_level\":"       + DoubleToString(support_level_price, 2)
         + ",\"breakout_retest\":"     + (breakout_retest ? "true" : "false")
         + ",\"broken_resistance\":"   + DoubleToString(broken_resistance_price, 2)
-        + ",\"breakout_direct\":"     + (breakout_direct ? "true" : "false")
+        + ",\"breakout_direct\":"          + (breakout_direct ? "true" : "false")
+        + ",\"support_breakdown_direct\":" + (support_breakdown ? "true" : "false")
+        + ",\"broken_support\":"           + DoubleToString(broken_support_price, 2)
         + "}";
 
     string headers = "Content-Type: application/json\r\n";
@@ -324,6 +331,31 @@ bool DetectResistanceBreakout(double cur_close, double prev_close, double &broke
         if (prev_close < high_i && cur_close > high_i)
         {
             broken_level = high_i;
+            return true;
+        }
+    }
+    return false;
+}
+
+// サポートブレイクダウン検出（前足がサポート以上 → 現足が下抜け）
+bool DetectSupportBreakdown(double cur_close, double prev_close, double &broken_level)
+{
+    int bars = 50, swing_len = 3;
+    for (int i = swing_len + 1; i < bars - swing_len; i++)
+    {
+        double low_i = iLow(_Symbol, PERIOD_M15, i);
+        if (low_i >= prev_close) continue;  // 前足がすでにこのサポートを下回っていたらスキップ
+        bool is_swing_low = true;
+        for (int j = i - swing_len; j <= i + swing_len; j++)
+        {
+            if (j == i) continue;
+            if (iLow(_Symbol, PERIOD_M15, j) < low_i) { is_swing_low = false; break; }
+        }
+        if (!is_swing_low) continue;
+        // 前足がサポート以上 → 現足がサポートを下抜け
+        if (prev_close > low_i && cur_close < low_i)
+        {
+            broken_level = low_i;
             return true;
         }
     }
@@ -490,13 +522,20 @@ void ComputeAndPushSignal()
 
                 if (range_signal != "" && !range_same)
                 {
-                    // ブレイクアウト検出時はレンジシグナルを無効化（ガード）
+                    // ブレイクアウト/ブレイクダウン検出時はレンジシグナルを無効化（ガード）
                     double prev_close_val2 = iClose(_Symbol, PERIOD_M15, 1);
                     double bo_check = 0;
+                    bool range_blocked = false;
                     if (range_signal == "RANGE_SHORT" &&
                         DetectResistanceBreakout(cur_close, prev_close_val2, bo_check))
+                        range_blocked = true;
+                    if (range_signal == "RANGE_LONG" &&
+                        DetectSupportBreakdown(cur_close, prev_close_val2, bo_check))
+                        range_blocked = true;
+
+                    if (range_blocked)
                     {
-                        // ブレイクアウト中のレンジ売りは無効
+                        // ブレイクアウト/ブレイクダウン中のレンジシグナルは無効
                     }
                     else
                     {
@@ -549,7 +588,35 @@ void ComputeAndPushSignal()
                 }
             }
 
-            // ② ブレイクアウト→リテスト検出（優先: 最も強いシグナル）
+            // ③ サポートブレイクダウン単独検出（クロスなしでも即時エントリーシグナル）
+            {
+                double prev_close_val = iClose(_Symbol, PERIOD_M15, 1);
+                double bd_broken_lvl  = 0;
+                static datetime s_last_breakdown_push_time = 0;
+                if (DetectSupportBreakdown(cur_close, prev_close_val, bd_broken_lvl)
+                    && TimeCurrent() - s_last_breakdown_push_time >= SIGNAL_PUSH_INTERVAL)
+                {
+                    s_last_breakdown_push_time = TimeCurrent();
+                    g_broken_support       = bd_broken_lvl;
+                    g_broken_support_time  = TimeCurrent();
+                    Print("🔻 サポートブレイクダウン単独検出（クロスなし）: 水準=", DoubleToString(bd_broken_lvl, 2),
+                          " → Geminiへ即時通知");
+                    PushSignalToServer("DOWN_CROSS", cur_close, cur_open, cur_high, cur_low,
+                                       cur_rsi, cur_macd, cur_macd_sig,
+                                       cur_ema20, cur_ema50, cur_ema200,
+                                       cur_bb_upper, cur_bb_lower,
+                                       cur_stoch_k, cur_stoch_d,
+                                       cur_adx, cur_di_plus, cur_di_minus, cur_atr,
+                                       buy_score, sell_score, buy_reasons, sell_reasons,
+                                       false, 0.0, false, 0.0, false,
+                                       true, bd_broken_lvl);
+                    g_last_pushed_crossover = "BREAKDOWN_DIRECT";
+                    g_last_signal_push_time = TimeCurrent();
+                    return;
+                }
+            }
+
+            // ④ ブレイクアウト→リテスト検出（優先: 最も強いシグナル）
             if (g_broken_resistance > 0 && DetectBreakoutRetest(cur_close, cur_rsi, prev_rsi_val, cur_atr))
             {
                 static datetime s_last_retest_time = 0;
@@ -609,7 +676,7 @@ void ComputeAndPushSignal()
     if (crossover == g_last_pushed_crossover &&
         TimeCurrent() - g_last_signal_push_time < SIGNAL_PUSH_INTERVAL) return;
 
-    // ブレイクアウト検出をプッシュ前に実行（direct情報をGeminiに渡す）
+    // ブレイクアウト/ブレイクダウン検出をプッシュ前に実行（direct情報をGeminiに渡す）
     bool   is_direct_breakout = false;
     double direct_broken_lvl  = 0;
     if (crossover == "UP_CROSS")
@@ -625,13 +692,28 @@ void ComputeAndPushSignal()
         }
     }
 
+    bool   is_direct_breakdown = false;
+    double direct_broken_sup_lvl = 0;
+    if (crossover == "DOWN_CROSS")
+    {
+        double prev_close_val = iClose(_Symbol, PERIOD_M15, 1);
+        if (DetectSupportBreakdown(cur_close, prev_close_val, direct_broken_sup_lvl))
+        {
+            is_direct_breakdown  = true;
+            g_broken_support      = direct_broken_sup_lvl;
+            g_broken_support_time = TimeCurrent();
+            Print("🔻 サポートブレイクダウン直接検出: 水準=", DoubleToString(direct_broken_sup_lvl, 2),
+                  " → Geminiへ即時通知");
+        }
+    }
+
     // 過去のブレイクアウトが有効かつ価格がその上にいる場合もコンテキスト付与
     bool   has_broken_context = (!is_direct_breakout && g_broken_resistance > 0
                                  && cur_close > g_broken_resistance
                                  && (int)(TimeCurrent() - g_broken_resistance_time) < 192 * 900);
     double context_broken_lvl = has_broken_context ? g_broken_resistance : 0;
 
-    // サーバーにプッシュ（ブレイクアウト情報を含む）
+    // サーバーにプッシュ（ブレイクアウト/ブレイクダウン情報を含む）
     PushSignalToServer(crossover, cur_close, cur_open, cur_high, cur_low,
                        cur_rsi, cur_macd, cur_macd_sig,
                        cur_ema20, cur_ema50, cur_ema200,
@@ -641,7 +723,8 @@ void ComputeAndPushSignal()
                        buy_score, sell_score, buy_reasons, sell_reasons,
                        false, 0.0,
                        false, is_direct_breakout ? direct_broken_lvl : context_broken_lvl,
-                       is_direct_breakout);
+                       is_direct_breakout,
+                       is_direct_breakdown, is_direct_breakdown ? direct_broken_sup_lvl : 0.0);
 
     g_last_pushed_crossover = crossover;
     g_last_signal_push_time = TimeCurrent();
