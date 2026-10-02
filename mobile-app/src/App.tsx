@@ -83,7 +83,7 @@ interface TodayStats {
 
 // ==================== 設定 ====================
 // v3B-rebuild
-const APP_VERSION = "1.16";
+const APP_VERSION = "1.18";
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -142,8 +142,14 @@ export default function App() {
   const [vibGap, setVibGap] = useState<number>(() => {
     try { return parseInt(localStorage.getItem("gt_vib_gap") ?? "150"); } catch { return 150; }
   });
-  const settingsOpenRef = useRef(settingsOpen);
-  useEffect(() => { settingsOpenRef.current = settingsOpen; }, [settingsOpen]);
+  const [pauseSignalRefresh, setPauseSignalRefresh] = useState<boolean>(() => {
+    try { return localStorage.getItem("gt_pause_refresh") === "true"; } catch { return false; }
+  });
+  const pauseRefreshRef = useRef(pauseSignalRefresh);
+  useEffect(() => {
+    pauseRefreshRef.current = pauseSignalRefresh;
+    try { localStorage.setItem("gt_pause_refresh", String(pauseSignalRefresh)); } catch {}
+  }, [pauseSignalRefresh]);
 
   const vibDurationRef = useRef(vibDuration);
   const vibCountRef = useRef(vibCount);
@@ -305,15 +311,14 @@ export default function App() {
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
-    // クロスなし（EA稼働中の定期更新）- 設定パネル開中は更新停止
     socket.on("candle_update", (data: Signal) => {
-      if (settingsOpenRef.current) return;
+      if (pauseRefreshRef.current) return;
       setSignal(data);
       setHistory((prev) => [data, ...prev].slice(0, 50));
     });
 
     socket.on("signal", (data: Signal) => {
-      if (!settingsOpenRef.current) {
+      if (!pauseRefreshRef.current) {
         setSignal(data);
         setHistory((prev) => [data, ...prev].slice(0, 50));
       }
@@ -890,8 +895,27 @@ export default function App() {
         <div style={styles.overlay}>
           <div style={styles.settingsPanel}>
             <h2 style={styles.settingsTitle}>⚙️ 設定</h2>
-            <div style={{ background: "#1e3a5f", border: "1px solid #3b82f6", borderRadius: 6, padding: "6px 10px", fontSize: 11, color: "#93c5fd", marginBottom: 12, textAlign: "center" as const }}>
-              ⏸ 設定中はシグナル自動更新を停止中
+
+            {/* シグナル自動更新トグル */}
+            <div style={{ background: "#1e293b", border: `1px solid ${pauseSignalRefresh ? "#f59e0b" : "#334155"}`, borderRadius: 8, padding: "10px 14px", marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div>
+                <div style={{ fontSize: 13, color: "#cbd5e1", fontWeight: "bold" }}>シグナル自動更新</div>
+                <div style={{ fontSize: 11, color: "#64748b", marginTop: 2 }}>
+                  {pauseSignalRefresh ? "⏸ 一時停止中（手動確認モード）" : "▶ 更新中（通常動作）"}
+                </div>
+              </div>
+              <label style={{ position: "relative", display: "inline-block", width: 48, height: 26, cursor: "pointer" }}>
+                <input type="checkbox" checked={!pauseSignalRefresh} onChange={e => setPauseSignalRefresh(!e.target.checked)} style={{ opacity: 0, width: 0, height: 0 }} />
+                <span style={{
+                  position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+                  background: pauseSignalRefresh ? "#475569" : "#22c55e",
+                  borderRadius: 26, transition: "0.3s"
+                }} />
+                <span style={{
+                  position: "absolute", top: 3, left: pauseSignalRefresh ? 3 : 25, width: 20, height: 20,
+                  background: "#fff", borderRadius: "50%", transition: "0.3s"
+                }} />
+              </label>
             </div>
 
             {/* 自動化モード（最上部に配置） */}
