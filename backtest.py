@@ -1935,6 +1935,39 @@ def main():
         print(f"     最良:  勝率{best_h['win_rate']}%  取引{best_h['num_trades']}  "
               f"合計{best_h['total']:+.1f}$/oz  DD{best_h['max_dd']:+.1f}$/oz")
 
+    # ──── ⑤b-2 クロス転換SL5$ × スコア差フィルター ────
+    print(f"\n{'─' * 72}")
+    print("  ─ クロス転換SL5$ × スコア差フィルター ─")
+    print("  ※元の+696$/oz版（simulate_trades tp=999）にスコア差を適用")
+
+    flip_base_total = simulate_trades(df, apply_filters(df_sig, rsi_filter=True),
+                                      use_trailing=True)['pnl'].sum()
+
+    for gap in [0, 2, 3, 4]:
+        sig_g = apply_filters(df_sig, rsi_filter=True).copy()
+        if gap > 0:
+            score_diff = (sig_g['buy_score'] - sig_g['sell_score']).abs()
+            sig_g = sig_g[score_diff >= gap]
+        t_g = simulate_trades(df, sig_g, sl=SL_PIPS, tp=999.0, use_trailing=False)
+        if len(t_g) == 0:
+            print(f"  スコア差≥{gap}: シグナルなし"); continue
+        wins_g   = t_g[t_g['pnl'] > 0]
+        losses_g = t_g[t_g['pnl'] <= 0]
+        wr_g     = len(wins_g) / len(t_g) * 100
+        total_g  = t_g['pnl'].sum()
+        avg_w_g  = wins_g['pnl'].mean()   if len(wins_g)   > 0 else 0
+        avg_l_g  = losses_g['pnl'].mean() if len(losses_g) > 0 else 0
+        rr_g     = abs(avg_w_g / avg_l_g) if avg_l_g != 0 else 0
+        dd_g     = calc_max_drawdown(t_g)
+        diff_g   = total_g - flip_base_total
+        bar_w    = int(wr_g / 5); bar = "█" * bar_w + "░" * (20 - bar_w)
+        mark     = "✅" if total_g > flip_base_total else ("──" if gap == 0 else "❌")
+        hold_bars = (pd.to_datetime(t_g['exit_time']) - pd.to_datetime(t_g['entry_time'])).dt.total_seconds() / (15*60)
+        print(f"  {mark} スコア差≥{gap:<2}  [{bar}] {wr_g:5.1f}%  取引:{len(t_g):3d}  "
+              f"合計:{total_g:+8.1f}$/oz({diff_g:+.1f})  "
+              f"平均勝:{avg_w_g:+.1f}  平均負:{avg_l_g:+.1f}  RR:{rr_g:.2f}  DD:{dd_g:+.1f}  "
+              f"平均保有:{hold_bars.mean():.1f}本")
+
     # ──── ⑥a トレンド/レンジ別勝率 ────
     print(f"\n{'=' * 72}")
     print("  【⑥a トレンド/レンジ別 詳細分析】（①RSIフィルター適用）")
