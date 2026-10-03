@@ -1609,34 +1609,51 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
         Print("💡 デフォルト SL=", sl, " TP=", tp);
     }
 
-    //--- リスク率からロット自動計算（口座通貨を自動考慮）
-    double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
-    double risk_amount = balance * (RISK_PERCENT / 100.0);
-    double sl_distance = MathAbs(price - sl);
-    double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-    double tick_size  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-    string currency   = AccountInfoString(ACCOUNT_CURRENCY);
-    // XM JPY口座ではSYMBOL_TRADE_TICK_VALUEがUSD建て(≈1.0)で返るためUSJPYで換算
-    if (currency == "JPY" && tick_value < 50.0)
-    {
-        double usdjpy = SymbolInfoDouble("USDJPY", SYMBOL_BID);
-        if (usdjpy > 100.0) tick_value *= usdjpy;
-    }
-    double lot_size   = 0.01;
-    if (sl_distance <= 0.0 || tick_value <= 0.0 || tick_size <= 0.0)
-        Print("⚠️ ロット計算失敗（フォールバック0.01使用）: sl_distance=", sl_distance,
-              " tick_value=", tick_value, " tick_size=", tick_size);
-    if (sl_distance > 0.0 && tick_value > 0.0 && tick_size > 0.0)
-    {
-        double ticks_in_sl = sl_distance / tick_size;
-        lot_size = risk_amount / (ticks_in_sl * tick_value);
-    }
+    //--- ロット計算: クロス転換モードON時はアプリ設定の lot_trailing を固定使用
     double min_lot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double max_lot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
     double lot_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-    lot_size = MathMax(min_lot, MathMin(max_lot,
-                   MathFloor(lot_size / lot_step) * lot_step));
-    lot_size = NormalizeDouble(lot_size, 2);
+    double lot_size = 0.01;
+    string currency = AccountInfoString(ACCOUNT_CURRENCY);
+
+    if (g_cross_flip_enabled && g_lot_trailing > 0)
+    {
+        // アプリ設定の lot_trailing を固定ロットとして使用（トレーリングポジション用）
+        lot_size = MathMax(min_lot, MathMin(max_lot,
+                       MathFloor(g_lot_trailing / lot_step) * lot_step));
+        lot_size = NormalizeDouble(lot_size, 2);
+        Print("💰 固定ロット使用（アプリ設定）: lot_trailing=", g_lot_trailing, " → ロット:", lot_size);
+    }
+    else
+    {
+        //--- リスク率からロット自動計算（口座通貨を自動考慮）
+        double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
+        double risk_amount = balance * (RISK_PERCENT / 100.0);
+        double sl_distance = MathAbs(price - sl);
+        double tick_value  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+        double tick_size   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+        // XM JPY口座ではSYMBOL_TRADE_TICK_VALUEがUSD建て(≈1.0)で返るためUSJPYで換算
+        if (currency == "JPY" && tick_value < 50.0)
+        {
+            double usdjpy = SymbolInfoDouble("USDJPY", SYMBOL_BID);
+            if (usdjpy > 100.0) tick_value *= usdjpy;
+        }
+        if (sl_distance <= 0.0 || tick_value <= 0.0 || tick_size <= 0.0)
+            Print("⚠️ ロット計算失敗（フォールバック0.01使用）: sl_distance=", sl_distance,
+                  " tick_value=", tick_value, " tick_size=", tick_size);
+        if (sl_distance > 0.0 && tick_value > 0.0 && tick_size > 0.0)
+        {
+            double ticks_in_sl = sl_distance / tick_size;
+            lot_size = risk_amount / (ticks_in_sl * tick_value);
+        }
+        lot_size = MathMax(min_lot, MathMin(max_lot,
+                       MathFloor(lot_size / lot_step) * lot_step));
+        lot_size = NormalizeDouble(lot_size, 2);
+        double balance_disp = AccountInfoDouble(ACCOUNT_BALANCE);
+        Print("💰 残高:", balance_disp, currency,
+              " リスク:", NormalizeDouble(balance_disp * (RISK_PERCENT / 100.0), 2), currency,
+              " → ロット:", lot_size);
+    }
 
     // ======== 初期SLをアプリ設定値(価格差 $/oz)で上書き ========
     FetchHybridSlConfig();  // 最新設定を確認（キャッシュ済みなら即return）
@@ -1659,10 +1676,7 @@ void ExecuteOrder(ENUM_ORDER_TYPE order_type, double sl_price, double tp_price)
               " / Gemini/デフォルトSL=", sl, " → 既存SLの方が保護的");
     }
 
-    Print("💰 残高:", balance, currency,
-          " リスク:", NormalizeDouble(risk_amount, 2), currency,
-          " SL幅:", NormalizeDouble(sl_distance, 2),
-          " tick_value:", NormalizeDouble(tick_value, 4),
+    Print("💰 SL幅:", NormalizeDouble(MathAbs(price - sl), 2),
           " → ロット:", lot_size, " 最終SL:", sl);
 
     MqlTradeRequest req = {};
