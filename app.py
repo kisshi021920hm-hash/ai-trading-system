@@ -3270,6 +3270,177 @@ def health_check():
         }
     })
 
+@app.route("/api/claude-report", methods=["GET"])
+def claude_report():
+    """Claude専用・システム総合レポート（会話開始時に一発で全データ取得）"""
+    now = time.time()
+    now_dt = datetime.now(timezone.utc)
+    ea_alive = (_ea_last_heartbeat > 0 and now - _ea_last_heartbeat < 90)
+
+    # ===== 1. システム状態 =====
+    system_info = {
+        "server_uptime_hours": round((now - _server_start_time) / 3600, 1),
+        "time_jst": (now_dt + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M JST"),
+        "ea_alive": ea_alive,
+        "ea_last_heartbeat_ago_sec": round(now - _ea_last_heartbeat) if _ea_last_heartbeat else None,
+        "settings": {
+            "timeframe_min": TIMEFRAME_MINUTES,
+            "crossover_mode": CROSSOVER_MODE,
+            "trading_mode": TRADING_MODE,
+            "test_mode": TEST_MODE,
+            "reentry_enabled": _reentry_enabled,
+            "ai_exit_enabled": AI_EXIT_ENABLED if 'AI_EXIT_ENABLED' in dir() else None,
+        },
+        "gemini_model": GEMINI_MODELS[_current_gemini_model_index],
+        "gemini_model_switches": _gemini_stats["model_switches"],
+    }
+
+    # ===== 2. Gemini実績（セッション内） =====
+    total_calls = _gemini_stats["total_calls"]
+    close_called = _gemini_stats["close_called"]
+    gemini_info = {
+        "total_calls": total_calls,
+        "approved": _gemini_stats["approved"],
+        "rejected": _gemini_stats["rejected"],
+        "approval_rate_pct": round(_gemini_stats["approved"] / total_calls * 100, 1) if total_calls > 0 else 0,
+        "close_called": close_called,
+        "close_executed": _gemini_stats["close_executed"],
+        "close_rate_pct": round(_gemini_stats["close_executed"] / close_called * 100, 1) if close_called > 0 else 0,
+        "model_switches": _gemini_stats["model_switches"],
+        "last_direction": _last_gemini_direction or "なし",
+        "last_approved": _last_gemini_approved,
+    }
+
+    # ===== 3. 最新シグナル =====
+    latest_signal_info = None
+    if _ea_latest_scores:
+        latest_signal_info = {
+            "crossover": _ea_latest_scores.get("crossover"),
+            "buy_score": _ea_latest_scores.get("buy_score"),
+            "sell_score": _ea_latest_scores.get("sell_score"),
+            "adx": _ea_latest_scores.get("adx"),
+            "rsi": _ea_latest_scores.get("rsi"),
+            "latest_close": _ea_latest_scores.get("latest_close"),
+            "updated_at": _ea_latest_scores.get("updated_at"),
+        }
+
+    # ===== 4. Supabase取引実績（直近30件） =====
+    trade_summary = None
+    recent_trades_list = []
+    try:
+        from datetime import timedelta as _td
+        month_start = now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        trades_resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"select": "direction,profit_loss,status,entry_time,exit_time,notes",
+                    "order": "entry_time.desc", "limit": 30},
+            headers=supabase_headers(), timeout=8
+        )
+        all_trades = trades_resp.json() if trades_resp.ok else []
+        closed = [t for t in all_trades if t.get('status') in ('CLOSED_PROFIT', 'CLOSED_LOSS')]
+        open_t = [t for t in all_trades if t.get('status') == 'OPEN']
+        month_closed = [t for t in closed if (t.get('entry_time') or '') >= month_start]
+
+        wins = [t for t in closed if (t.get('profit_loss') or 0) > 0]
+        month_wins = [t for t in month_closed if (t.get('profit_loss') or 0) > 0]
+
+        profits = [float(t.get('profit_loss') or 0) for t in closed]
+        gross_profit = sum(p for p in profits if p > 0)
+        gross_loss = abs(sum(p for p in profits if p < 0))
+
+        trade_summary = {
+            "total_closed": len(closed),
+            "open_positions": len(open_t),
+            "win_rate_pct": round(len(wins) / len(closed) * 100, 1) if closed else 0,
+            "pf": round(gross_profit / gross_loss, 2) if gross_loss > 0 else None,
+            "net_profit_usd": round(gross_profit - gross_loss, 2),
+            "this_month_trades": len(month_closed),
+            "this_month_wins": len(month_wins),
+            "this_month_win_rate_pct": round(len(month_wins) / len(month_closed) * 100, 1) if month_closed else 0,
+            "this_month_profit_usd": round(sum(float(t.get('profit_loss') or 0) for t in month_closed), 2),
+            "best_trade_usd": round(max((float(t.get('profit_loss') or 0) for t in closed), default=0), 2),
+            "worst_trade_usd": round(min((float(t.get('profit_loss') or 0) for t in closed), default=0), 2),
+        }
+        recent_trades_list = [
+            {
+                "direction": t.get('direction'),
+                "profit_loss": round(float(t.get('profit_loss') or 0), 2),
+                "status": t.get('status'),
+                "entry_time": (t.get('entry_time') or '')[:16],
+                "type": "CROSS_FLIP" if "CROSS_FLIP" in (t.get('notes') or '') else "TRAILING",
+            }
+            for t in all_trades[:10]
+        ]
+    except Exception as e:
+        trade_summary = {"error": str(e)}
+
+    # ===== 5. バックテスト基準値との比較 =====
+    comparison = None
+    if trade_summary and "error" not in trade_summary and trade_summary["total_closed"] > 0:
+        actual_wr = trade_summary["win_rate_pct"]
+        actual_pf = trade_summary["pf"]
+        comparison = {
+            "baseline_win_rate": BACKTEST_BASELINE["win_rate"],
+            "actual_win_rate": actual_wr,
+            "win_rate_diff": round(actual_wr - BACKTEST_BASELINE["win_rate"], 1),
+            "baseline_est_pf": BACKTEST_BASELINE["est_pf"],
+            "actual_pf": actual_pf,
+            "assessment": (
+                "✅ バックテスト基準を上回っています" if actual_wr >= BACKTEST_BASELINE["win_rate"] else
+                "📊 データ蓄積中（まだ統計的に少ない）" if trade_summary["total_closed"] < 20 else
+                "⚠️ バックテスト基準を下回っています"
+            ),
+        }
+
+    # ===== 6. 健全性チェック（問題点の自動検出） =====
+    issues = []
+    suggestions = []
+    if not ea_alive:
+        issues.append("❌ EA未接続 - MT5が停止しているか通信エラーの可能性")
+    if _gemini_stats["model_switches"] >= 3:
+        issues.append(f"⚠️ Geminiモデル切替{_gemini_stats['model_switches']}回 - APIレート制限の可能性")
+    if trade_summary and "error" not in trade_summary:
+        if trade_summary["open_positions"] > 2:
+            issues.append(f"⚠️ オープンポジション{trade_summary['open_positions']}件 - 過多の可能性")
+        month_profit = trade_summary["this_month_profit_usd"]
+        if month_profit < -10:
+            issues.append(f"⚠️ 今月損益が{month_profit:.2f}$ - 戦略見直しを検討")
+        elif month_profit >= 65:
+            suggestions.append(f"🎉 今月目標$65達成！（現在{month_profit:.2f}$）ロット増加を検討できます")
+        wr = trade_summary["this_month_win_rate_pct"]
+        if trade_summary["this_month_trades"] >= 10 and wr < 45:
+            suggestions.append(f"今月勝率{wr}%（10件以上）- SL/TP設定やスコア閾値の見直しを推奨")
+
+    # ===== 7. 学習データ状況 =====
+    learning_stats = get_recent_trade_stats()
+    learning_info = None
+    if learning_stats:
+        learning_info = {
+            "sample_size": learning_stats["total"],
+            "reliability": "高（統計的に信頼できる）" if learning_stats["total"] >= 30 else
+                           "中（蓄積中）" if learning_stats["total"] >= 10 else "低（まだ少ない）",
+            "buy_win_rate_pct": learning_stats["buy_wr"],
+            "sell_win_rate_pct": learning_stats["sell_wr"],
+            "current_streak": f"{learning_stats['streak_type']} {learning_stats['streak']}連続" if learning_stats.get('streak') else None,
+            "session_win_rates": learning_stats.get("session_summary", {}),
+        }
+
+    return jsonify({
+        "_claude_note": "このエンドポイントはClaudeがシステム状態を自律的に把握するためのものです。会話開始時に参照してください。",
+        "generated_at": now_dt.isoformat(),
+        "system": system_info,
+        "gemini": gemini_info,
+        "latest_signal": latest_signal_info,
+        "trade_performance": trade_summary,
+        "recent_trades": recent_trades_list,
+        "vs_backtest": comparison,
+        "learning_data": learning_info,
+        "issues": issues,
+        "suggestions": suggestions,
+        "backtest_baseline": BACKTEST_BASELINE,
+    })
+
+
 @app.route("/ea-heartbeat", methods=["POST"])
 def ea_heartbeat():
     """MT5 EAからの定期ハートビート（生存確認・1分ごと）+ 最新スコア受信（v1.23）"""
