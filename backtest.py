@@ -1750,6 +1750,40 @@ def main():
         else:
             print(f"  → トレンド/レンジで大きな差なし。ADXフィルターの効果は限定的。")
 
+    # ──── ⑥a-2 レンジ相場BUYスキップ ────
+    print(f"\n{'─' * 72}")
+    print("  ─ レンジ相場(ADX<20)のBUYをスキップ ─")
+    print("  レンジ時BUY勝率50%=コイントス → スキップして損失を減らす")
+
+    _sig_rsi = apply_filters(df_sig, rsi_filter=True)
+    _base_total_rb = simulate_trades(df, _sig_rsi, use_trailing=True)['pnl'].sum()
+
+    _sig_skip20 = _sig_rsi[~((_sig_rsi['adx'] < 20) & (_sig_rsi['crossover'] == 'UP_CROSS'))].copy()
+    _sig_skip25 = _sig_rsi[~((_sig_rsi['adx'] < 25) & (_sig_rsi['crossover'] == 'UP_CROSS'))].copy()
+
+    scenarios_rb = [
+        ("①RSI（ベースライン）",              _sig_rsi),
+        ("①RSI + レンジBUYスキップ(ADX<20)",  _sig_skip20),
+        ("①RSI + レンジBUYスキップ(ADX<25)",  _sig_skip25),
+    ]
+
+    for lbl_rb, filtered_rb in scenarios_rb:
+        t_rb = simulate_trades(df, filtered_rb, use_trailing=True)
+        if len(t_rb) == 0: continue
+        wins_rb   = t_rb[t_rb['pnl'] > 0]
+        losses_rb = t_rb[t_rb['pnl'] <= 0]
+        wr_rb     = len(wins_rb) / len(t_rb) * 100
+        total_rb  = t_rb['pnl'].sum()
+        avg_w_rb  = wins_rb['pnl'].mean()   if len(wins_rb)   > 0 else 0
+        avg_l_rb  = losses_rb['pnl'].mean() if len(losses_rb) > 0 else 0
+        rr_rb     = abs(avg_w_rb / avg_l_rb) if avg_l_rb != 0 else 0
+        dd_rb     = calc_max_drawdown(t_rb)
+        diff_rb   = total_rb - _base_total_rb
+        bar_w     = int(wr_rb / 5); bar = "█" * bar_w + "░" * (20 - bar_w)
+        mark      = "✅" if total_rb > _base_total_rb else "❌"
+        print(f"  {mark} {lbl_rb:<38} [{bar}] {wr_rb:5.1f}%  取引:{len(t_rb):3d}  "
+              f"合計:{total_rb:+8.1f}$/oz({diff_rb:+.1f})  DD:{dd_rb:+.1f}  RR:{rr_rb:.2f}")
+
     # ──── ⑥b ADX/DI フィルター比較 ────
     print(f"\n{'=' * 72}")
     print("  【⑥b ADX/DI フィルター比較】（15分足 × 過去60日）")
