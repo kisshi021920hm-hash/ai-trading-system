@@ -1684,6 +1684,64 @@ def main():
                 improvement = f"  (前比: {diff:+.1f}$/oz)"
         print(f"    {row['scenario']:<40} | 勝率:{row['win_rate']:5.1f}% | 取引:{row['num_trades']:3.0f} | P&L:{row['total_pnl']:+7.1f}$/oz{improvement}")
 
+    # ──── ⑤b クロス転換決済戦略 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑤b クロス転換決済戦略】（トレーリングなし・TP無効）")
+    print("  エントリー: クロス発生  /  決済: 反対クロス or SL(-5$)")
+    print("─" * 72)
+
+    df_sig_flip = apply_filters(df_sig, rsi_filter=True)
+
+    flip_scenarios = [
+        ("①RSI+トレーリング（現状）",  True,   SL_PIPS, TP_PIPS),
+        ("クロス転換決済 SL5$",        False,  5.0,     999.0),
+        ("クロス転換決済 SL8$",        False,  8.0,     999.0),
+        ("クロス転換決済 SL10$",       False,  10.0,    999.0),
+        ("クロス転換決済 SLなし",       False,  999.0,   999.0),
+    ]
+
+    flip_base = None
+    for lbl_f, use_tr, sl_f, tp_f in flip_scenarios:
+        t_f = simulate_trades(df, df_sig_flip, sl=sl_f, tp=tp_f, use_trailing=use_tr)
+        if len(t_f) == 0: continue
+        wins_f   = t_f[t_f['pnl'] > 0]
+        losses_f = t_f[t_f['pnl'] <= 0]
+        wr_f     = len(wins_f) / len(t_f) * 100
+        total_f  = t_f['pnl'].sum()
+        avg_w_f  = wins_f['pnl'].mean()   if len(wins_f)   > 0 else 0
+        avg_l_f  = losses_f['pnl'].mean() if len(losses_f) > 0 else 0
+        rr_f     = abs(avg_w_f / avg_l_f) if avg_l_f != 0 else 0
+        dd_f     = calc_max_drawdown(t_f)
+        if flip_base is None:
+            flip_base = total_f
+        diff_f   = total_f - flip_base
+        bar_w    = int(wr_f / 5); bar = "█" * bar_w + "░" * (20 - bar_w)
+        mark     = "✅" if total_f > flip_base and lbl_f != flip_scenarios[0][0] else ("──" if lbl_f == flip_scenarios[0][0] else "❌")
+        # 決済理由の内訳
+        reasons_f = t_f['exit_reason'].value_counts().to_dict() if 'exit_reason' in t_f.columns else {}
+        reason_str = " ".join([f"{k}:{v}" for k, v in reasons_f.items()])
+        print(f"  {mark} {lbl_f:<30} [{bar}] {wr_f:5.1f}%  取引:{len(t_f):3d}  "
+              f"合計:{total_f:+8.1f}$/oz({diff_f:+.1f})  "
+              f"平均勝:{avg_w_f:+.1f} 平均負:{avg_l_f:+.1f}  RR:{rr_f:.2f}  DD:{dd_f:+.1f}")
+
+    # クロス転換決済の詳細（SL5$版）
+    t_flip = simulate_trades(df, df_sig_flip, sl=5.0, tp=999.0, use_trailing=False)
+    if len(t_flip) > 0:
+        t_flip['hold_bars'] = (pd.to_datetime(t_flip['exit_time']) - pd.to_datetime(t_flip['entry_time'])).dt.total_seconds() / (15*60)
+        t_flip['direction_lbl'] = t_flip['direction'].map({'UP_CROSS':'BUY','DOWN_CROSS':'SELL'})
+        wins_flip = t_flip[t_flip['pnl'] > 0]
+        losses_flip = t_flip[t_flip['pnl'] <= 0]
+        print(f"\n  ─ クロス転換決済 SL5$ 詳細 ─")
+        print(f"  平均保有バー数: 全体{t_flip['hold_bars'].mean():.1f}本  "
+              f"勝ち{wins_flip['hold_bars'].mean():.1f}本  負け{losses_flip['hold_bars'].mean():.1f}本")
+        print(f"  最大利益: {t_flip['pnl'].max():+.1f}$/oz  最大損失: {t_flip['pnl'].min():+.1f}$/oz")
+        for d, lbl in [("UP_CROSS","BUY"), ("DOWN_CROSS","SELL")]:
+            td = t_flip[t_flip['direction'] == d]
+            if len(td) == 0: continue
+            wd = td[td['pnl'] > 0]
+            print(f"  {lbl}: 勝率{len(wd)/len(td)*100:.1f}%  取引{len(td)}件  "
+                  f"合計{td['pnl'].sum():+.1f}$/oz  平均保有{td['hold_bars'].mean():.1f}本")
+
     # ──── ⑥a トレンド/レンジ別勝率 ────
     print(f"\n{'=' * 72}")
     print("  【⑥a トレンド/レンジ別 詳細分析】（①RSIフィルター適用）")
