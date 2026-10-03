@@ -165,6 +165,9 @@ export default function App() {
   const [reentryEnabled, setReentryEnabled] = useState(true);       // 推奨: ON
   const [aiExitEnabled, setAiExitEnabled] = useState(true);         // 推奨: ON
   const [rsiFilterEnabled, setRsiFilterEnabled] = useState(true);   // 推奨: ON (RSI<35スキップ)
+  const [crossFlipEnabled, setCrossFlipEnabled] = useState(false);  // クロス転換モード（デフォルトOFF）
+  const [lotTrailing, setLotTrailing]           = useState("0.3");  // トレーリングロット
+  const [lotCrossFlip, setLotCrossFlip]         = useState("0.1");  // クロス転換ロット
 
   const tradingModeRef = useRef(tradingMode);
   useEffect(() => { tradingModeRef.current = tradingMode; }, [tradingMode]);
@@ -284,6 +287,12 @@ export default function App() {
       // RSIフィルター設定を取得
       fetch(`${RENDER_URL}/api/settings/rsi-filter`).then(r => r.json()).then(cfg => {
         if (cfg && typeof cfg.enabled === "boolean") setRsiFilterEnabled(cfg.enabled);
+      }).catch(() => {});
+      // クロス転換設定を取得
+      fetch(`${RENDER_URL}/api/settings/cross-flip`).then(r => r.json()).then(cfg => {
+        if (cfg && typeof cfg.enabled === "boolean") setCrossFlipEnabled(cfg.enabled);
+        if (cfg && cfg.lot_trailing)   setLotTrailing(String(cfg.lot_trailing));
+        if (cfg && cfg.lot_cross_flip) setLotCrossFlip(String(cfg.lot_cross_flip));
       }).catch(() => {});
       // 最新シグナルとS/R水準のみ取得
       try {
@@ -468,6 +477,14 @@ export default function App() {
         fetch(`${RENDER_URL}/api/settings/rsi-filter`, {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ enabled: rsiFilterEnabled }),
+        }).catch(() => {}),
+        fetch(`${RENDER_URL}/api/settings/cross-flip`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: crossFlipEnabled,
+            lot_trailing: parseFloat(lotTrailing) || 0.3,
+            lot_cross_flip: parseFloat(lotCrossFlip) || 0.1,
+          }),
         }).catch(() => {}),
       ]);
       try {
@@ -1339,6 +1356,60 @@ export default function App() {
                   </span>
                 </label>
               </div>
+            </div>
+
+            {/* クロス転換モード */}
+            <div style={{ background: crossFlipEnabled ? "#0f2a1a" : "#1e293b", borderRadius: 10, padding: "12px 14px", marginBottom: 10, border: crossFlipEnabled ? "1px solid #22c55e" : "1px solid transparent" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <div style={{ fontSize: 13, color: "#f1f5f9", fontWeight: "bold" }}>🔀 クロス転換モード（長期）</div>
+                  <div style={{ fontSize: 11, color: "#64748b", marginTop: 3 }}>
+                    スコア差≥3 + DI方向一致で別ポジション追加<br/>
+                    反対クロスまで保持・SL5$固定（Magic:20261002）
+                  </div>
+                </div>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                  <span style={{ fontSize: 12, color: crossFlipEnabled ? "#22c55e" : "#64748b" }}>
+                    {crossFlipEnabled ? "ON" : "OFF"}
+                  </span>
+                  <span style={{ position: "relative", display: "inline-block", width: 44, height: 24 }}>
+                    <input type="checkbox" checked={crossFlipEnabled}
+                      onChange={e => setCrossFlipEnabled(e.target.checked)}
+                      style={{ opacity: 0, width: 0, height: 0 }} />
+                    <span style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0,
+                      background: crossFlipEnabled ? "#22c55e" : "#475569",
+                      borderRadius: 24, transition: "0.3s" }} />
+                    <span style={{ position: "absolute", top: 2, left: crossFlipEnabled ? 22 : 2,
+                      width: 20, height: 20, background: "#fff", borderRadius: "50%", transition: "0.3s" }} />
+                  </span>
+                </label>
+              </div>
+              {/* ロット設定（常に表示） */}
+              <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>トレーリング ロット</div>
+                  <input
+                    type="number" step="0.01" min="0.01" value={lotTrailing}
+                    onChange={e => setLotTrailing(e.target.value)}
+                    style={{ width: "100%", background: "#0f172a", color: "#f1f5f9", border: "1px solid #334155",
+                      borderRadius: 6, padding: "6px 8px", fontSize: 13, boxSizing: "border-box" }}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>クロス転換 ロット</div>
+                  <input
+                    type="number" step="0.01" min="0.01" value={lotCrossFlip}
+                    onChange={e => setLotCrossFlip(e.target.value)}
+                    style={{ width: "100%", background: "#0f172a", color: "#f1f5f9", border: "1px solid #334155",
+                      borderRadius: 6, padding: "6px 8px", fontSize: 13, boxSizing: "border-box" }}
+                  />
+                </div>
+              </div>
+              {crossFlipEnabled && (
+                <div style={{ marginTop: 8, padding: "6px 8px", background: "#052e16", borderRadius: 6, fontSize: 11, color: "#86efac" }}>
+                  ✅ 有効中: トレーリング{lotTrailing}lot + クロス転換{lotCrossFlip}lot で同時運用
+                </div>
+              )}
             </div>
 
             <hr style={styles.divider} />

@@ -74,6 +74,14 @@ double   g_cached_trailing_trigger_price = 2.0;   // トレーリング開始の
 double   g_cached_trailing_sl_price      = 1.5;   // トレーリングSL幅 ($/oz)
 datetime g_last_hybrid_sl_fetch          = 0;     // 最後にFlaskから取得した時刻
 
+//--- クロス転換モード設定キャッシュ
+bool     g_cross_flip_enabled    = false;   // クロス転換モードON/OFF
+double   g_lot_trailing          = 0.3;     // トレーリング用ロット
+double   g_lot_cross_flip        = 0.1;     // クロス転換用ロット
+int      g_score_gap_min         = 3;       // クロス転換発動スコア差閾値
+int      g_magic_cross_flip      = 20261002; // クロス転換ポジション用マジックナンバー
+datetime g_last_cross_flip_fetch = 0;
+
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -877,6 +885,34 @@ void PollAndTrade()
         return;
     }
 
+    //--- クロス転換設定を取得（60秒キャッシュ）
+    FetchCrossFlipConfig();
+
+    //--- クロス転換条件チェック（スコア差≥閾値 かつ DI方向一致）
+    int    score_diff    = MathAbs(g_latest_buy_score - g_latest_sell_score);
+    bool   di_buy_match  = (crossover == "UP_CROSS")   && (g_latest_buy_score > 0) &&
+                           (g_latest_sell_score >= 0);  // DI方向はサーバーのdi_plus/di_minusで判定
+    bool   di_sell_match = (crossover == "DOWN_CROSS") && (g_latest_sell_score > 0);
+
+    // サーバーから受信したDI+/DI-で方向確認（JSONからパース）
+    double server_di_plus  = JsonDouble(json, "\"di_plus\":");
+    double server_di_minus = JsonDouble(json, "\"di_minus\":");
+    bool   di_direction_ok = false;
+    if (server_di_plus > 0 || server_di_minus > 0)
+    {
+        di_direction_ok = (crossover == "UP_CROSS"   && server_di_plus  > server_di_minus) ||
+                          (crossover == "DOWN_CROSS" && server_di_minus > server_di_plus);
+    }
+    else
+    {
+        di_direction_ok = true;  // DI情報なければスキップしない
+    }
+
+    bool cross_flip_qualify = g_cross_flip_enabled &&
+                              (crossover == "UP_CROSS" || crossover == "DOWN_CROSS") &&
+                              score_diff >= g_score_gap_min &&
+                              di_direction_ok;
+
     //--- 既存ポジション確認
     int open_buy  = CountPositions(POSITION_TYPE_BUY);
     int open_sell = CountPositions(POSITION_TYPE_SELL);
@@ -887,6 +923,9 @@ void PollAndTrade()
         {
             Print("🔄 SELLをドテン → BUYへ");
             ClosePositions(POSITION_TYPE_SELL);
+            // クロス転換SELLも決済
+            if (CountCrossFlipPositions(POSITION_TYPE_SELL) > 0)
+                CloseCrossFlipPositions(POSITION_TYPE_SELL);
         }
         if (open_buy == 0)
         {
@@ -903,6 +942,14 @@ void PollAndTrade()
         }
         else
             Print("ℹ️  BUYポジション既存のためスキップ");
+
+        // クロス転換BUYエントリー（条件合致 かつ クロス転換BUY未保有）
+        if (cross_flip_qualify && CountCrossFlipPositions(POSITION_TYPE_BUY) == 0)
+        {
+            Print("🔀 クロス転換BUYエントリー (スコア差:", score_diff,
+                  " DI+:", server_di_plus, " DI-:", server_di_minus, ")");
+            ExecuteCrossFlipOrder(ORDER_TYPE_BUY);
+        }
     }
     else if (crossover == "DOWN_CROSS" || crossover == "RANGE_SHORT")
     {
@@ -910,6 +957,9 @@ void PollAndTrade()
         {
             Print("🔄 BUYをドテン → SELLへ");
             ClosePositions(POSITION_TYPE_BUY);
+            // クロス転換BUYも決済
+            if (CountCrossFlipPositions(POSITION_TYPE_BUY) > 0)
+                CloseCrossFlipPositions(POSITION_TYPE_BUY);
         }
         if (open_sell == 0)
         {
@@ -926,6 +976,14 @@ void PollAndTrade()
         }
         else
             Print("ℹ️  SELLポジション既存のためスキップ");
+
+        // クロス転換SELLエントリー（条件合致 かつ クロス転換SELL未保有）
+        if (cross_flip_qualify && CountCrossFlipPositions(POSITION_TYPE_SELL) == 0)
+        {
+            Print("🔀 クロス転換SELLエントリー (スコア差:", score_diff,
+                  " DI+:", server_di_plus, " DI-:", server_di_minus, ")");
+            ExecuteCrossFlipOrder(ORDER_TYPE_SELL);
+        }
     }
 }
 
@@ -1018,6 +1076,122 @@ void FetchHybridSlConfig()
           "$/oz トレーリング開始=+", g_cached_trailing_trigger_price,
           "$/oz トレーリングSL幅=", g_cached_trailing_sl_price, "$/oz");
 }
+
+//+------------------------------------------------------------------+
+void FetchCrossFlipConfig()
+{
+    if (TimeCurrent() - g_last_cross_flip_fetch < 60) return;
+
+    string headers = "Content-Type: application/json\r\n";
+    char   post[], result[];
+    string res_headers;
+
+    int status = WebRequest("GET", API_BASE + "/api/settings/cross-flip",
+                            headers, 3000, post, result, res_headers);
+    if (status != 200)
+    {
+        g_last_cross_flip_fetch = TimeCurrent();
+        return;
+    }
+
+    string json = CharArrayToString(result);
+    bool  new_enabled      = JsonBool(json,   "\"enabled\":");
+    double new_lot_trail   = JsonDouble(json, "\"lot_trailing\":");
+    double new_lot_flip    = JsonDouble(json, "\"lot_cross_flip\":");
+    int    new_score_gap   = JsonInt(json,    "\"score_gap_min\":");
+    int    new_magic       = JsonInt(json,    "\"magic_cross_flip\":");
+
+    bool old_enabled = g_cross_flip_enabled;
+    g_cross_flip_enabled = new_enabled;
+    if (new_lot_trail  > 0) g_lot_trailing     = new_lot_trail;
+    if (new_lot_flip   > 0) g_lot_cross_flip   = new_lot_flip;
+    if (new_score_gap  > 0) g_score_gap_min    = new_score_gap;
+    if (new_magic      > 0) g_magic_cross_flip = new_magic;
+
+    g_last_cross_flip_fetch = TimeCurrent();
+
+    if (old_enabled != g_cross_flip_enabled)
+        Print("🔀 クロス転換モード: ", (g_cross_flip_enabled ? "ON" : "OFF"),
+              " (トレーリング:", g_lot_trailing, "lot / クロス転換:", g_lot_cross_flip,
+              "lot / スコア差≥", g_score_gap_min, ")");
+}
+
+//--- クロス転換ポジションのカウント（マジックナンバー2で管理）
+int CountCrossFlipPositions(ENUM_POSITION_TYPE pos_type)
+{
+    int count = 0;
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        if (!PositionSelectByTicket(PositionGetTicket(i))) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != g_magic_cross_flip) continue;
+        if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == pos_type) count++;
+    }
+    return count;
+}
+
+//--- クロス転換ポジションのみ決済
+void CloseCrossFlipPositions(ENUM_POSITION_TYPE pos_type)
+{
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (!PositionSelectByTicket(ticket)) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != g_magic_cross_flip) continue;
+        if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != pos_type) continue;
+        MqlTradeRequest req = {};
+        MqlTradeResult  res = {};
+        req.action   = TRADE_ACTION_DEAL;
+        req.symbol   = _Symbol;
+        req.volume   = PositionGetDouble(POSITION_VOLUME);
+        req.type     = (pos_type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+        req.price    = (pos_type == POSITION_TYPE_BUY)
+                       ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                       : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        req.magic    = g_magic_cross_flip;
+        req.comment  = "CROSS_FLIP_CLOSE";
+        req.type_filling = ORDER_FILLING_IOC;
+        if (!OrderSend(req, res))
+            Print("❌ クロス転換決済失敗: ticket=", ticket, " retcode=", res.retcode);
+        else
+            Print("✅ クロス転換ポジション決済: ticket=", ticket);
+    }
+}
+
+//--- クロス転換エントリー（固定ロット・SL5$・TP無し）
+void ExecuteCrossFlipOrder(ENUM_ORDER_TYPE order_type)
+{
+    int    digits    = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    double price     = (order_type == ORDER_TYPE_BUY)
+                       ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                       : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double sl        = (order_type == ORDER_TYPE_BUY)
+                       ? NormalizeDouble(price - 5.0, digits)
+                       : NormalizeDouble(price + 5.0, digits);
+    double min_lot   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double lot_step  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    double lot       = MathMax(min_lot, MathFloor(g_lot_cross_flip / lot_step) * lot_step);
+
+    MqlTradeRequest req = {};
+    MqlTradeResult  res = {};
+    req.action       = TRADE_ACTION_DEAL;
+    req.symbol       = _Symbol;
+    req.volume       = lot;
+    req.type         = order_type;
+    req.price        = price;
+    req.sl           = sl;
+    req.tp           = 0;  // TP無し（クロス転換で決済）
+    req.magic        = g_magic_cross_flip;
+    req.comment      = "CROSS_FLIP_EA";
+    req.type_filling = ORDER_FILLING_IOC;
+
+    if (OrderSend(req, res))
+        Print("✅ クロス転換エントリー: ", EnumToString(order_type),
+              " price=", price, " SL=", sl, " lot=", lot,
+              " magic=", g_magic_cross_flip);
+    else
+        Print("❌ クロス転換エントリー失敗: retcode=", res.retcode, " ", res.comment);
+}
+
 
 //+------------------------------------------------------------------+
 //  ハイブリッドSL + トレーリングストップ（v1.25: 含み損自動決済 + トレーリング実装）

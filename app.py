@@ -94,6 +94,13 @@ _last_broadcast_payload: dict = {}  # 最後にsocketへ配信したシグナル
 _reentry_enabled: bool = True      # 推奨ON: クロス継続中にポジションなしで再エントリー
 _ai_exit_enabled: bool = True      # 推奨ON: 5分ごとにGeminiでポジション決済判断
 _rsi_filter_enabled: bool = True   # 推奨ON: RSI<35のシグナルをスキップ（勝率+3.3%実証）
+_cross_flip_config = {
+    "enabled": False,          # クロス転換モード ON/OFF（デフォルトOFF）
+    "lot_trailing": 0.3,       # トレーリング用ロット（マイクロ口座）
+    "lot_cross_flip": 0.1,     # クロス転換用ロット（マイクロ口座）
+    "score_gap_min": 3,        # スコア差の最小値（≥3のみクロス転換エントリー）
+    "magic_cross_flip": 20261002,  # クロス転換ポジション用マジックナンバー
+}
 _ea_signal_dedup: dict = {}  # 重複防止キャッシュ {crossover: last_time}
 _force_close_pending = False   # AI_CLOSE_MODE: Gemini決済指示フラグ
 _force_close_set_time = 0.0    # フラグをセットした時刻（120秒後に自動リセット）
@@ -2414,7 +2421,9 @@ def get_current_settings():
         "trading_mode": TRADING_MODE,
         "auto_confidence_threshold": AUTO_CONFIDENCE_THRESHOLD,
         "mt5_webhook_configured": bool(MT5_WEBHOOK_URL),
-        "hybrid_sl": _hybrid_sl_config
+        "hybrid_sl": _hybrid_sl_config,
+        "cross_flip": _cross_flip_config,
+        "rsi_filter": _rsi_filter_enabled,
     })
 
 def save_hybrid_sl_to_supabase():
@@ -2524,6 +2533,32 @@ def reentry_settings():
         log_system("INFO", f"⚙️ 再エントリー設定: {'ON' if _reentry_enabled else 'OFF'}")
     return jsonify({"status": "ok", "enabled": _reentry_enabled})
 
+@app.route("/api/settings/cross-flip", methods=["GET", "POST", "OPTIONS"])
+def cross_flip_settings():
+    """クロス転換モード設定（スコア差≥3 かつ DI方向一致で別ポジションを追加エントリー）"""
+    global _cross_flip_config
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    if request.method == "GET":
+        return jsonify(_cross_flip_config)
+    data = request.get_json() or {}
+    old_enabled = _cross_flip_config.get("enabled")
+    if "enabled" in data:
+        _cross_flip_config["enabled"] = bool(data["enabled"])
+    if "lot_trailing" in data:
+        _cross_flip_config["lot_trailing"] = float(data["lot_trailing"])
+    if "lot_cross_flip" in data:
+        _cross_flip_config["lot_cross_flip"] = float(data["lot_cross_flip"])
+    if "score_gap_min" in data:
+        _cross_flip_config["score_gap_min"] = int(data["score_gap_min"])
+    if old_enabled != _cross_flip_config.get("enabled"):
+        log_system("INFO", f"⚙️ クロス転換モード: {'ON' if _cross_flip_config['enabled'] else 'OFF'} "
+                           f"(トレーリング:{_cross_flip_config['lot_trailing']}lot / "
+                           f"クロス転換:{_cross_flip_config['lot_cross_flip']}lot / "
+                           f"スコア差≥{_cross_flip_config['score_gap_min']})")
+    return jsonify({"status": "ok", **_cross_flip_config})
+
+
 @app.route("/api/settings/rsi-filter", methods=["GET", "POST", "OPTIONS"])
 def rsi_filter_settings():
     """①RSIフィルター設定（RSI<35のシグナルをスキップ）"""
@@ -2569,6 +2604,16 @@ def latest_signal():
         entry_threshold = ENTRY_CONFIDENCE_THRESHOLD if TRADING_MODE == "AI_CLOSE_MODE" \
                           else AUTO_CONFIDENCE_THRESHOLD
         signal["min_confidence"] = entry_threshold
+
+        # クロス転換設定をEAに配信
+        signal["cross_flip"] = _cross_flip_config
+
+        # EAのDI値を付加（クロス転換DI方向フィルター用）
+        if _ea_latest_scores:
+            signal["di_plus"]     = _ea_latest_scores.get("di_plus", 0)
+            signal["di_minus"]    = _ea_latest_scores.get("di_minus", 0)
+            signal["buy_score"]   = _ea_latest_scores.get("buy_score", 0)
+            signal["sell_score"]  = _ea_latest_scores.get("sell_score", 0)
 
         return jsonify(signal)
     except Exception as e:
