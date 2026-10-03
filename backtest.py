@@ -2051,6 +2051,77 @@ def main():
 
     print(f"\n  ✅ = 負け<89件かつP&L>400  🏆 = 負け<89件かつP&L>525（ベースライン超え）")
 
+    # ──── ⑤b-4 クロス転換×DI方向一致×チャネルブレイク決済 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑤b-4 クロス転換 × DI方向一致 × チャネルブレイク決済】")
+    print("  BUY: 上昇トレンドのチャネル下辺ブレイクで決済")
+    print("  SELL: 下降トレンドのチャネル上辺ブレイクで決済")
+    print("  ベース: スコア差≥3 + DI方向一致 (負85件 +545.7$/oz)")
+    print("─" * 72)
+
+    # DI方向一致フィルター済みシグナル（スコア差≥3）
+    sig_di3 = apply_filters(df_sig, rsi_filter=True).copy()
+    sig_di3 = sig_di3[(sig_di3['buy_score'] - sig_di3['sell_score']).abs() >= 3]
+    buy_m  = (sig_di3['crossover'] == 'UP_CROSS')   & (sig_di3['di_p'] > sig_di3['di_m'])
+    sell_m = (sig_di3['crossover'] == 'DOWN_CROSS') & (sig_di3['di_m'] > sig_di3['di_p'])
+    sig_di3 = sig_di3[buy_m | sell_m].copy()
+
+    def show_ch_result(label, t):
+        if len(t) == 0:
+            print(f"  ── {label:<48} シグナルなし"); return
+        wins   = t[t['pnl'] > 0]
+        losses = t[t['pnl'] <= 0]
+        wr     = len(wins)/len(t)*100
+        total  = t['pnl'].sum()
+        dd     = calc_max_drawdown(t)
+        rr_val = abs(wins['pnl'].mean()/losses['pnl'].mean()) if len(losses)>0 else 0
+        reasons = t['exit_reason'].value_counts().to_dict()
+        reason_str = "  ".join([f"{k}:{v}" for k, v in reasons.items()])
+        bar = "█" * int(wr/5) + "░" * (20-int(wr/5))
+        marker = "🏆" if total > 545 and len(losses) < 85 else (
+                 "✅" if total > 450 or len(losses) < 75 else "──")
+        print(f"  {marker} {label:<48} [{bar}] {wr:5.1f}%  取引:{len(t):3d}  "
+              f"負:{len(losses):3d}件  合計:{total:+8.1f}$/oz  DD:{dd:+7.1f}  [{reason_str}]")
+
+    print(f"\n  {'':2} {'パターン':<48}  {'':20} {'勝率':>5} {'取引':>4} {'負件数':>5} {'合計P&L':>9} {'DD':>7}")
+    print(f"  {'─'*2} {'─'*48}  {'─'*22} {'─'*5} {'─'*4} {'─'*7} {'─'*9} {'─'*7}")
+
+    # ── ベースライン（クロス転換のみ、チャネルなし） ──
+    t_base_di3 = simulate_trades(df, sig_di3, sl=SL_PIPS, tp=999.0, use_trailing=False)
+    show_ch_result("【BASE】クロス転換 DI一致 SL5$のみ", t_base_di3)
+
+    # ── チャネル期間 × std倍率の組み合わせ ──
+    for period in [20, 30, 50]:
+        for std in [1.0, 1.5, 2.0]:
+            t = simulate_trades_channel(df, sig_di3,
+                                        channel_mode="replace_tp",
+                                        channel_period=period,
+                                        channel_std=std,
+                                        sl=SL_PIPS, tp=999.0)
+            show_ch_result(f"CH決済 P{period} std{std}  (SL5$+CH下辺)", t)
+
+    # ── チャネルブレイク + トレーリング（早い方で決済） ──
+    print(f"\n  ── トレーリング併用（どちらか早い方で決済） ──")
+    for period in [20, 30, 50]:
+        t = simulate_trades_channel(df, sig_di3,
+                                    channel_mode="with_trailing",
+                                    channel_period=period,
+                                    channel_std=1.5,
+                                    sl=SL_PIPS, tp=999.0)
+        show_ch_result(f"CH+トレーリング P{period} std1.5", t)
+
+    # ── ブレイクイーブン → チャネル決済 ──
+    print(f"\n  ── BE移動後チャネル決済（SL→BEに移動、その後CH下辺で決済） ──")
+    for period in [20, 30]:
+        t = simulate_trades_channel(df, sig_di3,
+                                    channel_mode="breakeven_channel",
+                                    channel_period=period,
+                                    channel_std=1.5,
+                                    sl=SL_PIPS, tp=999.0)
+        show_ch_result(f"BE後CH決済 P{period} std1.5", t)
+
+    print(f"\n  🏆 = 負け<85件かつP&L>545（ベースライン超え）  ✅ = どちらか改善")
+
     # ──── ⑥a トレンド/レンジ別勝率 ────
     print(f"\n{'=' * 72}")
     print("  【⑥a トレンド/レンジ別 詳細分析】（①RSIフィルター適用）")
