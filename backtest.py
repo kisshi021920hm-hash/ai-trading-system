@@ -3160,8 +3160,567 @@ def main():
               f"合計:{best_r['total_pnl']:+.1f}$/oz  DD:{best_r['max_dd']:+.1f}$/oz")
 
     print(f"\n{'=' * 72}")
+    # ──── ハイブリッド運用シミュレーション ────
+    print(f"\n{'=' * 72}")
+    print("  【ハイブリッド運用シミュレーション】")
+    print("  スコア差≥3かつDI方向一致 → クロス転換 / それ以外 → トレーリング")
+    print("─" * 72)
+
+    sig_rsi_all = apply_filters(df_sig, rsi_filter=True).copy()
+
+    # クロス転換対象シグナル（スコア差≥3 かつ DI方向一致）
+    score_diff = (sig_rsi_all['buy_score'] - sig_rsi_all['sell_score']).abs()
+    buy_di  = (sig_rsi_all['crossover'] == 'UP_CROSS')   & (sig_rsi_all['di_p'] > sig_rsi_all['di_m'])
+    sell_di = (sig_rsi_all['crossover'] == 'DOWN_CROSS') & (sig_rsi_all['di_m'] > sig_rsi_all['di_p'])
+    flip_mask  = (score_diff >= 3) & (buy_di | sell_di)
+    trail_mask = ~flip_mask
+
+    sig_flip  = sig_rsi_all[flip_mask].copy()   # クロス転換用（100件）
+    sig_trail = sig_rsi_all[trail_mask].copy()  # トレーリング用（残り）
+
+    t_flip  = simulate_trades(df, sig_flip,  sl=SL_PIPS, tp=999.0, use_trailing=False)
+    t_trail = simulate_trades(df, sig_trail, use_trailing=True)
+
+    def summarize(label, t):
+        if len(t) == 0: return 0, 0, 0, 0
+        w = t[t['pnl']>0]; l = t[t['pnl']<=0]
+        wr = len(w)/len(t)*100
+        total = t['pnl'].sum()
+        dd = calc_max_drawdown(t)
+        print(f"    {label:<30} 取引:{len(t):3d}件  勝:{len(w):3d}  負:{len(l):3d}  "
+              f"勝率:{wr:5.1f}%  合計:{total:+8.1f}$/oz  DD:{dd:+7.1f}")
+        return total, dd, len(w), len(l)
+
+    print()
+    pnl_f, dd_f, w_f, l_f = summarize("クロス転換（DI一致 差≥3）", t_flip)
+    pnl_t, dd_t, w_t, l_t = summarize("トレーリング（それ以外）", t_trail)
+
+    combined_pnl = pnl_f + pnl_t
+    combined_dd  = min(dd_f, dd_t)  # 概算（同時運用時はより深い方）
+    combined_n   = len(t_flip) + len(t_trail)
+    combined_w   = w_f + w_t
+    combined_l   = l_f + l_t
+
+    print(f"    {'─'*65}")
+    print(f"    {'合計（ハイブリッド）':<30} 取引:{combined_n:3d}件  勝:{combined_w:3d}  負:{combined_l:3d}  "
+          f"勝率:{combined_w/combined_n*100:5.1f}%  合計:{combined_pnl:+8.1f}$/oz  DD概算:{combined_dd:+7.1f}")
+    print(f"    参考：現状トレーリングのみ（158件）                        合計:  +255.8$/oz")
+
+    # ロット別換算（60日 → 月間）
+    monthly = combined_pnl / 2
+    monthly_dd = combined_dd / 2  # 月間DD概算
+
+    print(f"\n  ── ロット別 月間換算（30日）──")
+    print(f"  {'ロット':>10}  {'oz換算':>6}  {'月利益($)':>10}  {'月利益(¥)':>10}  {'月間DD($)':>10}  {'月間DD(¥)':>10}  {'¥10,000で耐えられる？'}")
+    print(f"  {'─'*10}  {'─'*6}  {'─'*10}  {'─'*10}  {'─'*10}  {'─'*10}  {'─'*20}")
+    for lot, label in [(0.001,'マイクロ0.1'), (0.01,'マイクロ1.0'), (0.1,'マイクロ10')]:
+        oz = lot * 100
+        mp = monthly * oz
+        mdd = monthly_dd * oz
+        yen_p = mp * 150
+        yen_d = mdd * 150
+        survivable = "✅ 余裕" if abs(yen_d) < 5000 else ("⚠️ ギリギリ" if abs(yen_d) < 10000 else "❌ 危険")
+        print(f"  {lot:>10.3f}  {oz:>6.2f}oz  {mp:>+10.1f}$  {yen_p:>+10.0f}¥  {mdd:>+10.1f}$  {yen_d:>+10.0f}¥  {survivable}")
+
+    print(f"\n  ✅ 推奨: 0.001lot（マイクロ0.1）から開始 → 資金が増えたらロットアップ")
+
     print("  バックテスト完了")
     print("=" * 72)
+
+    # ⑥ レンジ逆張りモード テスト
+    run_range_mode_test(df, df_sig)
+
+    # ⑦ ブレイクアウト自動エントリー テスト
+    run_breakout_test(df)
+
+
+# ==================== ⑥ レンジ逆張りモード テスト ====================
+def generate_range_signals(df, adx_threshold=20.0, proximity=4.0, min_sr_distance=5.0, cooldown=10):
+    """ADX<閾値 + S/R近接でRANGE_LONG/RANGE_SHORTシグナルを生成"""
+    signals = []
+    close = df['Close'].values
+    high  = df['High'].values
+    low   = df['Low'].values
+    # ADXを計算（df_sigのadxカラムではなく価格データから直接計算）
+    adx_series, _, _ = calculate_adx(df['High'], df['Low'], df['Close'])
+    adx_s = adx_series.fillna(0).values
+
+    for i in range(SR_LOOKBACK + SR_SWING_BARS, len(df)):
+        adx = adx_s[i]
+        if adx >= adx_threshold:
+            continue
+
+        cur_close = close[i]
+        cur_time  = df.index[i]
+
+        h_window = list(high[max(0, i - SR_LOOKBACK):i])
+        l_window = list(low[max(0, i - SR_LOOKBACK):i])
+        res_levels, sup_levels, _ = find_key_levels(h_window, l_window, cur_close)
+
+        crossover  = None
+        sr_level   = None
+        tp_distance = None
+
+        # レジスタンス近接 → RANGE_SHORT
+        if res_levels:
+            nearest_res = min(res_levels, key=lambda r: r - cur_close)
+            if 0 < nearest_res - cur_close <= proximity:
+                crossover   = 'RANGE_SHORT'
+                sr_level    = nearest_res
+                tp_distance = (cur_close - sup_levels[0]) if sup_levels else None
+
+        # サポート近接 → RANGE_LONG（SHORT判定なければ）
+        if crossover is None and sup_levels:
+            nearest_sup = max(sup_levels)
+            if 0 < cur_close - nearest_sup <= proximity:
+                crossover   = 'RANGE_LONG'
+                sr_level    = nearest_sup
+                tp_distance = (res_levels[0] - cur_close) if res_levels else None
+
+        if crossover is None:
+            continue
+        if tp_distance is None or tp_distance < min_sr_distance:
+            continue
+
+        signals.append({
+            'time':        cur_time,
+            'idx':         i,
+            'crossover':   crossover,
+            'close':       cur_close,
+            'sr_level':    sr_level,
+            'tp_distance': tp_distance,
+            'adx':         adx,
+        })
+
+    if not signals:
+        return pd.DataFrame()
+
+    sig_df = pd.DataFrame(signals)
+    # 同方向の連続シグナルはクールダウン本数以内ならスキップ
+    filtered = []
+    last_cross = None
+    last_idx   = -999
+    for _, row in sig_df.iterrows():
+        if row['crossover'] != last_cross or row['idx'] - last_idx >= cooldown:
+            filtered.append(row)
+            last_cross = row['crossover']
+            last_idx   = row['idx']
+    return pd.DataFrame(filtered)
+
+
+def simulate_range_trades(df_price, df_signals, sl=SL_PIPS):
+    """レンジ逆張りトレードシミュレーション
+    決済: TP（反対S/R）/ SL固定 / タイムアウト200本
+    """
+    if df_signals is None or len(df_signals) == 0:
+        return pd.DataFrame()
+
+    trades = []
+    close = df_price['Close'].values
+    high  = df_price['High'].values
+    low   = df_price['Low'].values
+    times = df_price.index
+
+    for _, row in df_signals.iterrows():
+        i           = int(row['idx'])
+        crossover   = row['crossover']
+        entry_price = float(row['close'])
+        tp_dist     = float(row['tp_distance'])
+        is_buy      = crossover == 'RANGE_LONG'
+
+        sl_price = (entry_price - sl)       if is_buy else (entry_price + sl)
+        tp_price = (entry_price + tp_dist)  if is_buy else (entry_price - tp_dist)
+
+        exit_price  = None
+        exit_time   = None
+        exit_reason = None
+
+        for j in range(i + 1, min(i + 200, len(close))):
+            h, l = high[j], low[j]
+            if is_buy:
+                if l <= sl_price:
+                    exit_price = sl_price; exit_reason = "SL"; exit_time = times[j]; break
+                if h >= tp_price:
+                    exit_price = tp_price; exit_reason = "TP"; exit_time = times[j]; break
+            else:
+                if h >= sl_price:
+                    exit_price = sl_price; exit_reason = "SL"; exit_time = times[j]; break
+                if l <= tp_price:
+                    exit_price = tp_price; exit_reason = "TP"; exit_time = times[j]; break
+
+        if exit_price is None:
+            last_j      = min(i + 199, len(close) - 1)
+            exit_price  = close[last_j]
+            exit_time   = times[last_j]
+            exit_reason = "TIMEOUT"
+
+        pnl = (exit_price - entry_price) if is_buy else (entry_price - exit_price)
+        trades.append({
+            'direction':   crossover,
+            'entry_time':  row['time'],
+            'exit_time':   exit_time,
+            'entry_price': entry_price,
+            'exit_price':  exit_price,
+            'pnl':         round(pnl, 2),
+            'exit_reason': exit_reason,
+            'adx':         row['adx'],
+            'tp_distance': round(tp_dist, 2),
+        })
+
+    return pd.DataFrame(trades)
+
+
+def run_range_mode_test(df, df_sig):
+    """⑥ レンジ逆張りモード テスト"""
+    print(f"\n{'=' * 72}")
+    print("  【⑥ レンジ逆張りモード テスト】")
+    print("  ADX < 閾値 + S/R近接でエントリー / 反対S/RをTP / SL固定5$")
+    print("─" * 72)
+
+    def summarize(label, t):
+        if t is None or len(t) == 0:
+            print(f"  {label:<42}  取引なし")
+            return None
+        w = t[t['pnl'] > 0]; l = t[t['pnl'] <= 0]
+        wr = len(w) / len(t) * 100
+        total = t['pnl'].sum()
+        dd = calc_max_drawdown(t)
+        avg_w = w['pnl'].mean() if len(w) > 0 else 0
+        avg_l = l['pnl'].mean() if len(l) > 0 else 0
+        tp_hit = (t['exit_reason'] == 'TP').sum()
+        sl_hit = (t['exit_reason'] == 'SL').sum()
+        print(f"  {label:<42}  取引:{len(t):3d}件  勝:{len(w):3d}  負:{len(l):3d}  "
+              f"勝率:{wr:5.1f}%  合計:{total:+8.1f}$/oz  DD:{dd:+6.1f}  TP:{tp_hit}件  SL:{sl_hit}件")
+        return {'total': total, 'dd': dd, 'wins': len(w), 'losses': len(l)}
+
+    # ── パラメータグリッドサーチ ──
+    print("\n  [A] パラメータ別 レンジ単体テスト (proximity=S/R近接距離, adx=閾値)")
+    print(f"  {'ラベル':<42}  {'取引':>4}  {'勝':>3}  {'負':>3}  {'勝率':>6}  {'合計':>9}  {'DD':>6}  {'TP':>4}  {'SL':>4}")
+    print(f"  {'─'*42}  {'─'*4}  {'─'*3}  {'─'*3}  {'─'*6}  {'─'*9}  {'─'*6}  {'─'*4}  {'─'*4}")
+
+    best_range = None
+    best_pnl   = -9999
+    best_label = ""
+
+    for adx_thr in [20.0, 25.0]:
+        for prox in [2.0, 4.0, 6.0, 8.0]:
+            label = f"ADX<{adx_thr:.0f} 近接{prox:.0f}$"
+            sig_r = generate_range_signals(df, adx_threshold=adx_thr, proximity=prox)
+            t_r   = simulate_range_trades(df, sig_r, sl=SL_PIPS)
+            if t_r is None or len(t_r) == 0:
+                print(f"  {label:<42}  取引なし")
+                continue
+            w = t_r[t_r['pnl'] > 0]; l = t_r[t_r['pnl'] <= 0]
+            wr    = len(w) / len(t_r) * 100
+            total = t_r['pnl'].sum()
+            dd    = calc_max_drawdown(t_r)
+            tp_h  = (t_r['exit_reason'] == 'TP').sum()
+            sl_h  = (t_r['exit_reason'] == 'SL').sum()
+            print(f"  {label:<42}  {len(t_r):4d}  {len(w):3d}  {len(l):3d}  "
+                  f"{wr:6.1f}%  {total:+9.1f}  {dd:+6.1f}  {tp_h:4d}  {sl_h:4d}")
+            if total > best_pnl:
+                best_pnl   = total
+                best_range = t_r
+                best_label = label
+
+    # ── ハイブリッド + レンジ 比較 ──
+    print(f"\n  [B] ハイブリッド＋レンジ逆張り 比較（最良レンジパラメータ使用: {best_label}）")
+    print("─" * 72)
+
+    sig_rsi_all = apply_filters(df_sig, rsi_filter=True).copy()
+    score_diff  = (sig_rsi_all['buy_score'] - sig_rsi_all['sell_score']).abs()
+    buy_di      = (sig_rsi_all['crossover'] == 'UP_CROSS')   & (sig_rsi_all['di_p'] > sig_rsi_all['di_m'])
+    sell_di     = (sig_rsi_all['crossover'] == 'DOWN_CROSS') & (sig_rsi_all['di_m'] > sig_rsi_all['di_p'])
+    flip_mask   = (score_diff >= 3) & (buy_di | sell_di)
+
+    t_flip  = simulate_trades(df, sig_rsi_all[flip_mask].copy(),  sl=SL_PIPS, tp=999.0, use_trailing=False)
+    t_trail = simulate_trades(df, sig_rsi_all[~flip_mask].copy(), use_trailing=True)
+
+    pnl_f   = t_flip['pnl'].sum()  if len(t_flip)  > 0 else 0
+    pnl_t   = t_trail['pnl'].sum() if len(t_trail) > 0 else 0
+    pnl_r   = best_range['pnl'].sum() if best_range is not None and len(best_range) > 0 else 0
+    hybrid_pnl = pnl_f + pnl_t
+
+    def show(label, t):
+        if t is None or len(t) == 0:
+            print(f"  {label:<38}  取引なし")
+            return 0, 0
+        w = t[t['pnl'] > 0]; l = t[t['pnl'] <= 0]
+        total = t['pnl'].sum()
+        dd    = calc_max_drawdown(t)
+        print(f"  {label:<38}  取引:{len(t):3d}件  勝:{len(w):3d}  負:{len(l):3d}  "
+              f"勝率:{len(w)/len(t)*100:5.1f}%  合計:{total:+8.1f}$/oz  DD:{dd:+7.1f}")
+        return total, dd
+
+    pnl_f, dd_f   = show("クロス転換（DI一致 差≥3）", t_flip)
+    pnl_t, dd_t   = show("トレーリング（それ以外）",   t_trail)
+    pnl_r2, dd_r2 = show(f"レンジ逆張り（{best_label}）", best_range)
+
+    print(f"  {'─'*68}")
+    combo_n = (len(t_flip) if len(t_flip) > 0 else 0) + \
+              (len(t_trail) if len(t_trail) > 0 else 0) + \
+              (len(best_range) if best_range is not None and len(best_range) > 0 else 0)
+    print(f"  {'ハイブリッドのみ（比較）':<38}  合計:{hybrid_pnl:+8.1f}$/oz")
+    print(f"  {'ハイブリッド＋レンジ逆張り':<38}  合計:{hybrid_pnl + pnl_r2:+8.1f}$/oz")
+
+    diff = (hybrid_pnl + pnl_r2) - hybrid_pnl
+    if diff > 0:
+        print(f"\n  ✅ レンジ逆張り追加で {diff:+.1f}$/oz 改善！ → ONを検討")
+    else:
+        print(f"\n  ⚠️  レンジ逆張り追加で {diff:+.1f}$/oz → OFFのまま推奨")
+
+    # ロット別月間換算
+    monthly_base  = hybrid_pnl / 2
+    monthly_combo = (hybrid_pnl + pnl_r2) / 2
+    print(f"\n  ── ロット別 月間換算（ハイブリッド vs ハイブリッド＋レンジ）──")
+    print(f"  {'ロット':>10}  {'ハイブリッドのみ($)':>18}  {'＋レンジ追加($)':>15}  {'差分($)':>8}")
+    for lot in [0.001, 0.01, 0.1]:
+        oz = lot * 100
+        mp_b = monthly_base  * oz
+        mp_c = monthly_combo * oz
+        print(f"  {lot:>10.3f}  {mp_b:>+18.1f}  {mp_c:>+15.1f}  {mp_c - mp_b:>+8.1f}")
+
+    print(f"\n{'=' * 72}")
+
+
+# ==================== ⑦ ブレイクアウト自動エントリー テスト ====================
+def generate_breakout_signals(df, swing_bars=3, lookback=50, min_break_atr=0.3):
+    """レジスタンスブレイクアウト / サポートブレイクダウン シグナル生成
+    EAのDetectResistanceBreakout/DetectSupportBreakdownと同ロジック
+    - swing_bars: スイングポイント左右N本
+    - lookback: 過去何本からS/R検索
+    - min_break_atr: ATR×この倍率以上の突破のみ有効（ダマシ除去）
+    """
+    signals = []
+    close = df['Close'].values
+    high  = df['High'].values
+    low   = df['Low'].values
+    adx_s, _, _ = calculate_adx(df['High'], df['Low'], df['Close'])
+
+    # ATR計算
+    atr_s = pd.Series(
+        pd.concat([df['High'] - df['Low'],
+                   (df['High'] - df['Close'].shift()).abs(),
+                   (df['Low']  - df['Close'].shift()).abs()], axis=1).max(axis=1)
+    ).ewm(span=14, adjust=False).mean().values
+
+    last_breakout_idx = -999
+    last_breakdown_idx = -999
+
+    for i in range(lookback + swing_bars + 1, len(df)):
+        cur_close  = close[i]
+        prev_close = close[i - 1]
+        cur_time   = df.index[i]
+        cur_atr    = atr_s[i] if not np.isnan(atr_s[i]) else 5.0
+
+        # 過去lookback本でS/R検索
+        h_window = list(high[max(0, i - lookback):i])
+        l_window = list(low[max(0, i - lookback):i])
+
+        # --- ブレイクアウト (BUY) ---
+        if i - last_breakout_idx >= 10:  # クールダウン10本
+            # スイング高値（レジスタンス）を検索
+            for k in range(swing_bars, len(h_window) - swing_bars):
+                h_k = h_window[k]
+                is_swing = all(h_k > h_window[k - j] and h_k > h_window[k + j]
+                               for j in range(1, swing_bars + 1))
+                if is_swing and h_k > prev_close:
+                    # 前足がレジスタンス以下 → 現足が上抜け
+                    if prev_close <= h_k < cur_close and (cur_close - h_k) >= min_break_atr * cur_atr:
+                        signals.append({
+                            'time':      cur_time,
+                            'idx':       i,
+                            'crossover': 'BREAKOUT_BUY',
+                            'close':     cur_close,
+                            'sr_level':  h_k,
+                            'adx':       float(adx_s.iloc[i]) if not np.isnan(adx_s.iloc[i]) else 0,
+                            'atr':       cur_atr,
+                        })
+                        last_breakout_idx = i
+                        break
+
+        # --- ブレイクダウン (SELL) ---
+        if i - last_breakdown_idx >= 10:
+            for k in range(swing_bars, len(l_window) - swing_bars):
+                l_k = l_window[k]
+                is_swing = all(l_k < l_window[k - j] and l_k < l_window[k + j]
+                               for j in range(1, swing_bars + 1))
+                if is_swing and l_k < prev_close:
+                    if prev_close >= l_k > cur_close and (l_k - cur_close) >= min_break_atr * cur_atr:
+                        signals.append({
+                            'time':      cur_time,
+                            'idx':       i,
+                            'crossover': 'BREAKOUT_SELL',
+                            'close':     cur_close,
+                            'sr_level':  l_k,
+                            'adx':       float(adx_s.iloc[i]) if not np.isnan(adx_s.iloc[i]) else 0,
+                            'atr':       cur_atr,
+                        })
+                        last_breakdown_idx = i
+                        break
+
+    return pd.DataFrame(signals) if signals else pd.DataFrame()
+
+
+def simulate_breakout_trades(df_price, df_signals, sl=SL_PIPS, tp=TP_PIPS,
+                              use_trailing=False,
+                              trail_trigger=TRAIL_TRIGGER, trail_width=TRAIL_WIDTH):
+    """ブレイクアウトエントリーのシミュレーション
+    決済: TP固定 or トレーリング or SL or タイムアウト200本
+    """
+    if df_signals is None or len(df_signals) == 0:
+        return pd.DataFrame()
+
+    trades = []
+    close = df_price['Close'].values
+    high  = df_price['High'].values
+    low   = df_price['Low'].values
+    times = df_price.index
+
+    for _, row in df_signals.iterrows():
+        i           = int(row['idx'])
+        crossover   = row['crossover']
+        entry_price = float(row['close'])
+        is_buy      = crossover == 'BREAKOUT_BUY'
+
+        sl_price = (entry_price - sl) if is_buy else (entry_price + sl)
+        tp_price = (entry_price + tp) if is_buy else (entry_price - tp)
+
+        best_price  = entry_price
+        trail_sl    = None
+        exit_price  = None
+        exit_time   = None
+        exit_reason = None
+
+        for j in range(i + 1, min(i + 200, len(close))):
+            h, l, c = high[j], low[j], close[j]
+
+            if use_trailing:
+                # トレーリング更新
+                if is_buy:
+                    if h > best_price: best_price = h
+                    if best_price - entry_price >= trail_trigger:
+                        new_trail = best_price - trail_width
+                        if trail_sl is None or new_trail > trail_sl:
+                            trail_sl = new_trail
+                else:
+                    if l < best_price: best_price = l
+                    if entry_price - best_price >= trail_trigger:
+                        new_trail = best_price + trail_width
+                        if trail_sl is None or new_trail < trail_sl:
+                            trail_sl = new_trail
+
+            # 決済判定
+            if is_buy:
+                if trail_sl is not None and l <= trail_sl:
+                    exit_price = trail_sl; exit_reason = "TRAIL"; exit_time = times[j]; break
+                if l <= sl_price:
+                    exit_price = sl_price; exit_reason = "SL"; exit_time = times[j]; break
+                if not use_trailing and h >= tp_price:
+                    exit_price = tp_price; exit_reason = "TP"; exit_time = times[j]; break
+            else:
+                if trail_sl is not None and h >= trail_sl:
+                    exit_price = trail_sl; exit_reason = "TRAIL"; exit_time = times[j]; break
+                if h >= sl_price:
+                    exit_price = sl_price; exit_reason = "SL"; exit_time = times[j]; break
+                if not use_trailing and l <= tp_price:
+                    exit_price = tp_price; exit_reason = "TP"; exit_time = times[j]; break
+
+        if exit_price is None:
+            last_j      = min(i + 199, len(close) - 1)
+            exit_price  = close[last_j]
+            exit_time   = times[last_j]
+            exit_reason = "TIMEOUT"
+
+        pnl = (exit_price - entry_price) if is_buy else (entry_price - exit_price)
+        trades.append({
+            'direction':   crossover,
+            'entry_time':  row['time'],
+            'exit_time':   exit_time,
+            'entry_price': entry_price,
+            'exit_price':  exit_price,
+            'pnl':         round(pnl, 2),
+            'exit_reason': exit_reason,
+            'sr_level':    round(float(row['sr_level']), 2),
+            'adx':         round(float(row['adx']), 1),
+            'atr':         round(float(row['atr']), 2),
+        })
+
+    return pd.DataFrame(trades)
+
+
+def run_breakout_test(df):
+    """⑦ ブレイクアウト自動エントリー テスト"""
+    print(f"\n{'=' * 72}")
+    print("  【⑦ ブレイクアウト自動エントリー テスト】")
+    print("  レジスタンス上抜け→BUY / サポート下抜け→SELL で即時エントリー")
+    print("─" * 72)
+
+    def show(label, t, show_detail=False):
+        if t is None or len(t) == 0:
+            print(f"  {label:<44}  取引なし")
+            return 0, 0
+        w = t[t['pnl'] > 0]; l = t[t['pnl'] <= 0]
+        total = t['pnl'].sum()
+        dd    = calc_max_drawdown(t)
+        wr    = len(w) / len(t) * 100
+        tp_h  = (t['exit_reason'] == 'TP').sum()
+        sl_h  = (t['exit_reason'] == 'SL').sum()
+        tr_h  = (t['exit_reason'] == 'TRAIL').sum()
+        print(f"  {label:<44}  取引:{len(t):3d}件  勝:{len(w):3d}  負:{len(l):3d}  "
+              f"勝率:{wr:5.1f}%  合計:{total:+8.1f}$/oz  DD:{dd:+6.1f}  TP:{tp_h} SL:{sl_h} TR:{tr_h}")
+        if show_detail and len(t) > 0:
+            buy_t  = t[t['direction'] == 'BREAKOUT_BUY']
+            sell_t = t[t['direction'] == 'BREAKOUT_SELL']
+            if len(buy_t)  > 0: print(f"    └BUY  {len(buy_t):3d}件 勝率{len(buy_t[buy_t['pnl']>0])/len(buy_t)*100:.0f}% 合計{buy_t['pnl'].sum():+.1f}")
+            if len(sell_t) > 0: print(f"    └SELL {len(sell_t):3d}件 勝率{len(sell_t[sell_t['pnl']>0])/len(sell_t)*100:.0f}% 合計{sell_t['pnl'].sum():+.1f}")
+        return total, dd
+
+    # ── A: SL/TP固定パターン ──
+    print("\n  [A] SL5$ / TP固定（各種TP）")
+    print(f"  {'─'*44}  {'取引':>4}  {'勝':>3}  {'負':>3}  {'勝率':>5}  {'合計':>9}  {'DD':>6}  TP  SL  TR")
+    for tp_val in [10.0, 15.0, 20.0, 30.0]:
+        sig = generate_breakout_signals(df)
+        t   = simulate_breakout_trades(df, sig, sl=SL_PIPS, tp=tp_val, use_trailing=False)
+        show(f"TP{tp_val:.0f}$/oz SL5$", t)
+
+    # ── B: トレーリング ──
+    print("\n  [B] トレーリング（TT/TW各種）")
+    for tt, tw in [(3.0, 2.0), (4.0, 3.0), (5.0, 3.0), (8.0, 5.0)]:
+        sig = generate_breakout_signals(df)
+        t   = simulate_breakout_trades(df, sig, sl=SL_PIPS, use_trailing=True,
+                                        trail_trigger=tt, trail_width=tw)
+        show(f"トレーリング TT{tt:.0f}$ TW{tw:.0f}$", t)
+
+    # ── C: ダマシ除去フィルター比較 ──
+    print("\n  [C] ダマシ除去フィルター（最小突破ATR倍率）")
+    for min_atr in [0.0, 0.3, 0.5, 1.0]:
+        sig = generate_breakout_signals(df, min_break_atr=min_atr)
+        t   = simulate_breakout_trades(df, sig, sl=SL_PIPS, tp=15.0, use_trailing=False)
+        show(f"最小突破ATR×{min_atr:.1f}  TP15$ SL5$", t, show_detail=(min_atr == 0.3))
+
+    # ── D: ハイブリッド+ブレイクアウト 比較 ──
+    print(f"\n  [D] 既存ハイブリッドとの比較（参考値）")
+    print(f"  {'─'*72}")
+    sig_bo = generate_breakout_signals(df, min_break_atr=0.3)
+    t_bo15 = simulate_breakout_trades(df, sig_bo, sl=SL_PIPS, tp=15.0, use_trailing=False)
+    t_bo_tr = simulate_breakout_trades(df, sig_bo, sl=SL_PIPS, use_trailing=True,
+                                        trail_trigger=4.0, trail_width=3.0)
+    pnl_bo15, dd_bo15 = show("ブレイクアウト TP15$ SL5$", t_bo15, show_detail=True)
+    pnl_bo_tr, _      = show("ブレイクアウト トレーリングTT4 TW3", t_bo_tr, show_detail=True)
+    print(f"\n  参考: ハイブリッド（トレーリング+クロス転換）合計  +577.0$/oz / 60日")
+    print(f"  参考: ハイブリッド+レンジ逆張り                    合計 +1059.1$/oz / 60日")
+
+    if len(t_bo15) > 0:
+        monthly_bo = t_bo15['pnl'].sum() / 2
+        print(f"\n  ── ブレイクアウト単体 ロット別月間換算 ──")
+        print(f"  {'ロット':>8}  {'月利益($)':>10}  {'月利益(¥)':>10}")
+        for lot in [0.001, 0.01, 0.1]:
+            oz = lot * 100
+            mp = monthly_bo * oz
+            print(f"  {lot:>8.3f}  {mp:>+10.1f}$  {mp*150:>+10.0f}¥")
+
+    print(f"\n{'=' * 72}")
 
 
 if __name__ == "__main__":
