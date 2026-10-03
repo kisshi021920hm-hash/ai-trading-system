@@ -398,7 +398,8 @@ def simulate_trades_dynamic_sl(df_price, df_signals, channel_period=30, channel_
 def simulate_trades_active_reentry(df_price, df_signals,
                                    sl=SL_PIPS, tp=TP_PIPS,
                                    trail_trigger=TRAIL_TRIGGER, trail_width=TRAIL_WIDTH,
-                                   use_trailing=True, max_reentry=10):
+                                   use_trailing=True, max_reentry=10,
+                                   trail_only=False, max_bars=None):
     """クロス継続中の再エントリー戦略
 
     クロスシグナルが有効な間（反対クロスが出るまで）、
@@ -524,12 +525,17 @@ def simulate_trades_active_reentry(df_price, df_signals,
             if sub_exit_reason in ("CROSS_FLIP", "TP", "TIMEOUT"):
                 break
 
-            # SL or TRAIL → 次のバーでクロスが継続していれば再エントリー
+            # SL or TRAIL → 再エントリー判定
+            if trail_only and sub_exit_reason == "SL":
+                break  # TRAIL後のみの場合、SLで終了
+
             next_idx = sub_exit_idx + 1
             if next_idx >= len(close):
                 break
             if active_cross[next_idx] != direction:
                 break  # クロスが変わっていたら再エントリーしない
+            if max_bars is not None and (next_idx - i0) > max_bars:
+                break  # シグナルからN本以上経過したら終了
 
             entry_idx   = next_idx
             entry_price = close[next_idx]
@@ -1771,10 +1777,24 @@ def main():
     print(f"     スプレッドあり({SPREAD}$/oz×{len(t_base_re)}): {base_re_net:+.1f}$/oz\n")
 
     print(f"  ━ 再エントリー比較 ━")
+    # (label, max_reentry, trail_only, max_bars)
+    scenarios_re = [
+        ("制限なし max1",          1,  False, None),
+        ("制限なし max3",          3,  False, None),
+        ("制限なし max5",          5,  False, None),
+        ("TRAIL後のみ max3",       3,  True,  None),
+        ("TRAIL後のみ max5",       5,  True,  None),
+        ("N本制限20(5h) max5",     5,  False, 20),
+        ("N本制限40(10h) max5",    5,  False, 40),
+        ("TRAIL後+N本20 max5",     5,  True,  20),
+        ("TRAIL後+N本40 max5",     5,  True,  40),
+    ]
+
     re_results = []
-    for max_re in [1, 3, 5, 10]:
+    for label_re, max_re, trail_only, max_bars in scenarios_re:
         t_re = simulate_trades_active_reentry(
             df, df_sig_rsi_re, max_reentry=max_re,
+            trail_only=trail_only, max_bars=max_bars,
         )
         if len(t_re) == 0:
             continue
@@ -1793,12 +1813,14 @@ def main():
         reason_str  = " ".join([f"{k}:{v}" for k, v in reasons.items()])
         bar_w = int(wr / 5)
         bar   = "█" * bar_w + "░" * (20 - bar_w)
-        print(f"  最大{max_re:2d}回再エントリー [{bar}] {wr:5.1f}%  "
-              f"取引:{len(t_re):3d}(再:{n_reent:3d})  "
+        print(f"  {label_re:<22} [{bar}] {wr:5.1f}%  "
+              f"取引:{len(t_re):4d}(再:{n_reent:3d})  "
               f"スプレッドなし:{total:+8.1f}  スプレッドあり:{total_net:+8.1f}$/oz  "
               f"ベース差:{diff_net:+.1f}$/oz  RR:{rr:.2f}  [{reason_str}]")
         re_results.append({
-            'max_reentry': max_re, 'win_rate': round(wr, 1),
+            'label': label_re, 'max_reentry': max_re,
+            'trail_only': trail_only, 'max_bars': max_bars,
+            'win_rate': round(wr, 1),
             'num_trades': len(t_re), 'num_reentry': n_reent,
             'total_pnl': round(total, 2), 'total_net': round(total_net, 2),
             'diff_vs_base': round(diff_net, 2),
@@ -1815,8 +1837,8 @@ def main():
               f"スプレッドあり:{base_re_net:+.1f}$/oz")
         for r in re_results:
             sign = "✅" if r['total_net'] > base_re_net else "❌"
-            print(f"     {sign} 最大{r['max_reentry']:2d}回再エントリー: "
-                  f"勝率{r['win_rate']:5.1f}%  取引{r['num_trades']:3d}  "
+            print(f"     {sign} {r['label']:<22}: "
+                  f"勝率{r['win_rate']:5.1f}%  取引{r['num_trades']:4d}  "
                   f"スプレッドあり:{r['total_net']:+8.1f}$/oz  差:{r['diff_vs_base']:+.1f}$/oz")
 
     print(f"\n{'=' * 72}")
