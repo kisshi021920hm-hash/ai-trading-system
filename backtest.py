@@ -684,6 +684,9 @@ def compute_composite(df):
     ema20 = close.ewm(span=20, adjust=False).mean()
     ema50 = close.ewm(span=50, adjust=False).mean()
     ema200 = close.ewm(span=min(200, len(close)-1), adjust=False).mean()
+    sma25  = close.rolling(25).mean()
+    sma75  = close.rolling(75).mean()
+    sma200 = close.rolling(200).mean()
     bb_up, bb_lo = calculate_bb(close)
     stoch_k, stoch_d = calculate_stoch(high, low, close)
     adx, di_p, di_m = calculate_adx(high, low, close)
@@ -740,9 +743,12 @@ def compute_composite(df):
             'buy_score': buy,
             'sell_score': sell,
             'rsi': rsi.iloc[i],
-            'adx':  adx.iloc[i],
-            'di_p': di_p.iloc[i],
-            'di_m': di_m.iloc[i],
+            'adx':   adx.iloc[i],
+            'di_p':  di_p.iloc[i],
+            'di_m':  di_m.iloc[i],
+            'sma25':  sma25.iloc[i],
+            'sma75':  sma75.iloc[i],
+            'sma200': sma200.iloc[i],
             'macd': macd.iloc[i],
             'macd_sig': macd_sig.iloc[i],
             'is_breakout': is_breakout,
@@ -1852,6 +1858,73 @@ def main():
             print(f"  🏆 最良: {best['label']}")
             print(f"     勝率:{best['win_rate']}%  取引:{best['num_trades']}  "
                   f"合計:{best['total']:+.1f}$/oz  ベース差:{best['diff']:+.1f}$/oz  RR:{best['rr']:.2f}")
+
+    # ──── ⑥c パーフェクトオーダーフィルター ────
+    print(f"\n{'=' * 72}")
+    print("  【⑥c パーフェクトオーダーフィルター】（25MA / 75MA / 200MA）")
+    print("  BUY: 25MA>75MA>200MA  /  SELL: 25MA<75MA<200MA")
+    print("─" * 72)
+
+    df_sig_po = df_sig.copy()
+    # NaN除去（SMAが揃うのに200本必要）
+    df_sig_po = df_sig_po.dropna(subset=['sma25', 'sma75', 'sma200'])
+
+    def po_buy(s):
+        return (s['crossover'] == 'UP_CROSS') & (s['sma25'] > s['sma75']) & (s['sma75'] > s['sma200'])
+    def po_sell(s):
+        return (s['crossover'] == 'DOWN_CROSS') & (s['sma25'] < s['sma75']) & (s['sma75'] < s['sma200'])
+    def po_either(s):
+        return po_buy(s) | po_sell(s)
+
+    po_base_total = simulate_trades(df, apply_filters(df_sig, rsi_filter=True), use_trailing=True)['pnl'].sum()
+
+    scenarios_po = [
+        ("PO単独（RSIなし）",        df_sig_po[po_either(df_sig_po)].copy()),
+        ("PO + RSIフィルター",       apply_filters(df_sig_po[po_either(df_sig_po)].copy(), rsi_filter=True)),
+        ("PO BUYのみ + RSI",         apply_filters(df_sig_po[po_buy(df_sig_po)].copy(), rsi_filter=True)),
+        ("PO SELLのみ + RSI",        apply_filters(df_sig_po[po_sell(df_sig_po)].copy(), rsi_filter=True)),
+        # 緩和版：75MA>200MAのみ（大きなトレンド確認だけ）
+        ("緩和PO(75>200のみ) + RSI",
+         apply_filters(df_sig_po[
+             ((df_sig_po['crossover']=='UP_CROSS')   & (df_sig_po['sma75'] > df_sig_po['sma200'])) |
+             ((df_sig_po['crossover']=='DOWN_CROSS') & (df_sig_po['sma75'] < df_sig_po['sma200']))
+         ].copy(), rsi_filter=True)),
+    ]
+
+    print(f"\n  ベースライン(①RSI): 勝率65.8%  取引158  合計+255.8$/oz\n")
+    po_results = []
+    for lbl_po, filtered_po in scenarios_po:
+        t_po = simulate_trades(df, filtered_po, use_trailing=True)
+        if len(t_po) == 0:
+            print(f"  {'❓'} {lbl_po:<42}: シグナルなし（PO条件に合うシグナルがない）")
+            continue
+        wins_po   = t_po[t_po['pnl'] > 0]
+        losses_po = t_po[t_po['pnl'] <= 0]
+        wr_po     = len(wins_po) / len(t_po) * 100
+        total_po  = t_po['pnl'].sum()
+        avg_w_po  = wins_po['pnl'].mean()   if len(wins_po)   > 0 else 0
+        avg_l_po  = losses_po['pnl'].mean() if len(losses_po) > 0 else 0
+        rr_po     = abs(avg_w_po / avg_l_po) if avg_l_po != 0 else 0
+        dd_po     = calc_max_drawdown(t_po)
+        diff_po   = total_po - po_base_total
+        bar_w     = int(wr_po / 5); bar = "█" * bar_w + "░" * (20 - bar_w)
+        mark      = "✅" if total_po > po_base_total else "❌"
+        print(f"  {mark} {lbl_po:<42} [{bar}] {wr_po:5.1f}%  取引:{len(t_po):3d}  "
+              f"合計:{total_po:+8.1f}$/oz({diff_po:+.1f})  DD:{dd_po:+.1f}  RR:{rr_po:.2f}")
+        po_results.append({'label': lbl_po, 'win_rate': round(wr_po,1),
+                            'num_trades': len(t_po), 'total': round(total_po,2),
+                            'diff': round(diff_po,2), 'rr': round(rr_po,2), 'max_dd': round(dd_po,2)})
+
+    if po_results:
+        winners_po = [r for r in po_results if r['total'] > po_base_total]
+        print(f"\n  改善あり: {len(winners_po)}/{len(po_results)}件")
+        if winners_po:
+            best_po = max(winners_po, key=lambda x: x['total'])
+            print(f"  🏆 最良: {best_po['label']}")
+            print(f"     勝率:{best_po['win_rate']}%  取引:{best_po['num_trades']}  "
+                  f"合計:{best_po['total']:+.1f}$/oz  ベース差:{best_po['diff']:+.1f}$/oz  RR:{best_po['rr']:.2f}")
+        else:
+            print(f"  ※全パターンでベースライン(+255.8$/oz)を下回りました")
 
     # ──── ⑦ スキャルピング再エントリー戦略 ────
     print(f"\n{'=' * 72}")
