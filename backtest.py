@@ -1784,6 +1784,137 @@ def main():
         print(f"  {mark} {lbl_rb:<38} [{bar}] {wr_rb:5.1f}%  取引:{len(t_rb):3d}  "
               f"合計:{total_rb:+8.1f}$/oz({diff_rb:+.1f})  DD:{dd_rb:+.1f}  RR:{rr_rb:.2f}")
 
+    # ──── ⑥d マルチタイムフレーム確認 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑥d マルチタイムフレーム確認】（1時間足で方向一致のみ）")
+    print("  15分足シグナルを1時間足のトレンド方向でフィルタリング")
+    print("─" * 72)
+
+    try:
+        print("  1時間足データ取得中...")
+        df1h_mtf = yf.download("GC=F", period="60d", interval="1h", progress=False)
+        if isinstance(df1h_mtf.columns, pd.MultiIndex):
+            df1h_mtf.columns = df1h_mtf.columns.get_level_values(0)
+        df1h_mtf.index = pd.to_datetime(df1h_mtf.index)
+        if df1h_mtf.index.tz is not None:
+            df1h_mtf.index = df1h_mtf.index.tz_localize(None)
+        df1h_mtf = df1h_mtf.dropna(subset=['Close'])
+        print(f"  取得: {len(df1h_mtf)}本")
+
+        close1h = df1h_mtf['Close']
+        # 1h足の各種方向指標を計算
+        ema20_1h  = close1h.ewm(span=20, adjust=False).mean()
+        ema50_1h  = close1h.ewm(span=50, adjust=False).mean()
+        ema200_1h = close1h.ewm(span=min(200, len(close1h)-1), adjust=False).mean()
+        macd1h    = close1h.ewm(span=12, adjust=False).mean() - close1h.ewm(span=26, adjust=False).mean()
+        macd1h_sig = macd1h.ewm(span=9, adjust=False).mean()
+        adx1h, di_p1h, di_m1h = calculate_adx(df1h_mtf['High'], df1h_mtf['Low'], close1h)
+
+        # 1h方向をDataFrameにまとめ
+        df1h_dir = pd.DataFrame({
+            'ema_bull':  ema20_1h > ema50_1h,        # EMA20>EMA50
+            'ema200_bull': close1h > ema200_1h,       # 終値>EMA200
+            'macd_bull': macd1h > macd1h_sig,         # MACD>シグナル
+            'di_bull':   di_p1h > di_m1h,             # DI+>DI-
+        }, index=df1h_mtf.index)
+
+        # 15分足シグナルの各タイムスタンプに対して1h方向をマッピング
+        df_sig_rsi_mtf = apply_filters(df_sig, rsi_filter=True).copy()
+
+        # インデックスをdatetime64[ns]に統一
+        df1h_dir.index = df1h_dir.index.astype('datetime64[ns]')
+
+        def map_1h_direction(sig_times, col):
+            """15分足のタイムスタンプを1時間足の方向にマッピング"""
+            result = []
+            idx_arr = df1h_dir.index.values  # numpy datetime64配列
+            for t in sig_times:
+                t_ns = np.datetime64(t, 'ns')
+                mask = idx_arr <= t_ns
+                if mask.any():
+                    result.append(df1h_dir[col].values[mask][-1])
+                else:
+                    result.append(None)
+            return result
+
+        sig_times = pd.to_datetime(df_sig_rsi_mtf['time'])
+        df_sig_rsi_mtf = df_sig_rsi_mtf.copy()
+        df_sig_rsi_mtf['1h_ema_bull']   = map_1h_direction(sig_times, 'ema_bull')
+        df_sig_rsi_mtf['1h_ema200_bull']= map_1h_direction(sig_times, 'ema200_bull')
+        df_sig_rsi_mtf['1h_macd_bull']  = map_1h_direction(sig_times, 'macd_bull')
+        df_sig_rsi_mtf['1h_di_bull']    = map_1h_direction(sig_times, 'di_bull')
+
+        def mtf_filter(s, col):
+            """1h方向と15分足シグナル方向の一致チェック"""
+            buy_ok  = (s['crossover'] == 'UP_CROSS')   & (s[col] == True)
+            sell_ok = (s['crossover'] == 'DOWN_CROSS') & (s[col] == False)
+            return buy_ok | sell_ok
+
+        mtf_base_total = simulate_trades(df, df_sig_rsi_mtf, use_trailing=True)['pnl'].sum()
+
+        scenarios_mtf = [
+            ("①RSI（ベースライン）",             df_sig_rsi_mtf,                          None),
+            ("MTF: 1h EMA20>50 一致",           df_sig_rsi_mtf[mtf_filter(df_sig_rsi_mtf, '1h_ema_bull')].copy(),   '1h_ema_bull'),
+            ("MTF: 1h 終値>EMA200 一致",         df_sig_rsi_mtf[mtf_filter(df_sig_rsi_mtf, '1h_ema200_bull')].copy(),'1h_ema200_bull'),
+            ("MTF: 1h MACD方向 一致",            df_sig_rsi_mtf[mtf_filter(df_sig_rsi_mtf, '1h_macd_bull')].copy(),  '1h_macd_bull'),
+            ("MTF: 1h DI方向 一致",              df_sig_rsi_mtf[mtf_filter(df_sig_rsi_mtf, '1h_di_bull')].copy(),    '1h_di_bull'),
+            # 複合条件
+            ("MTF: EMA+MACD両方一致",
+             df_sig_rsi_mtf[
+                 mtf_filter(df_sig_rsi_mtf, '1h_ema_bull') &
+                 mtf_filter(df_sig_rsi_mtf, '1h_macd_bull')
+             ].copy(), None),
+            ("MTF: EMA+DI両方一致",
+             df_sig_rsi_mtf[
+                 mtf_filter(df_sig_rsi_mtf, '1h_ema_bull') &
+                 mtf_filter(df_sig_rsi_mtf, '1h_di_bull')
+             ].copy(), None),
+            ("MTF: EMA+MACD+DI全一致",
+             df_sig_rsi_mtf[
+                 mtf_filter(df_sig_rsi_mtf, '1h_ema_bull') &
+                 mtf_filter(df_sig_rsi_mtf, '1h_macd_bull') &
+                 mtf_filter(df_sig_rsi_mtf, '1h_di_bull')
+             ].copy(), None),
+        ]
+
+        print(f"\n  {'フィルター':<32}  {'勝率':>6}  {'取引':>5}  {'合計P&L':>10}  {'ベース差':>8}  {'DD':>7}  {'RR':>5}")
+        print(f"  {'─'*32}  {'─'*6}  {'─'*5}  {'─'*10}  {'─'*8}  {'─'*7}  {'─'*5}")
+
+        mtf_results = []
+        for lbl_mtf, filtered_mtf, _ in scenarios_mtf:
+            t_mtf = simulate_trades(df, filtered_mtf, use_trailing=True)
+            if len(t_mtf) == 0:
+                print(f"  ❓ {lbl_mtf:<32}: シグナルなし")
+                continue
+            w = t_mtf[t_mtf['pnl'] > 0]; l = t_mtf[t_mtf['pnl'] <= 0]
+            wr    = len(w) / len(t_mtf) * 100
+            total = t_mtf['pnl'].sum()
+            aw    = w['pnl'].mean()  if len(w) > 0 else 0
+            al    = l['pnl'].mean()  if len(l) > 0 else 0
+            rr    = abs(aw/al)       if al != 0 else 0
+            dd    = calc_max_drawdown(t_mtf)
+            diff  = total - mtf_base_total
+            mark  = "✅" if total > mtf_base_total else "❌"
+            print(f"  {mark} {lbl_mtf:<32}  {wr:6.1f}%  {len(t_mtf):5d}  {total:+10.1f}  {diff:+8.1f}  {dd:+7.1f}  {rr:5.2f}")
+            mtf_results.append({'label': lbl_mtf, 'win_rate': round(wr,1),
+                                 'num_trades': len(t_mtf), 'total': round(total,2),
+                                 'diff': round(diff,2), 'rr': round(rr,2), 'max_dd': round(dd,2)})
+
+        winners_mtf = [r for r in mtf_results if r['total'] > mtf_base_total]
+        print(f"\n  改善あり: {len(winners_mtf)}/{len(mtf_results)}件")
+        if winners_mtf:
+            best_mtf = max(winners_mtf, key=lambda x: x['total'])
+            print(f"  🏆 最良: {best_mtf['label']}")
+            print(f"     勝率:{best_mtf['win_rate']}%  取引:{best_mtf['num_trades']}  "
+                  f"合計:{best_mtf['total']:+.1f}$/oz  ベース差:{best_mtf['diff']:+.1f}$/oz")
+        else:
+            print(f"  ※全パターンでベースライン(+255.8$/oz)を下回りました")
+
+    except Exception as e:
+        import traceback
+        print(f"  ⚠️  MTFテストエラー: {e}")
+        traceback.print_exc()
+
     # ──── ⑥b ADX/DI フィルター比較 ────
     print(f"\n{'=' * 72}")
     print("  【⑥b ADX/DI フィルター比較】（15分足 × 過去60日）")
