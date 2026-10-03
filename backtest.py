@@ -395,6 +395,150 @@ def simulate_trades_dynamic_sl(df_price, df_signals, channel_period=30, channel_
     return pd.DataFrame(trades)
 
 
+def simulate_trades_active_reentry(df_price, df_signals,
+                                   sl=SL_PIPS, tp=TP_PIPS,
+                                   trail_trigger=TRAIL_TRIGGER, trail_width=TRAIL_WIDTH,
+                                   use_trailing=True, max_reentry=10):
+    """クロス継続中の再エントリー戦略
+
+    クロスシグナルが有効な間（反対クロスが出るまで）、
+    決済後も同方向に再エントリーし続ける。
+    通常のSL/TP/トレーリングパラメータをそのまま使用。
+    """
+    close = df_price['Close'].values
+    high  = df_price['High'].values
+    low   = df_price['Low'].values
+    times = df_price.index
+
+    # バーごとにアクティブクロス方向を記録（最後のクロスを継承）
+    active_cross = [None] * len(close)
+    sig_rows = df_signals[df_signals['crossover'].notna()].copy()
+    sig_rows = sig_rows.sort_values('idx')
+    current_cross = None
+    sig_iter = sig_rows.iterrows()
+    next_sig = next(sig_iter, None)
+    for i in range(len(close)):
+        while next_sig is not None and next_sig[1]['idx'] <= i:
+            current_cross = next_sig[1]['crossover']
+            next_sig = next(sig_iter, None)
+        active_cross[i] = current_cross
+
+    all_trades = []
+    processed_signals = set()
+
+    for _, row in sig_rows.iterrows():
+        i0 = int(row['idx'])
+        direction = row['crossover']
+        is_buy = direction == "UP_CROSS"
+
+        # 既にこのシグナル起点でエントリー済みならスキップ
+        if i0 in processed_signals:
+            continue
+        processed_signals.add(i0)
+
+        entry_idx   = i0
+        entry_price = row['close']
+        rentry_count = 0
+
+        while rentry_count <= max_reentry and entry_idx < len(close) - 2:
+            ep = entry_price
+            trail_peak = ep
+            trail_sl   = None
+            sub_exit_price  = None
+            sub_exit_reason = None
+            sub_exit_idx    = None
+
+            for j in range(entry_idx + 1, min(entry_idx + 400, len(close))):
+                h, l, c = high[j], low[j], close[j]
+
+                # アクティブクロスが反転 → 即決済
+                if active_cross[j] != direction and active_cross[j] is not None:
+                    sub_exit_price  = c
+                    sub_exit_reason = "CROSS_FLIP"
+                    sub_exit_idx    = j; break
+
+                # TP
+                if is_buy and h >= ep + tp:
+                    sub_exit_price  = ep + tp
+                    sub_exit_reason = "TP"
+                    sub_exit_idx    = j; break
+                if not is_buy and l <= ep - tp:
+                    sub_exit_price  = ep - tp
+                    sub_exit_reason = "TP"
+                    sub_exit_idx    = j; break
+
+                # SL
+                if is_buy and l <= ep - sl:
+                    sub_exit_price  = ep - sl
+                    sub_exit_reason = "SL"
+                    sub_exit_idx    = j; break
+                if not is_buy and h >= ep + sl:
+                    sub_exit_price  = ep + sl
+                    sub_exit_reason = "SL"
+                    sub_exit_idx    = j; break
+
+                # トレーリング
+                if use_trailing:
+                    if is_buy:
+                        if h > trail_peak: trail_peak = h
+                        if trail_peak - ep >= trail_trigger:
+                            new_ts = trail_peak - trail_width
+                            if trail_sl is None or new_ts > trail_sl:
+                                trail_sl = new_ts
+                        if trail_sl and l <= trail_sl:
+                            sub_exit_price  = trail_sl
+                            sub_exit_reason = "TRAIL"
+                            sub_exit_idx    = j; break
+                    else:
+                        if l < trail_peak: trail_peak = l
+                        if ep - trail_peak >= trail_trigger:
+                            new_ts = trail_peak + trail_width
+                            if trail_sl is None or new_ts < trail_sl:
+                                trail_sl = new_ts
+                        if trail_sl and h >= trail_sl:
+                            sub_exit_price  = trail_sl
+                            sub_exit_reason = "TRAIL"
+                            sub_exit_idx    = j; break
+
+            if sub_exit_price is None:
+                last_j = min(entry_idx + 399, len(close) - 1)
+                sub_exit_price  = close[last_j]
+                sub_exit_reason = "TIMEOUT"
+                sub_exit_idx    = last_j
+
+            pnl = (sub_exit_price - ep) if is_buy else (ep - sub_exit_price)
+            all_trades.append({
+                'direction':   direction,
+                'entry_time':  times[entry_idx],
+                'exit_time':   times[sub_exit_idx],
+                'entry_price': ep,
+                'exit_price':  sub_exit_price,
+                'pnl':         round(pnl, 2),
+                'exit_reason': sub_exit_reason,
+                'reentry_no':  rentry_count,
+                'rsi':  row['rsi'],
+                'adx':  row['adx'],
+            })
+
+            # クロス反転 or TP or タイムアウト → セッション終了
+            if sub_exit_reason in ("CROSS_FLIP", "TP", "TIMEOUT"):
+                break
+
+            # SL or TRAIL → 次のバーでクロスが継続していれば再エントリー
+            next_idx = sub_exit_idx + 1
+            if next_idx >= len(close):
+                break
+            if active_cross[next_idx] != direction:
+                break  # クロスが変わっていたら再エントリーしない
+
+            entry_idx   = next_idx
+            entry_price = close[next_idx]
+            rentry_count += 1
+
+    df_trades = pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
+    return df_trades
+
+
 def simulate_trades_scalping(df_price, df_signals,
                              trail_trigger=2.0, trail_width=1.5,
                              adx_min=25.0, channel_period=30, channel_std=1.5,
@@ -1607,6 +1751,73 @@ def main():
               f"スプレッドなし:{base_total:+.1f}$/oz  スプレッドあり:{base_net:+.1f}$/oz")
         print(f"     スキャルピング最良: 勝率{best['win_rate']}%  取引{best['num_trades']}  "
               f"スプレッドあり:{best['total_net']:+.1f}$/oz  差:{best['diff_vs_base']:+.1f}$/oz")
+
+    # ──── ⑧ クロス継続中の再エントリー戦略 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑧ クロス継続中の再エントリー戦略】（15分足 × RSIフィルター）")
+    print("  反対クロスが出るまで、決済後も同方向に再エントリー継続")
+    print("  ※通常のSL/TP/トレーリングパラメータをそのまま使用")
+    print("─" * 72)
+
+    df_sig_rsi_re = apply_filters(df_sig, rsi_filter=True)
+
+    SPREAD = 0.5
+    t_base_re = simulate_trades(df, df_sig_rsi_re, use_trailing=True)
+    base_re_total = t_base_re['pnl'].sum()
+    base_re_wr    = len(t_base_re[t_base_re['pnl'] > 0]) / len(t_base_re) * 100
+    base_re_net   = base_re_total - len(t_base_re) * SPREAD
+    print(f"\n  ① ベースライン（現状）")
+    print_stats("  現状", t_base_re)
+    print(f"     スプレッドあり({SPREAD}$/oz×{len(t_base_re)}): {base_re_net:+.1f}$/oz\n")
+
+    print(f"  ━ 再エントリー比較 ━")
+    re_results = []
+    for max_re in [1, 3, 5, 10]:
+        t_re = simulate_trades_active_reentry(
+            df, df_sig_rsi_re, max_reentry=max_re,
+        )
+        if len(t_re) == 0:
+            continue
+        wins   = t_re[t_re['pnl'] > 0]
+        losses = t_re[t_re['pnl'] <= 0]
+        wr     = len(wins) / len(t_re) * 100
+        total  = t_re['pnl'].sum()
+        avg_w  = wins['pnl'].mean()   if len(wins)   > 0 else 0
+        avg_l  = losses['pnl'].mean() if len(losses) > 0 else 0
+        rr     = abs(avg_w / avg_l)   if avg_l != 0 else 0
+        spread_cost = len(t_re) * SPREAD
+        total_net   = total - spread_cost
+        diff_net    = total_net - base_re_net
+        n_reent     = len(t_re[t_re['reentry_no'] > 0])
+        reasons     = t_re['exit_reason'].value_counts().to_dict()
+        reason_str  = " ".join([f"{k}:{v}" for k, v in reasons.items()])
+        bar_w = int(wr / 5)
+        bar   = "█" * bar_w + "░" * (20 - bar_w)
+        print(f"  最大{max_re:2d}回再エントリー [{bar}] {wr:5.1f}%  "
+              f"取引:{len(t_re):3d}(再:{n_reent:3d})  "
+              f"スプレッドなし:{total:+8.1f}  スプレッドあり:{total_net:+8.1f}$/oz  "
+              f"ベース差:{diff_net:+.1f}$/oz  RR:{rr:.2f}  [{reason_str}]")
+        re_results.append({
+            'max_reentry': max_re, 'win_rate': round(wr, 1),
+            'num_trades': len(t_re), 'num_reentry': n_reent,
+            'total_pnl': round(total, 2), 'total_net': round(total_net, 2),
+            'diff_vs_base': round(diff_net, 2),
+            'avg_win': round(avg_w, 2), 'avg_loss': round(avg_l, 2), 'rr': round(rr, 2),
+        })
+
+    if re_results:
+        best = max(re_results, key=lambda x: x['total_net'])
+        print(f"\n  🏆 ベスト: 最大{best['max_reentry']}回再エントリー")
+        print(f"     勝率:{best['win_rate']}%  取引:{best['num_trades']}(再:{best['num_reentry']})  "
+              f"スプレッドあり:{best['total_net']:+.1f}$/oz  ベース差:{best['diff_vs_base']:+.1f}$/oz")
+        print(f"\n  📊 まとめ:")
+        print(f"     ベースライン:       勝率{base_re_wr:.1f}%  取引{len(t_base_re):3d}  "
+              f"スプレッドあり:{base_re_net:+.1f}$/oz")
+        for r in re_results:
+            sign = "✅" if r['total_net'] > base_re_net else "❌"
+            print(f"     {sign} 最大{r['max_reentry']:2d}回再エントリー: "
+                  f"勝率{r['win_rate']:5.1f}%  取引{r['num_trades']:3d}  "
+                  f"スプレッドあり:{r['total_net']:+8.1f}$/oz  差:{r['diff_vs_base']:+.1f}$/oz")
 
     print(f"\n{'=' * 72}")
     print("  バックテスト完了")
