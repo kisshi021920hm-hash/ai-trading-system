@@ -1968,6 +1968,89 @@ def main():
               f"平均勝:{avg_w_g:+.1f}  平均負:{avg_l_g:+.1f}  RR:{rr_g:.2f}  DD:{dd_g:+.1f}  "
               f"平均保有:{hold_bars.mean():.1f}本")
 
+    # ──── ⑤b-3 クロス転換≥3 × フィルター追加で負け削減 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑤b-3 クロス転換スコア差≥3 × 追加フィルターで負け削減】")
+    print("  ベースライン: スコア差≥3  104件  勝率14.4%  +525.7$/oz  DD:-115.0  負け~89件")
+    print("─" * 72)
+
+    sig_base3 = apply_filters(df_sig, rsi_filter=True).copy()
+    sig_base3 = sig_base3[(sig_base3['buy_score'] - sig_base3['sell_score']).abs() >= 3]
+
+    def show_flip_result(label, sig_f):
+        t = simulate_trades(df, sig_f, sl=SL_PIPS, tp=999.0, use_trailing=False)
+        if len(t) == 0:
+            print(f"  {'─':2} {label:<42} シグナルなし"); return
+        wins   = t[t['pnl'] > 0]
+        losses = t[t['pnl'] <= 0]
+        wr     = len(wins) / len(t) * 100
+        total  = t['pnl'].sum()
+        dd     = calc_max_drawdown(t)
+        rr_val = abs(wins['pnl'].mean() / losses['pnl'].mean()) if len(losses) > 0 else 0
+        bar    = "█" * int(wr/5) + "░" * (20-int(wr/5))
+        marker = "🏆" if total > 525 and len(losses) < 89 else (
+                 "✅" if total > 400 and len(losses) < 89 else (
+                 "✨" if len(losses) < 89 else "──"))
+        print(f"  {marker} {label:<42} [{bar}] {wr:5.1f}%  取引:{len(t):3d}  "
+              f"負:{len(losses):3d}件  合計:{total:+8.1f}$/oz  DD:{dd:+7.1f}  RR:{rr_val:.2f}")
+
+    print(f"\n  {'':2} {'パターン':<42} {'':20}  {'勝率':>5}  {'取引':>4}  {'負件数':>5}  {'合計P&L':>9}  {'DD':>7}  {'RR':>5}")
+    print(f"  {'─'*2} {'─'*42} {'─'*22} {'─'*5} {'─'*4} {'─'*7} {'─'*9} {'─'*7} {'─'*5}")
+
+    # ベースライン
+    show_flip_result("【BASE】スコア差≥3のみ", sig_base3)
+
+    # |DI差| フィルター単体
+    for di_t in [5, 8, 10, 12, 15, 20]:
+        sig_f = sig_base3[(sig_base3['di_p'] - sig_base3['di_m']).abs() >= di_t].copy()
+        show_flip_result(f"スコア差≥3 × |DI差|≥{di_t}", sig_f)
+
+    # ADX フィルター単体
+    for adx_t in [20, 22, 25, 28, 30]:
+        sig_f = sig_base3[sig_base3['adx'] >= adx_t].copy()
+        show_flip_result(f"スコア差≥3 × ADX≥{adx_t}", sig_f)
+
+    # DI方向一致（BUY時はDI+>DI-、SELL時はDI->DI+）
+    sig_f = sig_base3.copy()
+    buy_mask  = (sig_f['crossover'] == 'UP_CROSS')   & (sig_f['di_p'] > sig_f['di_m'])
+    sell_mask = (sig_f['crossover'] == 'DOWN_CROSS') & (sig_f['di_m'] > sig_f['di_p'])
+    sig_f = sig_f[buy_mask | sell_mask]
+    show_flip_result("スコア差≥3 × DI方向一致", sig_f)
+
+    # |DI差| + ADX 組み合わせ（有望なもの）
+    for di_t, adx_t in [(10, 25), (15, 20), (15, 25), (10, 20), (12, 22)]:
+        sig_f = sig_base3[(sig_base3['di_p'] - sig_base3['di_m']).abs() >= di_t].copy()
+        sig_f = sig_f[sig_f['adx'] >= adx_t]
+        show_flip_result(f"スコア差≥3 × |DI差|≥{di_t} × ADX≥{adx_t}", sig_f)
+
+    # DI方向一致 + |DI差|
+    for di_t in [10, 15]:
+        sig_f = sig_base3.copy()
+        buy_mask  = (sig_f['crossover'] == 'UP_CROSS')   & (sig_f['di_p'] > sig_f['di_m'])
+        sell_mask = (sig_f['crossover'] == 'DOWN_CROSS') & (sig_f['di_m'] > sig_f['di_p'])
+        sig_f = sig_f[(buy_mask | sell_mask) & ((sig_f['di_p'] - sig_f['di_m']).abs() >= di_t)]
+        show_flip_result(f"スコア差≥3 × DI方向一致 × |DI差|≥{di_t}", sig_f)
+
+    # DI方向一致 + ADX
+    for adx_t in [20, 25]:
+        sig_f = sig_base3.copy()
+        buy_mask  = (sig_f['crossover'] == 'UP_CROSS')   & (sig_f['di_p'] > sig_f['di_m'])
+        sell_mask = (sig_f['crossover'] == 'DOWN_CROSS') & (sig_f['di_m'] > sig_f['di_p'])
+        sig_f = sig_f[(buy_mask | sell_mask) & (sig_f['adx'] >= adx_t)]
+        show_flip_result(f"スコア差≥3 × DI方向一致 × ADX≥{adx_t}", sig_f)
+
+    # 三重フィルター
+    for di_t, adx_t in [(10, 25), (15, 25)]:
+        sig_f = sig_base3.copy()
+        buy_mask  = (sig_f['crossover'] == 'UP_CROSS')   & (sig_f['di_p'] > sig_f['di_m'])
+        sell_mask = (sig_f['crossover'] == 'DOWN_CROSS') & (sig_f['di_m'] > sig_f['di_p'])
+        sig_f = sig_f[(buy_mask | sell_mask) &
+                      ((sig_f['di_p'] - sig_f['di_m']).abs() >= di_t) &
+                      (sig_f['adx'] >= adx_t)]
+        show_flip_result(f"スコア差≥3 × DI一致 × |DI差|≥{di_t} × ADX≥{adx_t}", sig_f)
+
+    print(f"\n  ✅ = 負け<89件かつP&L>400  🏆 = 負け<89件かつP&L>525（ベースライン超え）")
+
     # ──── ⑥a トレンド/レンジ別勝率 ────
     print(f"\n{'=' * 72}")
     print("  【⑥a トレンド/レンジ別 詳細分析】（①RSIフィルター適用）")
