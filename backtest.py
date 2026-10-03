@@ -2683,6 +2683,99 @@ def main():
     except Exception as e:
         print(f"  ⚠️  5分足テストエラー: {e}")
 
+    # ──── 最終ランキング：マイナス取引数が少ない順 ────
+    print(f"\n{'=' * 72}")
+    print("  【最終ランキング：マイナス取引数が少ない順】")
+    print("  全テスト済みパターンから集計（P&L > 0のもののみ）")
+    print("─" * 72)
+
+    df_sig_rank = apply_filters(df_sig, rsi_filter=True)
+
+    def rank_scenario(label, trades_df):
+        if len(trades_df) == 0: return None
+        wins   = trades_df[trades_df['pnl'] > 0]
+        losses = trades_df[trades_df['pnl'] <= 0]
+        total  = trades_df['pnl'].sum()
+        if total <= 0: return None  # P&L負はスキップ
+        return {
+            'label':      label,
+            'n_loss':     len(losses),
+            'n_win':      len(wins),
+            'n_total':    len(trades_df),
+            'win_rate':   round(len(wins)/len(trades_df)*100, 1),
+            'total_pnl':  round(total, 1),
+            'avg_win':    round(wins['pnl'].mean(), 1)  if len(wins)   > 0 else 0,
+            'avg_loss':   round(losses['pnl'].mean(), 1) if len(losses) > 0 else 0,
+            'max_dd':     round(calc_max_drawdown(trades_df), 1),
+        }
+
+    rank_results = []
+
+    # ── 既存パターンを全て収集 ──
+    rank_results.append(rank_scenario("①RSIのみ（現状）",
+        simulate_trades(df, df_sig_rank, use_trailing=True)))
+
+    # スコア差フィルター × 現状トレーリング
+    for gap in [3, 4]:
+        sig_g = df_sig_rank.copy()
+        sig_g = sig_g[(sig_g['buy_score'] - sig_g['sell_score']).abs() >= gap]
+        rank_results.append(rank_scenario(f"①RSI+スコア差≥{gap}+トレーリング",
+            simulate_trades(df, sig_g, use_trailing=True)))
+
+    # クロス転換 × スコア差
+    for gap in [0, 2, 3]:
+        sig_g = df_sig_rank.copy()
+        if gap > 0:
+            sig_g = sig_g[(sig_g['buy_score'] - sig_g['sell_score']).abs() >= gap]
+        rank_results.append(rank_scenario(f"クロス転換SL5$ 差≥{gap}",
+            simulate_trades(df, sig_g, sl=SL_PIPS, tp=999.0, use_trailing=False)))
+
+    # ADXフィルター × クロス転換
+    for adx_t in [20, 25]:
+        sig_g = df_sig_rank[df_sig_rank['adx'] >= adx_t].copy()
+        rank_results.append(rank_scenario(f"クロス転換SL5$ ADX≥{adx_t}",
+            simulate_trades(df, sig_g, sl=SL_PIPS, tp=999.0, use_trailing=False)))
+
+    # |DI差|フィルター
+    for di_t in [10, 15]:
+        sig_g = df_sig_rank[(df_sig_rank['di_p'] - df_sig_rank['di_m']).abs() >= di_t].copy()
+        rank_results.append(rank_scenario(f"|DI差|≥{di_t}+トレーリング",
+            simulate_trades(df, sig_g, use_trailing=True)))
+
+    # DI差 × クロス転換
+    sig_g = df_sig_rank[(df_sig_rank['di_p'] - df_sig_rank['di_m']).abs() >= 15].copy()
+    rank_results.append(rank_scenario("|DI差|≥15+クロス転換SL5$",
+        simulate_trades(df, sig_g, sl=SL_PIPS, tp=999.0, use_trailing=False)))
+
+    # ADX+クロス転換+スコア差
+    for adx_t, gap in [(25, 3), (25, 4)]:
+        sig_g = df_sig_rank[df_sig_rank['adx'] >= adx_t].copy()
+        sig_g = sig_g[(sig_g['buy_score'] - sig_g['sell_score']).abs() >= gap]
+        rank_results.append(rank_scenario(f"クロス転換 ADX≥{adx_t}+差≥{gap}",
+            simulate_trades(df, sig_g, sl=SL_PIPS, tp=999.0, use_trailing=False)))
+
+    # ハイブリッドflip
+    rank_results.append(rank_scenario("B. ADX≥25クロス転換(hybrid)",
+        simulate_trades_hybrid_flip(df, df_sig_rank, sl=SL_PIPS, adx_min=25.0)))
+
+    rank_results = [r for r in rank_results if r is not None]
+
+    # マイナス取引数（少ない順）でソート
+    rank_results.sort(key=lambda x: (x['n_loss'], -x['total_pnl']))
+
+    print(f"\n  {'順位'} {'ラベル':<36} {'負件数':>5} {'勝件数':>5} {'勝率':>6} {'合計P&L':>10} {'DD':>7} {'平均勝':>7} {'平均負':>7}")
+    print(f"  {'─'*3} {'─'*36} {'─'*5} {'─'*5} {'─'*6} {'─'*10} {'─'*7} {'─'*7} {'─'*7}")
+    for rank, r in enumerate(rank_results[:15], 1):
+        marker = "🏆" if rank == 1 else ("✨" if rank <= 3 else f" {rank:2d}")
+        print(f"  {marker} {r['label']:<36} {r['n_loss']:5d} {r['n_win']:5d} {r['win_rate']:6.1f}% "
+              f"{r['total_pnl']:+10.1f} {r['max_dd']:+7.1f} {r['avg_win']:+7.1f} {r['avg_loss']:+7.1f}")
+
+    if rank_results:
+        best_r = rank_results[0]
+        print(f"\n  🏆 マイナス最少: 「{best_r['label']}」")
+        print(f"     負:{best_r['n_loss']}件  勝:{best_r['n_win']}件  勝率:{best_r['win_rate']}%  "
+              f"合計:{best_r['total_pnl']:+.1f}$/oz  DD:{best_r['max_dd']:+.1f}$/oz")
+
     print(f"\n{'=' * 72}")
     print("  バックテスト完了")
     print("=" * 72)
