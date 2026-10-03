@@ -1031,15 +1031,10 @@ def gemini_analyze_ea_signal(ea_data, open_positions=None):
     else:
         direction = "買い（ロング）"
 
-    # 過去取引実績をプロンプトに追加
+    # 過去取引実績をプロンプトに追加（パターン学習強化版）
+    current_dir = "BUY" if crossover in ("UP_CROSS", "RANGE_LONG") else "SELL"
     stats = get_recent_trade_stats()
-    trade_context = ""
-    if stats and stats['total'] > 0:
-        trade_context = f"""
-【過去{stats['total']}件の取引実績】
-勝率: {stats['win_rate']}%（{stats['wins']}勝{stats['losses']}敗）/ 累計損益: {stats['total_pl']:+.0f}$
-直近5件: {stats['recent5']}
-※ 負けが続いている場合は特に慎重に判定してください。"""
+    trade_context = build_learning_context(stats, current_dir) if stats else ""
 
     # 現在のポジション情報をプロンプトに追加（ポジション保有中の判定用）
     position_context = ""
@@ -1429,9 +1424,9 @@ EMA20={comp_data.get('ema20', 'N/A')} / EMA50={comp_data.get('ema50', 'N/A')}
             'unrealized_pl': unrealized_pl,
         }
 
-# ==================== 取引実績統計（Geminiプロンプト用） ====================
-def get_recent_trade_stats(limit=20):
-    """Supabaseから直近の取引結果を取得して統計を返す"""
+# ==================== 取引実績統計（Geminiプロンプト用・パターン学習強化） ====================
+def get_recent_trade_stats(limit=50):
+    """Supabaseから直近の取引結果を取得して統計・パターンを返す"""
     try:
         resp = req.get(
             f"{SUPABASE_URL}/rest/v1/trades",
@@ -1439,7 +1434,7 @@ def get_recent_trade_stats(limit=20):
                 "status": "neq.OPEN",
                 "order": "entry_time.desc",
                 "limit": limit,
-                "select": "direction,profit_loss,pips,status,entry_time"
+                "select": "direction,profit_loss,pips,status,entry_time,notes"
             },
             headers=supabase_headers(),
             timeout=5
@@ -1447,19 +1442,123 @@ def get_recent_trade_stats(limit=20):
         if resp.status_code != 200 or not resp.json():
             return None
         trades = resp.json()
+        if not trades:
+            return None
+
         wins   = [t for t in trades if (t.get('profit_loss') or 0) > 0]
         losses = [t for t in trades if (t.get('profit_loss') or 0) <= 0]
-        total_pl   = sum(t.get('profit_loss') or 0 for t in trades)
-        win_rate   = round(len(wins) / len(trades) * 100, 1) if trades else 0
-        recent5    = [{"dir": t.get('direction',''), "pl": round(t.get('profit_loss') or 0, 0),
-                       "pips": round(t.get('pips') or 0, 1)} for t in trades[:5]]
+        total_pl = sum(t.get('profit_loss') or 0 for t in trades)
+        win_rate = round(len(wins) / len(trades) * 100, 1) if trades else 0
+        recent5  = [{"dir": t.get('direction',''), "pl": round(t.get('profit_loss') or 0, 1)}
+                    for t in trades[:5]]
+
+        # 方向別勝率（BUY / SELL）
+        buy_trades  = [t for t in trades if t.get('direction') == 'BUY']
+        sell_trades = [t for t in trades if t.get('direction') == 'SELL']
+        buy_wins    = [t for t in buy_trades  if (t.get('profit_loss') or 0) > 0]
+        sell_wins   = [t for t in sell_trades if (t.get('profit_loss') or 0) > 0]
+        buy_wr  = round(len(buy_wins)  / len(buy_trades)  * 100, 1) if buy_trades  else None
+        sell_wr = round(len(sell_wins) / len(sell_trades) * 100, 1) if sell_trades else None
+
+        # 連勝/連敗ストリーク（最新から遡る）
+        streak = 0
+        streak_type = None
+        for t in trades:
+            won = (t.get('profit_loss') or 0) > 0
+            if streak_type is None:
+                streak_type = "win" if won else "loss"
+                streak = 1
+            elif (streak_type == "win" and won) or (streak_type == "loss" and not won):
+                streak += 1
+            else:
+                break
+
+        # 時間帯別勝率（UTC基準: 0-8時=アジア, 8-16時=欧州, 16-24時=NY）
+        def hour_session(entry_time_str):
+            try:
+                h = int((entry_time_str or "")[:13].split("T")[1].replace(":", ""))
+                h = h // 100
+                if h < 8:   return "アジア"
+                if h < 16:  return "欧州"
+                return "NY"
+            except:
+                return None
+
+        session_stats: dict = {}
+        for t in trades:
+            sess = hour_session(t.get('entry_time', ''))
+            if not sess:
+                continue
+            if sess not in session_stats:
+                session_stats[sess] = {"wins": 0, "total": 0}
+            session_stats[sess]["total"] += 1
+            if (t.get('profit_loss') or 0) > 0:
+                session_stats[sess]["wins"] += 1
+        session_summary = {
+            k: f"{round(v['wins']/v['total']*100,1)}%({v['wins']}/{v['total']}件)"
+            for k, v in session_stats.items() if v['total'] >= 2
+        }
+
         return {
             "total": len(trades), "wins": len(wins), "losses": len(losses),
-            "win_rate": win_rate, "total_pl": round(total_pl, 0), "recent5": recent5
+            "win_rate": win_rate, "total_pl": round(total_pl, 1), "recent5": recent5,
+            "buy_trades": len(buy_trades), "buy_wr": buy_wr,
+            "sell_trades": len(sell_trades), "sell_wr": sell_wr,
+            "streak": streak, "streak_type": streak_type,
+            "session_summary": session_summary,
         }
     except Exception as e:
         print(f"⚠️ 取引統計取得エラー: {e}")
         return None
+
+
+def build_learning_context(stats: dict, current_direction: str) -> str:
+    """パターン学習コンテキストをGeminiプロンプト用に生成"""
+    if not stats or stats['total'] == 0:
+        return ""
+
+    lines = [f"\n\n【📚 学習データ（直近{stats['total']}件の実績）】"]
+    lines.append(f"総合勝率: {stats['win_rate']}%（{stats['wins']}勝{stats['losses']}敗）/ 累計損益: {stats['total_pl']:+.1f}$")
+
+    # 方向別勝率
+    dir_lines = []
+    if stats['buy_wr'] is not None:
+        marker = "← 現在シグナルと同方向" if current_direction == "BUY" else ""
+        dir_lines.append(f"  BUY方向: 勝率{stats['buy_wr']}%（{stats['buy_trades']}件）{marker}")
+    if stats['sell_wr'] is not None:
+        marker = "← 現在シグナルと同方向" if current_direction == "SELL" else ""
+        dir_lines.append(f"  SELL方向: 勝率{stats['sell_wr']}%（{stats['sell_trades']}件）{marker}")
+    if dir_lines:
+        lines.append("方向別勝率:\n" + "\n".join(dir_lines))
+
+    # 連勝/連敗ストリーク
+    if stats['streak'] and stats['streak_type']:
+        if stats['streak_type'] == "loss" and stats['streak'] >= 2:
+            lines.append(f"⚠️ 直近{stats['streak']}連敗中 → 特に慎重な判定を推奨")
+        elif stats['streak_type'] == "win" and stats['streak'] >= 3:
+            lines.append(f"✅ 直近{stats['streak']}連勝中 → 好調を維持")
+        elif stats['streak_type'] == "loss":
+            lines.append(f"直近{stats['streak']}連敗中 → やや慎重に")
+
+    # 時間帯別勝率
+    if stats['session_summary']:
+        sess_str = " / ".join([f"{k}:{v}" for k, v in stats['session_summary'].items()])
+        lines.append(f"時間帯別: {sess_str}")
+
+    # 直近5件の詳細
+    if stats['recent5']:
+        r5 = " → ".join([f"{t['dir']}({t['pl']:+.1f}$)" for t in stats['recent5']])
+        lines.append(f"直近5件: {r5}")
+
+    # 判定への反映指示
+    same_dir_wr = stats['sell_wr'] if current_direction == "SELL" else stats['buy_wr']
+    if same_dir_wr is not None:
+        if same_dir_wr >= 70:
+            lines.append(f"→ 現在方向（{current_direction}）の過去勝率{same_dir_wr}%は高水準。他条件が揃えば積極的にvalid=trueを推奨。")
+        elif same_dir_wr <= 40:
+            lines.append(f"→ 現在方向（{current_direction}）の過去勝率{same_dir_wr}%は低水準。条件が揃っていない限りvalid=falseを推奨。")
+
+    return "\n".join(lines)
 
 # ==================== Supabase 保存 ====================
 def save_signal_to_supabase(signal_data):
