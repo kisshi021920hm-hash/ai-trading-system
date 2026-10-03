@@ -166,6 +166,17 @@ _current_gemini_model_index = 0  # 現在使用中のモデルインデックス
 _gemini_model_fallback_count = 0  # フォールバック実行回数（監視用）
 GEMINI_MIN_CALL_INTERVAL = 30    # Gemini呼び出しの最低間隔（秒）- 連続エラー防止
 
+# Gemini統計（セッション累計）
+_gemini_stats = {
+    "total_calls": 0,          # 総呼び出し数
+    "approved": 0,             # valid=True判定数
+    "rejected": 0,             # valid=False判定数
+    "close_called": 0,         # 決済判定呼び出し数
+    "close_executed": 0,       # 実際にCLOSE判定した数
+    "model_switches": 0,       # モデル切替累計
+    "session_start": None,     # セッション開始時刻
+}
+
 # ==================== 初期化 ====================
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "goldtrader_secret")
@@ -791,6 +802,7 @@ def _gemini_generate(prompt, max_retries=1):
                     old_model = GEMINI_MODELS[_current_gemini_model_index]
                     _current_gemini_model_index = (_current_gemini_model_index + 1) % len(GEMINI_MODELS)
                     _gemini_model_fallback_count += 1
+                    _gemini_stats["model_switches"] += 1
                     new_model = GEMINI_MODELS[_current_gemini_model_index]
                     gemini_model = genai.GenerativeModel(new_model)
                     print(f"⚠️ {old_model} → {new_model} に切り替え（フォールバック#{_gemini_model_fallback_count}）理由: {err[:80]}")
@@ -1212,6 +1224,12 @@ DI+={ea_data.get('di_plus')} DI-={ea_data.get('di_minus')} ATR={ea_data.get('atr
 
         log_system("INFO", f"🤖 Gemini判定: {direction} → 有効={valid} 信頼度={confidence}% (SL={sl_sugg}, TP={tp_sugg}, TT={trailing_trigger}, TW={trailing_width})")
         log_system("INFO", f"📝 判定理由: {reason}")
+        # Gemini統計カウント
+        _gemini_stats["total_calls"] += 1
+        if valid:
+            _gemini_stats["approved"] += 1
+        else:
+            _gemini_stats["rejected"] += 1
 
         return {
             'valid': valid,
@@ -1305,6 +1323,9 @@ RSI: {current_scores.get('rsi', 50):.1f}（過買売）
         reason = str(result.get('reason', ''))
 
         print(f"🔍 決済判定: {direction}ポジション → {'🔴決済' if should_close else '🟢保持'} (信頼度{confidence}%)")
+        _gemini_stats["close_called"] += 1
+        if should_close:
+            _gemini_stats["close_executed"] += 1
         return {
             'should_close': should_close,
             'confidence': confidence,
@@ -1495,11 +1516,11 @@ def status_logging_loop():
                 "recent_trade_count": len(_ea_trades),
                 "recent_trades_json": _ea_trades[-5:],
                 "total_signals_today": 0,
-                "total_trades_today": 0,
+                "total_trades_today": len(_ea_trades),
                 "open_trades_count": 0,
-                "today_win_count": 0,
-                "today_loss_count": 0,
-                "today_total_pips": 0,
+                "today_win_count": sum(1 for t in _ea_trades if t.get("action") == "CLOSE" and float(t.get("profit", 0) or 0) > 0),
+                "today_loss_count": sum(1 for t in _ea_trades if t.get("action") == "CLOSE" and float(t.get("profit", 0) or 0) < 0),
+                "today_total_pips": round(sum(float(t.get("profit", 0) or 0) for t in _ea_trades if t.get("action") in ("CLOSE", "LOSS_CUT")), 2),
                 "heartbeat_interval_sec": round(now - _ea_last_heartbeat) if _ea_last_heartbeat > 0 else None,
                 "signal_interval_sec": round(now - _last_ea_signal_time) if _last_ea_signal_time > 0 else None,
                 # AI 決済判定の履歴
@@ -2799,6 +2820,65 @@ def stats_history():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/api/stats/monthly", methods=["GET"])
+def stats_monthly():
+    """今月の累計統計（月次目標進捗用）"""
+    try:
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        # 今月1日00:00UTC
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        trades_resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"select": "status,profit_loss,pips,entry_time,direction,notes",
+                    "entry_time": f"gte.{month_start}", "order": "entry_time.desc"},
+            headers=supabase_headers(), timeout=10
+        )
+        trades = trades_resp.json() if trades_resp.ok else []
+        closed = [t for t in trades if t['status'] in ('CLOSED_PROFIT', 'CLOSED_LOSS')]
+        wins = [t for t in closed if t['status'] == 'CLOSED_PROFIT']
+        total_profit = sum(t.get('profit_loss') or 0 for t in closed)
+        total_pips = sum(t.get('pips') or 0 for t in closed)
+        # trade_type判定（notesのtrade_type or TRAILING）
+        trailing = [t for t in closed if 'CROSS_FLIP' not in (t.get('notes') or '')]
+        cross_flip = [t for t in closed if 'CROSS_FLIP' in (t.get('notes') or '')]
+        return jsonify({
+            "month": now.strftime("%Y-%m"),
+            "total_trades": len(trades),
+            "closed_trades": len(closed),
+            "open_trades": len([t for t in trades if t['status'] == 'OPEN']),
+            "win_count": len(wins),
+            "loss_count": len(closed) - len(wins),
+            "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else 0,
+            "total_profit_usd": round(total_profit, 2),
+            "total_pips": round(total_pips, 1),
+            "trailing_trades": len(trailing),
+            "cross_flip_trades": len(cross_flip),
+            "best_trade": round(max((t.get('profit_loss') or 0 for t in closed), default=0), 2),
+            "worst_trade": round(min((t.get('profit_loss') or 0 for t in closed), default=0), 2),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/gemini-stats", methods=["GET"])
+def gemini_stats_endpoint():
+    """Geminiの稼働統計"""
+    total = _gemini_stats["total_calls"]
+    approval_rate = round(_gemini_stats["approved"] / total * 100, 1) if total > 0 else 0
+    close_total = _gemini_stats["close_called"]
+    close_rate = round(_gemini_stats["close_executed"] / close_total * 100, 1) if close_total > 0 else 0
+    return jsonify({
+        "current_model": GEMINI_MODELS[_current_gemini_model_index],
+        "model_switches": _gemini_stats["model_switches"],
+        "total_calls": total,
+        "approved": _gemini_stats["approved"],
+        "rejected": _gemini_stats["rejected"],
+        "approval_rate": approval_rate,
+        "close_called": close_total,
+        "close_executed": _gemini_stats["close_executed"],
+        "close_rate": close_rate,
+    })
 
 @app.route("/api/analysis/correlation", methods=["GET"])
 def correlation_analysis():

@@ -42,12 +42,18 @@ interface StatusDashboardProps {
 }
 
 
+interface GeminiStats { approval_rate: number; total_calls: number; model_switches: number; current_model: string; close_rate: number; }
+interface MonthlyStats { total_profit_usd: number; closed_trades: number; win_rate: number; }
+
 export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
   const [logs, setLogs] = useState<StatusLog[]>([]);
   const [latest, setLatest] = useState<StatusLog | null>(null);
   const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
+  const [geminiStats, setGeminiStats] = useState<GeminiStats | null>(null);
+  const [monthlyStats, setMonthlyStats] = useState<MonthlyStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   useEffect(() => {
     const fetchLogs = async () => {
@@ -74,6 +80,16 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
           const sysData = await sysResp.json();
           setSystemLogs(sysData);
         }
+
+        // Gemini統計を取得
+        const gemResp = await fetch(`${renderUrl}/api/gemini-stats`);
+        if (gemResp.ok) setGeminiStats(await gemResp.json());
+
+        // 月次統計を取得
+        const monResp = await fetch(`${renderUrl}/api/stats/monthly`);
+        if (monResp.ok) setMonthlyStats(await monResp.json());
+
+        setLastUpdated(new Date());
       } catch (err) {
         setError(`エラー: ${err instanceof Error ? err.message : "不明"}`);
       } finally {
@@ -222,12 +238,50 @@ export default function StatusDashboard({ renderUrl }: StatusDashboardProps) {
             borderLeft: `4px solid ${latest.today_total_pips >= 0 ? "#28a745" : "#c41e3a"}`,
           }}
         >
-          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#000" }}>本日Pips</p>
+          <p style={{ margin: "0 0 4px 0", fontSize: "12px", color: "#000" }}>本日損益</p>
           <p style={{ margin: "0", fontSize: "18px", fontWeight: "bold", color: "#000" }}>
-            {latest.today_total_pips >= 0 ? "+" : ""}{latest.today_total_pips.toFixed(1)}
+            {latest.today_total_pips >= 0 ? "+" : ""}{latest.today_total_pips.toFixed(2)} USD
+          </p>
+          <p style={{ margin: "2px 0 0 0", fontSize: "11px", color: "#555" }}>
+            ≈ ¥{Math.round(latest.today_total_pips * 155).toLocaleString()}
           </p>
         </div>
       </div>
+
+      {/* 月次サマリー + Gemini指標 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "20px" }}>
+        {monthlyStats && (
+          <div style={{ backgroundColor: "#1e293b", padding: "12px", borderRadius: "8px", color: "#f1f5f9" }}>
+            <p style={{ margin: "0 0 4px 0", fontSize: "11px", color: "#94a3b8" }}>今月累計</p>
+            <p style={{ margin: "0", fontSize: "16px", fontWeight: "bold",
+              color: monthlyStats.total_profit_usd >= 0 ? "#22c55e" : "#ef4444" }}>
+              {monthlyStats.total_profit_usd >= 0 ? "+" : ""}{monthlyStats.total_profit_usd.toFixed(2)}$
+            </p>
+            <p style={{ margin: "2px 0 0 0", fontSize: "11px", color: "#64748b" }}>
+              {monthlyStats.closed_trades}件 / 勝率{monthlyStats.win_rate}%
+            </p>
+          </div>
+        )}
+        {geminiStats && (
+          <div style={{ backgroundColor: "#1e293b", padding: "12px", borderRadius: "8px", color: "#f1f5f9" }}>
+            <p style={{ margin: "0 0 4px 0", fontSize: "11px", color: "#94a3b8" }}>Gemini承認率</p>
+            <p style={{ margin: "0", fontSize: "16px", fontWeight: "bold",
+              color: geminiStats.approval_rate >= 50 ? "#22c55e" : "#f59e0b" }}>
+              {geminiStats.approval_rate}%
+            </p>
+            <p style={{ margin: "2px 0 0 0", fontSize: "11px", color: "#64748b" }}>
+              {geminiStats.total_calls}判定 / 切替{geminiStats.model_switches}回
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* 最終更新時刻 */}
+      {lastUpdated && (
+        <div style={{ textAlign: "right", fontSize: "11px", color: "#475569", marginBottom: "8px" }}>
+          最終更新: {lastUpdated.toLocaleTimeString("ja-JP")} （30秒自動更新）
+        </div>
+      )}
 
       {/* 詳細情報 */}
       <div style={{ backgroundColor: "#1e293b", padding: "15px", borderRadius: "8px", marginBottom: "20px", color: "#f1f5f9" }}>

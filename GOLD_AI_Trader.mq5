@@ -764,7 +764,8 @@ void SendHeartbeat()
 }
 
 void ReportTrade(string action, string direction, double price,
-                 double sl, double tp, double lot, ulong ticket)
+                 double sl, double tp, double lot, ulong ticket,
+                 long magic = MAGIC_NUMBER)
 {
     string json = "{\"action\":\"" + action + "\""
                 + ",\"direction\":\"" + direction + "\""
@@ -773,6 +774,8 @@ void ReportTrade(string action, string direction, double price,
                 + ",\"tp\":"       + DoubleToString(tp, 2)
                 + ",\"lot\":"      + DoubleToString(lot, 2)
                 + ",\"ticket\":"   + IntegerToString((long)ticket)
+                + ",\"magic\":"    + IntegerToString(magic)
+                + ",\"trade_type\":\"" + (magic == g_magic_cross_flip ? "CROSS_FLIP" : "TRAILING") + "\""
                 + ",\"balance\":"  + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2)
                 + "}";
     string rep_headers = "Content-Type: application/json\r\n";
@@ -786,7 +789,7 @@ void ReportTrade(string action, string direction, double price,
 
 // SL/TP/手動決済をサーバーに報告
 void ReportTradeClose(ulong ticket, string direction, double close_price,
-                      double profit, string close_reason)
+                      double profit, string close_reason, long magic = MAGIC_NUMBER)
 {
     string json = "{\"action\":\"CLOSE\""
                 + ",\"ticket\":"       + IntegerToString((long)ticket)
@@ -794,6 +797,8 @@ void ReportTradeClose(ulong ticket, string direction, double close_price,
                 + ",\"close_price\":" + DoubleToString(close_price, 2)
                 + ",\"profit\":"      + DoubleToString(profit, 2)
                 + ",\"close_reason\":\"" + close_reason + "\""
+                + ",\"magic\":"       + IntegerToString(magic)
+                + ",\"trade_type\":\"" + (magic == g_magic_cross_flip ? "CROSS_FLIP" : "TRAILING") + "\""
                 + ",\"balance\":"     + DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE), 2)
                 + "}";
     string headers = "Content-Type: application/json\r\n";
@@ -1153,7 +1158,12 @@ void CloseCrossFlipPositions(ENUM_POSITION_TYPE pos_type)
         if (!OrderSend(req, res))
             Print("❌ クロス転換決済失敗: ticket=", ticket, " retcode=", res.retcode);
         else
+        {
             Print("✅ クロス転換ポジション決済: ticket=", ticket);
+            string dir = (pos_type == POSITION_TYPE_BUY) ? "BUY" : "SELL";
+            double profit = PositionGetDouble(POSITION_PROFIT);
+            ReportTradeClose(ticket, dir, req.price, profit, "CROSS_FLIP_CLOSE", g_magic_cross_flip);
+        }
     }
 }
 
@@ -1185,9 +1195,13 @@ void ExecuteCrossFlipOrder(ENUM_ORDER_TYPE order_type)
     req.type_filling = ORDER_FILLING_IOC;
 
     if (OrderSend(req, res))
+    {
         Print("✅ クロス転換エントリー: ", EnumToString(order_type),
               " price=", price, " SL=", sl, " lot=", lot,
               " magic=", g_magic_cross_flip);
+        string dir = (order_type == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+        ReportTrade("ORDER", dir, price, sl, 0, lot, res.order, g_magic_cross_flip);
+    }
     else
         Print("❌ クロス転換エントリー失敗: retcode=", res.retcode, " ", res.comment);
 }

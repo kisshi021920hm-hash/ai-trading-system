@@ -83,9 +83,37 @@ interface TodayStats {
   confidence_avg: number | null;
 }
 
+interface MonthlyStats {
+  month: string;
+  total_trades: number;
+  closed_trades: number;
+  open_trades: number;
+  win_count: number;
+  loss_count: number;
+  win_rate: number;
+  total_profit_usd: number;
+  total_pips: number;
+  trailing_trades: number;
+  cross_flip_trades: number;
+  best_trade: number;
+  worst_trade: number;
+}
+
+interface GeminiStats {
+  current_model: string;
+  model_switches: number;
+  total_calls: number;
+  approved: number;
+  rejected: number;
+  approval_rate: number;
+  close_called: number;
+  close_executed: number;
+  close_rate: number;
+}
+
 // ==================== 設定 ====================
 // v3B-rebuild
-const APP_VERSION = "1.29";
+const APP_VERSION = "1.30";
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -107,6 +135,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"signal" | "analytics" | "dashboard">("signal");
   const [trades, setTrades] = useState<Trade[]>([]);
   const [todayStats, setTodayStats] = useState<TodayStats | null>(null);
+  const [monthlyStats, setMonthlyStats] = useState<MonthlyStats | null>(null);
+  const [geminiStats, setGeminiStats] = useState<GeminiStats | null>(null);
   const [actionLogs, setActionLogs] = useState<ActionLog[]>([]);
   const [entryModalOpen, setEntryModalOpen] = useState(false);
   const [closeModalTrade, setCloseModalTrade] = useState<Trade | null>(null);
@@ -190,6 +220,20 @@ export default function App() {
     try {
       const r = await fetch(`${RENDER_URL}/api/stats/today`);
       if (r.ok) setTodayStats(await r.json());
+    } catch (_) {}
+  };
+
+  const fetchMonthlyStats = async () => {
+    try {
+      const r = await fetch(`${RENDER_URL}/api/stats/monthly`);
+      if (r.ok) setMonthlyStats(await r.json());
+    } catch (_) {}
+  };
+
+  const fetchGeminiStats = async () => {
+    try {
+      const r = await fetch(`${RENDER_URL}/api/gemini-stats`);
+      if (r.ok) setGeminiStats(await r.json());
     } catch (_) {}
   };
 
@@ -421,6 +465,8 @@ export default function App() {
     if (activeTab === "analytics") {
       fetchTrades();
       fetchTodayStats();
+      fetchMonthlyStats();
+      fetchGeminiStats();
       fetchActionLog();
     }
   }, [activeTab]);
@@ -842,6 +888,82 @@ export default function App() {
       {/* ===== アナリティクスタブ ===== */}
       {activeTab === "analytics" && (
         <>
+          {/* 月次目標プログレス */}
+          {monthlyStats && (() => {
+            const TARGET_USD = 65; // $65 ≈ ¥10,000（デモは×100）
+            const profit = monthlyStats.total_profit_usd;
+            const pct = Math.min(100, Math.max(0, (profit / TARGET_USD) * 100));
+            const isDemo = true; // デモ口座前提
+            return (
+              <div style={styles.card}>
+                <div style={styles.cardHeader}>
+                  <h2 style={styles.cardTitle}>🎯 月次目標進捗</h2>
+                  <span style={styles.tfBadge}>{monthlyStats.month}</span>
+                </div>
+                <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 6 }}>
+                  目標: {isDemo ? "¥1,000,000（デモ）" : "¥10,000（リアル）"} ≈ ${TARGET_USD}
+                </div>
+                {/* プログレスバー */}
+                <div style={{ background: "#1e293b", borderRadius: 8, height: 18, overflow: "hidden", marginBottom: 8 }}>
+                  <div style={{
+                    width: `${pct}%`, height: "100%",
+                    background: profit >= TARGET_USD ? "#22c55e" : profit >= 0 ? "#3b82f6" : "#ef4444",
+                    borderRadius: 8, transition: "width 0.5s",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 11, color: "#fff", fontWeight: "bold"
+                  }}>
+                    {pct > 10 ? `${pct.toFixed(0)}%` : ""}
+                  </div>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                  <span style={{ color: profit >= 0 ? "#22c55e" : "#ef4444", fontWeight: "bold" }}>
+                    {profit >= 0 ? "+" : ""}{profit.toFixed(2)} USD
+                    {isDemo && <span style={{ color: "#64748b", fontSize: 11 }}> (¥{(profit * 155).toFixed(0)})</span>}
+                  </span>
+                  <span style={{ color: "#64748b" }}>目標: ${TARGET_USD}</span>
+                </div>
+                <div style={styles.statsGrid}>
+                  <StatBox label="今月取引" value={String(monthlyStats.closed_trades)} />
+                  <StatBox label="勝率" value={`${monthlyStats.win_rate}%`} color={monthlyStats.win_rate >= 55 ? "#22c55e" : "#f59e0b"} />
+                  <StatBox label="通常" value={String(monthlyStats.trailing_trades)} />
+                  <StatBox label="転換" value={String(monthlyStats.cross_flip_trades)} />
+                </div>
+                {monthlyStats.closed_trades > 0 && (
+                  <div style={{ display: "flex", gap: 12, marginTop: 8, fontSize: 12 }}>
+                    <span style={{ color: "#22c55e" }}>最大利益: +${monthlyStats.best_trade}</span>
+                    <span style={{ color: "#ef4444" }}>最大損失: ${monthlyStats.worst_trade}</span>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Gemini成長指標 */}
+          {geminiStats && (
+            <div style={styles.card}>
+              <div style={styles.cardHeader}>
+                <h2 style={styles.cardTitle}>🤖 Gemini実績</h2>
+                <button style={styles.refreshBtn} onClick={fetchGeminiStats}>🔄</button>
+              </div>
+              <div style={{ fontSize: 11, color: "#64748b", marginBottom: 8 }}>
+                使用中: <span style={{ color: "#818cf8" }}>{geminiStats.current_model}</span>
+                {geminiStats.model_switches > 0 && (
+                  <span style={{ color: "#f59e0b", marginLeft: 8 }}>⚡ 切替{geminiStats.model_switches}回</span>
+                )}
+              </div>
+              <div style={styles.statsGrid}>
+                <StatBox label="総判定" value={String(geminiStats.total_calls)} />
+                <StatBox label="承認率" value={`${geminiStats.approval_rate}%`} color={geminiStats.approval_rate >= 50 ? "#22c55e" : "#f59e0b"} />
+                <StatBox label="決済判定" value={String(geminiStats.close_called)} />
+                <StatBox label="決済実行率" value={`${geminiStats.close_rate}%`} color="#3b82f6" />
+              </div>
+              <div style={{ display: "flex", gap: 16, marginTop: 8, fontSize: 12 }}>
+                <span style={{ color: "#22c55e" }}>✅ 承認: {geminiStats.approved}件</span>
+                <span style={{ color: "#ef4444" }}>❌ 拒否: {geminiStats.rejected}件</span>
+              </div>
+            </div>
+          )}
+
           {/* 本日の統計 */}
           {todayStats && (
             <div style={styles.card}>
@@ -852,7 +974,7 @@ export default function App() {
               <div style={styles.statsGrid}>
                 <StatBox label="シグナル数" value={String(todayStats.total_signals)} />
                 <StatBox label="取引数" value={String(todayStats.total_trades)} />
-                <StatBox label="勝率" value={`${todayStats.win_rate}%`} color={todayStats.win_rate >= 60 ? "#22c55e" : "#f59e0b"} />
+                <StatBox label="勝率" value={`${todayStats.win_rate}%`} color={todayStats.win_rate >= 55 ? "#22c55e" : "#f59e0b"} />
                 <StatBox label="合計Pips" value={`${todayStats.total_pips > 0 ? "+" : ""}${todayStats.total_pips}`} color={todayStats.total_pips >= 0 ? "#22c55e" : "#ef4444"} />
                 <StatBox label="勝" value={String(todayStats.win_count)} color="#22c55e" />
                 <StatBox label="負" value={String(todayStats.loss_count)} color="#ef4444" />
@@ -868,22 +990,10 @@ export default function App() {
             </div>
           )}
 
-          {/* 注文記録ボタン */}
-          <button
-            style={styles.btnEntryManual}
-            onClick={() => {
-              setEntryDirection("BUY");
-              setEntryPrice(signal?.latest_close?.toFixed(2) ?? "");
-              setEntryModalOpen(true);
-            }}
-          >
-            ＋ 注文を手動記録
-          </button>
-
-          {/* Gemini実績ログ */}
+          {/* Gemini判定ログ */}
           <div style={styles.card}>
             <div style={styles.cardHeader}>
-              <h2 style={styles.cardTitle}>🤖 Gemini実績ログ</h2>
+              <h2 style={styles.cardTitle}>🤖 Gemini判定ログ</h2>
               <button style={styles.refreshBtn} onClick={fetchActionLog}>🔄</button>
             </div>
             {actionLogs.length === 0 ? (
@@ -909,48 +1019,69 @@ export default function App() {
             )}
           </div>
 
-          {/* トレード一覧 */}
+          {/* システムトレード履歴 */}
           <div style={styles.card}>
             <div style={styles.cardHeader}>
               <h2 style={styles.cardTitle}>📋 トレード履歴</h2>
-              <button style={styles.refreshBtn} onClick={() => { fetchTrades(); fetchTodayStats(); }}>🔄</button>
+              <button style={styles.refreshBtn} onClick={() => { fetchTrades(); fetchTodayStats(); fetchMonthlyStats(); }}>🔄</button>
             </div>
             {trades.length === 0 ? (
-              <p style={styles.waiting}>記録なし</p>
+              <p style={styles.waiting}>記録なし（EAが発注するとここに表示されます）</p>
             ) : (
-              trades.map(t => (
-                <div key={t.id} style={styles.tradeRow}>
-                  <div style={styles.tradeTop}>
-                    <span style={{ color: t.direction === "BUY" ? "#22c55e" : "#ef4444", fontWeight: "bold" }}>
-                      {t.direction === "BUY" ? "📈" : "📉"} {t.direction}
-                    </span>
-                    <span style={styles.tradeStatus(t.status)}>{statusLabel(t.status)}</span>
-                  </div>
-                  <div style={styles.tradeDetail}>
-                    <span>エントリー: {t.entry_price}</span>
-                    {t.exit_price && <span>決済: {t.exit_price}</span>}
-                    {t.pips != null && (
-                      <span style={{ color: t.pips >= 0 ? "#22c55e" : "#ef4444" }}>
-                        {t.pips >= 0 ? "+" : ""}{t.pips}pips
-                      </span>
+              trades.map(t => {
+                const isCrossFlip = (t.notes ?? "").includes("CROSS_FLIP");
+                return (
+                  <div key={t.id} style={styles.tradeRow}>
+                    <div style={styles.tradeTop}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ color: t.direction === "BUY" ? "#22c55e" : "#ef4444", fontWeight: "bold" }}>
+                          {t.direction === "BUY" ? "📈" : "📉"} {t.direction}
+                        </span>
+                        <span style={{ fontSize: 10, padding: "1px 5px", borderRadius: 4,
+                          background: isCrossFlip ? "#7c3aed" : "#1d4ed8", color: "#fff" }}>
+                          {isCrossFlip ? "転換" : "通常"}
+                        </span>
+                      </div>
+                      <span style={styles.tradeStatus(t.status)}>{statusLabel(t.status)}</span>
+                    </div>
+                    <div style={styles.tradeDetail}>
+                      <span>エントリー: {t.entry_price}</span>
+                      {t.exit_price && <span>決済: {t.exit_price}</span>}
+                      {t.profit_loss != null && (
+                        <span style={{ color: t.profit_loss >= 0 ? "#22c55e" : "#ef4444", fontWeight: "bold" }}>
+                          {t.profit_loss >= 0 ? "+" : ""}{t.profit_loss.toFixed(2)}$
+                        </span>
+                      )}
+                    </div>
+                    <div style={styles.tradeTime}>{new Date(t.entry_time).toLocaleString("ja-JP")}</div>
+                    {t.status === "OPEN" && (
+                      <button
+                        style={styles.btnClose}
+                        onClick={() => {
+                          setCloseModalTrade(t);
+                          setExitPrice(signal?.latest_close?.toFixed(2) ?? "");
+                        }}
+                      >
+                        決済記録
+                      </button>
                     )}
                   </div>
-                  <div style={styles.tradeTime}>{new Date(t.entry_time).toLocaleString("ja-JP")}</div>
-                  {t.status === "OPEN" && (
-                    <button
-                      style={styles.btnClose}
-                      onClick={() => {
-                        setCloseModalTrade(t);
-                        setExitPrice(signal?.latest_close?.toFixed(2) ?? "");
-                      }}
-                    >
-                      決済記録
-                    </button>
-                  )}
-                </div>
-              ))
+                );
+              })
             )}
           </div>
+
+          {/* 手動注文記録ボタン */}
+          <button
+            style={styles.btnEntryManual}
+            onClick={() => {
+              setEntryDirection("BUY");
+              setEntryPrice(signal?.latest_close?.toFixed(2) ?? "");
+              setEntryModalOpen(true);
+            }}
+          >
+            ＋ 注文を手動記録
+          </button>
         </>
       )}
 
