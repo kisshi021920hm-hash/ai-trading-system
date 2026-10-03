@@ -740,7 +740,9 @@ def compute_composite(df):
             'buy_score': buy,
             'sell_score': sell,
             'rsi': rsi.iloc[i],
-            'adx': adx.iloc[i],
+            'adx':  adx.iloc[i],
+            'di_p': di_p.iloc[i],
+            'di_m': di_m.iloc[i],
             'macd': macd.iloc[i],
             'macd_sig': macd_sig.iloc[i],
             'is_breakout': is_breakout,
@@ -1675,6 +1677,181 @@ def main():
                 diff = row['total_pnl'] - prev_pnl
                 improvement = f"  (前比: {diff:+.1f}$/oz)"
         print(f"    {row['scenario']:<40} | 勝率:{row['win_rate']:5.1f}% | 取引:{row['num_trades']:3.0f} | P&L:{row['total_pnl']:+7.1f}$/oz{improvement}")
+
+    # ──── ⑥b ADX/DI フィルター比較 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑥b ADX/DI フィルター比較】（15分足 × 過去60日）")
+    print("  ベースライン: ①RSIフィルターのみ (+255.8$/oz, 65.8%)")
+    print("─" * 72)
+
+    df_sig_base = apply_filters(df_sig, rsi_filter=True)
+
+    def run_adx_filter(label, mask_fn):
+        filtered = df_sig_base[mask_fn(df_sig_base)].copy()
+        t = simulate_trades(df, filtered, use_trailing=True)
+        if len(t) == 0:
+            print(f"  {label:<42}: シグナルなし")
+            return None
+        wins   = t[t['pnl'] > 0]
+        losses = t[t['pnl'] <= 0]
+        wr     = len(wins) / len(t) * 100
+        total  = t['pnl'].sum()
+        avg_w  = wins['pnl'].mean()   if len(wins)   > 0 else 0
+        avg_l  = losses['pnl'].mean() if len(losses) > 0 else 0
+        rr     = abs(avg_w / avg_l)   if avg_l != 0 else 0
+        dd     = calc_max_drawdown(t)
+        diff   = total - base_total
+        bar_w  = int(wr / 5); bar = "█" * bar_w + "░" * (20 - bar_w)
+        mark   = "✅" if total > base_total else "❌"
+        print(f"  {mark} {label:<40} [{bar}] {wr:5.1f}%  取引:{len(t):3d}  "
+              f"合計:{total:+8.1f}$/oz({diff:+.1f})  DD:{dd:+.1f}  RR:{rr:.2f}")
+        return {'label': label, 'win_rate': round(wr,1), 'num_trades': len(t),
+                'total': round(total,2), 'diff': round(diff,2),
+                'avg_win': round(avg_w,2), 'avg_loss': round(avg_l,2),
+                'rr': round(rr,2), 'max_dd': round(dd,2)}
+
+    base_total = df_sig_base.pipe(lambda s: simulate_trades(df, s, use_trailing=True))['pnl'].sum()
+    t_base_adx = simulate_trades(df, df_sig_base, use_trailing=True)
+    base_total  = t_base_adx['pnl'].sum()
+    print_stats("  ①RSI（ベースライン）", t_base_adx)
+    print()
+
+    adx_results = []
+
+    print("  ─ A. DI方向フィルター ─")
+    print("    BUY時はDI+>DI-、SELL時はDI->DI+ のみ取る")
+    r = run_adx_filter(
+        "A1. DI方向一致",
+        lambda s: (
+            ((s['crossover']=='UP_CROSS')   & (s['di_p'] > s['di_m'])) |
+            ((s['crossover']=='DOWN_CROSS') & (s['di_m'] > s['di_p']))
+        )
+    )
+    if r: adx_results.append(r)
+    print()
+
+    print("  ─ B. DIスプレッドフィルター（|DI+−DI-| > 閾値） ─")
+    for thr in [5, 10, 15, 20]:
+        r = run_adx_filter(
+            f"B{thr}. |DI+−DI-|>{thr}",
+            lambda s, t=thr: (s['di_p'] - s['di_m']).abs() > t
+        )
+        if r: adx_results.append(r)
+    print()
+
+    print("  ─ C. ADX上昇フィルター（直近3本でADX上昇中） ─")
+    adx_rising = df_sig['adx'] > df_sig['adx'].shift(3)
+    df_sig_rising = df_sig_base[df_sig_base.index.isin(df_sig_base[adx_rising.reindex(df_sig_base.index, fill_value=False)].index)]
+
+    # ADX上昇を別途計算
+    adx_arr = df_sig_base['adx'].values
+    adx_rise_mask = np.zeros(len(df_sig_base), dtype=bool)
+    for ii in range(3, len(df_sig_base)):
+        if adx_arr[ii] > adx_arr[ii-3]:
+            adx_rise_mask[ii] = True
+    df_sig_base2 = df_sig_base.copy()
+    df_sig_base2['adx_rising'] = adx_rise_mask
+
+    r = run_adx_filter(
+        "C1. ADX上昇中",
+        lambda s: s['adx_rising'] if 'adx_rising' in s.columns else pd.Series(True, index=s.index)
+    )
+    # 直接計算
+    filtered_c = df_sig_base2[df_sig_base2['adx_rising']].copy()
+    t_c = simulate_trades(df, filtered_c, use_trailing=True)
+    if len(t_c) > 0:
+        wins_c = t_c[t_c['pnl'] > 0]
+        losses_c = t_c[t_c['pnl'] <= 0]
+        wr_c   = len(wins_c) / len(t_c) * 100
+        total_c = t_c['pnl'].sum()
+        avg_w_c = wins_c['pnl'].mean()   if len(wins_c)   > 0 else 0
+        avg_l_c = losses_c['pnl'].mean() if len(losses_c) > 0 else 0
+        rr_c    = abs(avg_w_c / avg_l_c) if avg_l_c != 0 else 0
+        dd_c    = calc_max_drawdown(t_c)
+        diff_c  = total_c - base_total
+        bar_w   = int(wr_c / 5); bar = "█" * bar_w + "░" * (20 - bar_w)
+        mark    = "✅" if total_c > base_total else "❌"
+        print(f"  {mark} {'C1. ADX上昇中':<40} [{bar}] {wr_c:5.1f}%  取引:{len(t_c):3d}  "
+              f"合計:{total_c:+8.1f}$/oz({diff_c:+.1f})  DD:{dd_c:+.1f}  RR:{rr_c:.2f}")
+        adx_results.append({'label': 'C1. ADX上昇中', 'win_rate': round(wr_c,1),
+                             'num_trades': len(t_c), 'total': round(total_c,2),
+                             'diff': round(diff_c,2), 'avg_win': round(avg_w_c,2),
+                             'avg_loss': round(avg_l_c,2), 'rr': round(rr_c,2), 'max_dd': round(dd_c,2)})
+    print()
+
+    print("  ─ D. ADX閾値 + DI方向組み合わせ ─")
+    for adx_thr in [20, 25]:
+        r = run_adx_filter(
+            f"D{adx_thr}. ADX>{adx_thr} + DI方向一致",
+            lambda s, t=adx_thr: (
+                (s['adx'] >= t) & (
+                    ((s['crossover']=='UP_CROSS')   & (s['di_p'] > s['di_m'])) |
+                    ((s['crossover']=='DOWN_CROSS') & (s['di_m'] > s['di_p']))
+                )
+            )
+        )
+        if r: adx_results.append(r)
+    print()
+
+    print("  ─ E. ADX帯域別TP調整 ─")
+    for adx_thr, tp_trend, tp_range in [(25, 20.0, 10.0), (25, 25.0, 12.0)]:
+        t_e = simulate_trades(df, df_sig_base, use_trailing=True,
+                              use_adx_adaptive_tp=True, adx_trend_threshold=adx_thr)
+        if len(t_e) > 0:
+            wins_e = t_e[t_e['pnl'] > 0]
+            losses_e = t_e[t_e['pnl'] <= 0]
+            wr_e    = len(wins_e) / len(t_e) * 100
+            total_e = t_e['pnl'].sum()
+            avg_w_e = wins_e['pnl'].mean()   if len(wins_e)   > 0 else 0
+            avg_l_e = losses_e['pnl'].mean() if len(losses_e) > 0 else 0
+            rr_e    = abs(avg_w_e / avg_l_e) if avg_l_e != 0 else 0
+            dd_e    = calc_max_drawdown(t_e)
+            diff_e  = total_e - base_total
+            bar_w   = int(wr_e / 5); bar = "█" * bar_w + "░" * (20 - bar_w)
+            mark    = "✅" if total_e > base_total else "❌"
+            lbl     = f"E. ADX適応TP(閾値{adx_thr})"
+            print(f"  {mark} {lbl:<40} [{bar}] {wr_e:5.1f}%  取引:{len(t_e):3d}  "
+                  f"合計:{total_e:+8.1f}$/oz({diff_e:+.1f})  DD:{dd_e:+.1f}  RR:{rr_e:.2f}")
+            adx_results.append({'label': lbl, 'win_rate': round(wr_e,1),
+                                 'num_trades': len(t_e), 'total': round(total_e,2),
+                                 'diff': round(diff_e,2), 'avg_win': round(avg_w_e,2),
+                                 'avg_loss': round(avg_l_e,2), 'rr': round(rr_e,2), 'max_dd': round(dd_e,2)})
+    print()
+
+    print("  ─ F. ①RSI + 上位フィルター組み合わせ ─")
+    combos = [
+        ("F1. RSI + DI方向一致",
+         lambda s: ((s['crossover']=='UP_CROSS') & (s['di_p'] > s['di_m'])) |
+                   ((s['crossover']=='DOWN_CROSS') & (s['di_m'] > s['di_p']))),
+        ("F2. RSI + ADX>20 + DI方向",
+         lambda s: (s['adx'] >= 20) & (
+             ((s['crossover']=='UP_CROSS') & (s['di_p'] > s['di_m'])) |
+             ((s['crossover']=='DOWN_CROSS') & (s['di_m'] > s['di_p'])))),
+        ("F3. RSI + ADX>25 + DI方向",
+         lambda s: (s['adx'] >= 25) & (
+             ((s['crossover']=='UP_CROSS') & (s['di_p'] > s['di_m'])) |
+             ((s['crossover']=='DOWN_CROSS') & (s['di_m'] > s['di_p'])))),
+        ("F4. RSI + |DI差|>10 + DI方向",
+         lambda s: ((s['di_p'] - s['di_m']).abs() > 10) & (
+             ((s['crossover']=='UP_CROSS') & (s['di_p'] > s['di_m'])) |
+             ((s['crossover']=='DOWN_CROSS') & (s['di_m'] > s['di_p'])))),
+    ]
+    for lbl_f, mask_f in combos:
+        r = run_adx_filter(lbl_f, mask_f)
+        if r: adx_results.append(r)
+    print()
+
+    # サマリー
+    if adx_results:
+        winners = [r for r in adx_results if r['total'] > base_total]
+        print(f"  ── サマリー ──")
+        print(f"  ベースライン(①RSI): 勝率65.8%  取引158  合計+255.8$/oz")
+        print(f"  改善あり: {len(winners)}/{len(adx_results)}件")
+        if winners:
+            best = max(winners, key=lambda x: x['total'])
+            print(f"  🏆 最良: {best['label']}")
+            print(f"     勝率:{best['win_rate']}%  取引:{best['num_trades']}  "
+                  f"合計:{best['total']:+.1f}$/oz  ベース差:{best['diff']:+.1f}$/oz  RR:{best['rr']:.2f}")
 
     # ──── ⑦ スキャルピング再エントリー戦略 ────
     print(f"\n{'=' * 72}")
