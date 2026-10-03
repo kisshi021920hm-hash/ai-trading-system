@@ -2317,10 +2317,6 @@ def send_position_alert_push(title: str, body: str):
     results = _send_fcm(title, body, "gold-trade-v3")
     print(f"✓ トレードイベントFCM送信: {len(results)}件")
     return results
-    fcm_tokens.difference_update(invalid_tokens)
-    for t in invalid_tokens:
-        delete_fcm_token(t)
-    return results
 
 # ==================== REST エンドポイント ====================
 @app.route("/push-signal", methods=["POST"])
@@ -3864,6 +3860,14 @@ def ea_trade_report():
                     "type": "ORDER", "direction": direction, "price": price,
                     "ticket": ticket, "lot": data.get("lot"), "trade_id": db_id
                 })
+                # FCM振動通知（AI_CLOSE_MODEではクロス時に振動しない代わりにここで振動）
+                dir_icon = "📈" if direction == "BUY" else "📉"
+                trade_type = data.get("trade_type", "TRAILING")
+                type_label = "転換" if trade_type == "CROSS_FLIP" else "通常"
+                send_position_alert_push(
+                    f"{dir_icon} EA エントリー [{type_label}]",
+                    f"{direction} @{price} | SL={data.get('sl')} TP={data.get('tp')} lot={data.get('lot')}"
+                )
             else:
                 print(f"⚠️  EA注文 Supabase保存失敗: {resp.text}")
 
@@ -3932,6 +3936,12 @@ def ea_trade_report():
                     "profit_loss": profit_loss, "close_reason": close_reason,
                     "ticket": ticket, "trade_id": trade_id, "status": status
                 })
+                # FCM振動通知（決済時は利益/損失に応じてメッセージ変更）
+                result_icon = "✅" if profit_loss >= 0 else "❌"
+                send_position_alert_push(
+                    f"{result_icon} EA 決済 {'利益' if profit_loss >= 0 else '損失'}",
+                    f"{close_dir} @{close_price} | P/L: {profit_loss:+.2f}$ | {close_reason}"
+                )
             else:
                 print(f"⚠️  EA決済: 対応するOPENトレードが見つかりません ticket={ticket} dir={close_dir}")
     except Exception as e:
