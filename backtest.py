@@ -2325,6 +2325,29 @@ def main():
                   f"{total:+10.1f}$/oz {dd:+7.1f}  [{r_str}]")
         print()  # トリガーごとに空行
 
+    # ── 「遊びを広く」テスト：TW = TT - 0.5（発動後ほぼBE保証） ──
+    print(f"  ── 遊び最大（TW = TT - 0.5）：発動したらほぼブレイクイーブン保証 ──")
+    for tt in [3.0, 4.0, 6.0, 8.0, 10.0]:
+        tw = tt - 0.5
+        t = simulate_flip_with_trail(df, sig_di3, sl=SL_PIPS,
+                                     trail_trigger=tt, trail_width=tw)
+        if len(t) == 0: continue
+        wins   = t[t['pnl'] > 0]
+        losses = t[t['pnl'] <= 0]
+        wr     = len(wins)/len(t)*100
+        total  = t['pnl'].sum()
+        dd     = calc_max_drawdown(t)
+        reasons = t['exit_reason'].value_counts().to_dict()
+        r_str  = "  ".join([f"{k}:{v}" for k, v in reasons.items()])
+        be_guaranteed = f"(発動後SL≥entry+{tt-tw:.1f}$)"
+        marker = "🏆" if total > best_pnl and len(losses) < 85 else (
+                 "✅" if total > 500 or len(losses) < 70 else "──")
+        if total > best_pnl and len(losses) < 85:
+            best_pnl   = total
+            best_label = f"TT{tt} TW{tw} (遊び最大)"
+        print(f"  {marker} TT{tt:>4.1f} TW{tw:>4.1f} {be_guaranteed:<22} {wr:5.1f}% {len(t):4d} {len(losses):5d}件 "
+              f"{total:+10.1f}$/oz {dd:+7.1f}  [{r_str}]")
+
     print(f"\n  🏆 ベスト: {best_label}  P&L:{best_pnl:+.1f}$/oz")
     print(f"  ✅ = P&L>500 or 負け<70件  🏆 = P&L>545.7かつ負け<85件（ベースライン超え）")
 
