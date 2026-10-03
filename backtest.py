@@ -1841,6 +1841,83 @@ def main():
                   f"勝率{r['win_rate']:5.1f}%  取引{r['num_trades']:4d}  "
                   f"スプレッドあり:{r['total_net']:+8.1f}$/oz  差:{r['diff_vs_base']:+.1f}$/oz")
 
+    # ──── ⑨ 5分足 vs 15分足 比較 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑨ 5分足バックテスト】（過去60日）")
+    print("  ※MACDパラメータは15分足と同じ（比較目的）")
+    print("─" * 72)
+
+    try:
+        print("  5分足データ取得中...")
+        df5m_raw = yf.download("GC=F", period="60d", interval="5m", progress=False)
+        if isinstance(df5m_raw.columns, pd.MultiIndex):
+            df5m_raw.columns = df5m_raw.columns.get_level_values(0)
+        df5m_raw.index = pd.to_datetime(df5m_raw.index)
+        if df5m_raw.index.tz is not None:
+            df5m_raw.index = df5m_raw.index.tz_localize(None)
+        df5m_raw = df5m_raw.dropna(subset=['Close'])
+        print(f"  取得: {len(df5m_raw)}本 ({df5m_raw.index[0].date()} ～ {df5m_raw.index[-1].date()})")
+
+        df5m = df5m_raw.copy()
+        df5m_sig = compute_composite(df5m)
+
+        SPREAD = 0.5
+        # 15分足ベースラインの再掲
+        t15_base = simulate_trades(df, apply_filters(df_sig, rsi_filter=True), use_trailing=True)
+        t15_net  = t15_base['pnl'].sum() - len(t15_base) * SPREAD
+
+        print(f"\n  ── フィルター比較 ──")
+        scenarios_5m = [
+            ("フィルターなし",      False, False),
+            ("①RSIフィルターのみ", True,  False),
+        ]
+        results_5m = []
+        for label5, rsi_f, sell_f in scenarios_5m:
+            df5m_f = apply_filters(df5m_sig, rsi_filter=rsi_f, sell_gap_filter=sell_f)
+            t5 = simulate_trades(df5m, df5m_f, use_trailing=True)
+            if len(t5) == 0:
+                print(f"  {label5}: シグナルなし"); continue
+            wins   = t5[t5['pnl'] > 0]
+            losses = t5[t5['pnl'] <= 0]
+            wr     = len(wins) / len(t5) * 100
+            total  = t5['pnl'].sum()
+            avg_w  = wins['pnl'].mean()   if len(wins)   > 0 else 0
+            avg_l  = losses['pnl'].mean() if len(losses) > 0 else 0
+            rr     = abs(avg_w / avg_l)   if avg_l != 0 else 0
+            total_net = total - len(t5) * SPREAD
+            bar_w = int(wr / 5); bar = "█" * bar_w + "░" * (20 - bar_w)
+            print(f"  {label5:<22} [{bar}] {wr:5.1f}%  取引:{len(t5):4d}  "
+                  f"スプレッドなし:{total:+8.1f}  スプレッドあり:{total_net:+8.1f}$/oz  "
+                  f"RR:{rr:.2f}  平均勝:{avg_w:+.2f} 平均負:{avg_l:+.2f}")
+            results_5m.append({'label': label5, 'win_rate': round(wr,1),
+                                'num_trades': len(t5), 'total': round(total,2),
+                                'total_net': round(total_net,2),
+                                'avg_win': round(avg_w,2), 'avg_loss': round(avg_l,2), 'rr': round(rr,2)})
+
+        print(f"\n  ── 15分足 vs 5分足 サマリー ──")
+        print(f"  {'':22}  {'勝率':>6}  {'取引数':>5}  {'スプレッドあり':>12}")
+        print(f"  {'15分足①RSIフィルター':22}  {len(t15_base[t15_base['pnl']>0])/len(t15_base)*100:6.1f}%"
+              f"  {len(t15_base):5d}  {t15_net:+12.1f}$/oz  ← 現在の本番")
+        for r in results_5m:
+            diff = r['total_net'] - t15_net
+            sign = "✅" if r['total_net'] > t15_net else "❌"
+            print(f"  {sign} 5分足 {r['label']:<16}  {r['win_rate']:6.1f}%"
+                  f"  {r['num_trades']:5d}  {r['total_net']:+12.1f}$/oz  (15分比:{diff:+.1f})")
+
+        # 月間換算
+        print(f"\n  ── 月間換算（0.01ロット マイクロ口座） ──")
+        days = (df5m_raw.index[-1] - df5m_raw.index[0]).days
+        months = max(days / 30, 1)
+        lot = 0.01; contract = 1  # マイクロ: 1oz/lot
+        print(f"  期間: {days}日 ({months:.1f}ヶ月)  ロット:{lot}  契約サイズ:{contract}oz")
+        print(f"  15分足①RSI: {t15_net/months*lot*contract*150:+.0f}円/月")
+        for r in results_5m:
+            mo = r['total_net'] / months * lot * contract * 150
+            print(f"  5分足 {r['label']}: {mo:+.0f}円/月")
+
+    except Exception as e:
+        print(f"  ⚠️  5分足テストエラー: {e}")
+
     print(f"\n{'=' * 72}")
     print("  バックテスト完了")
     print("=" * 72)
