@@ -2203,6 +2203,131 @@ def main():
         else:
             print("  → 一度は有利に動いてから失速するケースが多い。決済改善（チャネル等）が有効。")
 
+    # ──── ⑤b-6 クロス転換×DI一致×ゆるいトレーリング ────
+    print(f"\n{'=' * 72}")
+    print("  【⑤b-6 クロス転換 × DI方向一致 × ゆるいトレーリング】")
+    print("  狙い: 含み益5$以上で伸びた後失速する負け50件をプラスに変換")
+    print("  ベース: スコア差≥3 + DI方向一致  負85件  +545.7$/oz  DD:-105.0")
+    print("─" * 72)
+
+    # simulate_tradesのtp=999+trail版（クロス転換はtp=999固定、trailing追加）
+    def simulate_flip_with_trail(df_price, df_signals, sl, trail_trigger, trail_width):
+        """クロス転換決済 + ゆるいトレーリング（先にトレーリング発動した方で決済）"""
+        trades = []
+        close  = df_price['Close'].values
+        high   = df_price['High'].values
+        low    = df_price['Low'].values
+        times  = df_price.index
+        sig_rows = df_signals[df_signals['crossover'].notna()].copy()
+        sig_rows = sig_rows[sig_rows['crossover'] != sig_rows['crossover'].shift(1)]
+
+        # クロス発生位置をインデックスで検索できるように
+        cross_idx = {}
+        all_sigs = df_signals[df_signals['crossover'].notna()].copy()
+        for _, r in all_sigs.iterrows():
+            cross_idx[int(r['idx'])] = r['crossover']
+
+        for _, row in sig_rows.iterrows():
+            i       = int(row['idx'])
+            is_buy  = row['crossover'] == 'UP_CROSS'
+            ep      = row['close']
+            sl_p    = ep - sl if is_buy else ep + sl
+            trail_peak = ep
+            trail_sl   = None
+            exit_price = exit_time = exit_reason = None
+
+            for j in range(i + 1, min(i + 500, len(close))):
+                h, l, c = high[j], low[j], close[j]
+
+                # トレーリング更新
+                if is_buy:
+                    if h > trail_peak: trail_peak = h
+                    if trail_peak - ep >= trail_trigger:
+                        new_ts = trail_peak - trail_width
+                        if trail_sl is None or new_ts > trail_sl:
+                            trail_sl = new_ts
+                else:
+                    if l < trail_peak: trail_peak = l
+                    if ep - trail_peak >= trail_trigger:
+                        new_ts = trail_peak + trail_width
+                        if trail_sl is None or new_ts < trail_sl:
+                            trail_sl = new_ts
+
+                # SL判定
+                if is_buy and l <= sl_p:
+                    exit_price, exit_reason, exit_time = sl_p, "SL", times[j]; break
+                if not is_buy and h >= sl_p:
+                    exit_price, exit_reason, exit_time = sl_p, "SL", times[j]; break
+
+                # トレーリングSL判定
+                if trail_sl is not None:
+                    if is_buy and l <= trail_sl:
+                        exit_price, exit_reason, exit_time = trail_sl, "TRAIL", times[j]; break
+                    if not is_buy and h >= trail_sl:
+                        exit_price, exit_reason, exit_time = trail_sl, "TRAIL", times[j]; break
+
+                # 反対クロス発生で決済
+                if j in cross_idx:
+                    opp = cross_idx[j]
+                    if (is_buy and opp == 'DOWN_CROSS') or (not is_buy and opp == 'UP_CROSS'):
+                        exit_price, exit_reason, exit_time = c, "CROSS_FLIP", times[j]; break
+
+            if exit_price is None:
+                last_j = min(i + 499, len(close) - 1)
+                exit_price, exit_reason, exit_time = close[last_j], "TIMEOUT", times[last_j]
+
+            pnl = (exit_price - ep) if is_buy else (ep - exit_price)
+            trades.append({
+                'direction': row['crossover'], 'entry_time': row['time'],
+                'exit_time': exit_time, 'entry_price': ep,
+                'exit_price': exit_price, 'exit_reason': exit_reason,
+                'pnl': round(pnl, 4), 'adx': row.get('adx', 0),
+            })
+        return pd.DataFrame(trades)
+
+    print(f"\n  {'':2} {'トリガー':>6} {'幅':>5}  {'':20} {'勝率':>5} {'取引':>4} {'負件数':>5} {'合計P&L':>10} {'DD':>7} {'決済内訳'}")
+    print(f"  {'─'*2} {'─'*6} {'─'*5}  {'─'*20} {'─'*5} {'─'*4} {'─'*7} {'─'*10} {'─'*7} {'─'*20}")
+
+    best_pnl   = 545.7
+    best_label = "BASE（クロス転換のみ）"
+
+    # ベースライン再表示
+    t_base = simulate_trades(df, sig_di3, sl=SL_PIPS, tp=999.0, use_trailing=False)
+    w = t_base[t_base['pnl']>0]; l = t_base[t_base['pnl']<=0]
+    r = t_base['exit_reason'].value_counts().to_dict()
+    print(f"  ── {'BASE':>6} {'─':>5}  {'クロス転換のみ（比較用）':20} {len(w)/len(t_base)*100:5.1f}% {len(t_base):4d} {len(l):5d}件 "
+          f"{t_base['pnl'].sum():+10.1f}$/oz {calc_max_drawdown(t_base):+7.1f}  "
+          f"{' '.join([f'{k}:{v}' for k,v in r.items()])}")
+
+    # トリガー × 幅のグリッドサーチ
+    triggers = [3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+    widths   = [1.5, 2.0, 2.5, 3.0, 4.0]
+
+    for tt in triggers:
+        for tw in widths:
+            if tw >= tt: continue  # 幅がトリガー以上は無意味
+            t = simulate_flip_with_trail(df, sig_di3, sl=SL_PIPS,
+                                         trail_trigger=tt, trail_width=tw)
+            if len(t) == 0: continue
+            wins   = t[t['pnl'] > 0]
+            losses = t[t['pnl'] <= 0]
+            wr     = len(wins)/len(t)*100
+            total  = t['pnl'].sum()
+            dd     = calc_max_drawdown(t)
+            reasons = t['exit_reason'].value_counts().to_dict()
+            r_str  = "  ".join([f"{k}:{v}" for k, v in reasons.items()])
+            marker = "🏆" if total > best_pnl and len(losses) < 85 else (
+                     "✅" if total > 500 or len(losses) < 70 else "──")
+            if total > best_pnl and len(losses) < 85:
+                best_pnl   = total
+                best_label = f"TT{tt} TW{tw}"
+            print(f"  {marker} TT{tt:>4.1f} TW{tw:>4.1f}  {'':20} {wr:5.1f}% {len(t):4d} {len(losses):5d}件 "
+                  f"{total:+10.1f}$/oz {dd:+7.1f}  [{r_str}]")
+        print()  # トリガーごとに空行
+
+    print(f"\n  🏆 ベスト: {best_label}  P&L:{best_pnl:+.1f}$/oz")
+    print(f"  ✅ = P&L>500 or 負け<70件  🏆 = P&L>545.7かつ負け<85件（ベースライン超え）")
+
     # ──── ⑥a トレンド/レンジ別勝率 ────
     print(f"\n{'=' * 72}")
     print("  【⑥a トレンド/レンジ別 詳細分析】（①RSIフィルター適用）")
