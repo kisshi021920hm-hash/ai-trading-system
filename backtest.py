@@ -1,0 +1,1606 @@
+"""
+GOLD AI Trader バックテスト
+app.py と同じ COMPOSITE シグナルロジックで過去データを検証
+"""
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime, timezone
+
+# ==================== 設定 ====================
+SYMBOL = "GC=F"          # GOLD先物
+TIMEFRAME = "15m"
+PERIOD = "60d"           # 過去60日（yfinance 15分足の上限）
+SL_PIPS = 5.0            # SL $/oz
+TP_PIPS = 15.0           # TP $/oz
+TRAIL_TRIGGER = 4.0      # トレーリング開始距離 $/oz
+TRAIL_WIDTH = 3.0        # トレーリングSL幅 $/oz
+MIN_SCORE_GAP = 2        # 買い/売りスコア差の最低値
+SCORE_THRESHOLD = 3      # 最低スコア（composite）
+
+# フィルター設定
+RSI_FILTER_THRESHOLD = 35.0    # ①RSI<この値のシグナルはスキップ
+SELL_MIN_GAP = 4               # ②SELLシグナルに必要な最低スコア差（BUYより厳しく）
+ADX_FILTER_THRESHOLD = 20.0    # ③ADX<この値（レンジ相場）のシグナルはスキップ
+
+# R/Sブレイク検出設定
+SR_LOOKBACK = 100              # S/R検索対象の過去ローソク足数
+SR_SWING_BARS = 3              # スイングポイント判定に使うバー数（左右各N本）
+
+
+# ==================== 指標計算（app.py と同じ） ====================
+def calculate_rsi(close, period=14):
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_macd(close, fast=12, slow=26, signal=9):
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd = ema_fast - ema_slow
+    sig = macd.ewm(span=signal, adjust=False).mean()
+    return macd, sig
+
+def calculate_adx(high, low, close, period=14):
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    atr = tr.ewm(span=period, adjust=False).mean()
+    dm_p = (high.diff()).where((high.diff() > low.diff().abs()) & (high.diff() > 0), 0)
+    dm_m = (-low.diff()).where((low.diff().abs() > high.diff()) & (low.diff() < 0), 0)
+    di_p = 100 * dm_p.ewm(span=period, adjust=False).mean() / atr
+    di_m = 100 * dm_m.ewm(span=period, adjust=False).mean() / atr
+    dx = 100 * (di_p - di_m).abs() / (di_p + di_m)
+    adx = dx.ewm(span=period, adjust=False).mean()
+    return adx, di_p, di_m
+
+def calculate_bb(close, period=20, std_dev=2):
+    sma = close.rolling(period).mean()
+    std = close.rolling(period).std()
+    return sma + std_dev * std, sma - std_dev * std
+
+def calculate_stoch(high, low, close, k=14, d=3):
+    lo = low.rolling(k).min()
+    hi = high.rolling(k).max()
+    stoch_k = 100 * (close - lo) / (hi - lo)
+    stoch_d = stoch_k.rolling(d).mean()
+    return stoch_k, stoch_d
+
+def find_key_levels(highs, lows, current_price):
+    """R/Sレベルを検出（EA側の GOLD_AI_Trader.mq5 と同じロジック）
+    スイングポイント：左右各 SR_SWING_BARS 本より高い/低い点
+    過去 SR_LOOKBACK 本から最大 3 つのレジスタンス・サポートを検出
+    """
+    if len(highs) < SR_LOOKBACK:
+        return [], [], []
+
+    lookback_highs = highs[-SR_LOOKBACK:]
+    lookback_lows = lows[-SR_LOOKBACK:]
+
+    resistances = []
+    supports = []
+
+    # スイングハイ（レジスタンス候補）を探す
+    for i in range(SR_SWING_BARS, len(lookback_highs) - SR_SWING_BARS):
+        is_swing_high = True
+        for j in range(1, SR_SWING_BARS + 1):
+            if lookback_highs[i] <= lookback_highs[i - j] or lookback_highs[i] <= lookback_highs[i + j]:
+                is_swing_high = False
+                break
+        if is_swing_high:
+            resistances.append(lookback_highs[i])
+
+    # スイングロー（サポート候補）を探す
+    for i in range(SR_SWING_BARS, len(lookback_lows) - SR_SWING_BARS):
+        is_swing_low = True
+        for j in range(1, SR_SWING_BARS + 1):
+            if lookback_lows[i] >= lookback_lows[i - j] or lookback_lows[i] >= lookback_lows[i + j]:
+                is_swing_low = False
+                break
+        if is_swing_low:
+            supports.append(lookback_lows[i])
+
+    # 現在価格より上のレジスタンスのみを降順でソート
+    resistances = sorted([r for r in resistances if r > current_price], reverse=True)[:3]
+    # 現在価格より下のサポートのみを昇順でソート（最初の3個=最も近い）
+    supports = sorted([s for s in supports if s < current_price])[:3]
+
+    return resistances, supports, []
+
+
+def detect_breakout(highs, lows, current_close, prev_close):
+    """レジスタンスブレイクアウト検出"""
+    res_levels, sup_levels, _ = find_key_levels(highs, lows, prev_close)
+
+    if len(res_levels) > 0:
+        # 最も近いレジスタンス
+        res = res_levels[0]
+        if prev_close <= res and current_close > res:
+            return True, res
+    return False, 0.0
+
+
+def detect_breakdown(highs, lows, current_close, prev_close):
+    """サポートブレイクダウン検出"""
+    res_levels, sup_levels, _ = find_key_levels(highs, lows, prev_close)
+
+    if len(sup_levels) > 0:
+        # 最も近いサポート
+        sup = sup_levels[0]
+        if prev_close >= sup and current_close < sup:
+            return True, sup
+    return False, 0.0
+
+
+def calculate_trendline_tp(highs, lows, current_price, is_buy):
+    """トレンドラインから対面側までの距離を計算してTPを算出
+
+    BUY（上昇トレンド）の場合：最も近いレジスタンスまで
+    SELL（下降トレンド）の場合：最も近いサポートまで
+    """
+    res_levels, sup_levels, _ = find_key_levels(highs, lows, current_price)
+
+    if is_buy and len(res_levels) > 0:
+        tp_price = res_levels[0]
+        tp_distance = tp_price - current_price
+        return tp_distance if tp_distance > 0 else None
+    elif not is_buy and len(sup_levels) > 0:
+        tp_price = sup_levels[0]
+        tp_distance = current_price - tp_price
+        return tp_distance if tp_distance > 0 else None
+
+    return None
+
+
+def calc_lr_channel(close, idx, period, std_mult=1.5):
+    """idx時点から過去period本の線形回帰チャネル上辺・下辺を返す"""
+    start = idx - period + 1
+    if start < 0:
+        return None, None
+    y = close[start:idx + 1].astype(float)
+    x = np.arange(len(y), dtype=float)
+    coeffs = np.polyfit(x, y, 1)
+    y_pred = np.polyval(coeffs, x)
+    std = np.std(y - y_pred)
+    upper = float(y_pred[-1]) + std_mult * std
+    lower = float(y_pred[-1]) - std_mult * std
+    return upper, lower
+
+
+def simulate_trades_channel(df_price, df_signals, channel_mode="replace_tp",
+                             channel_period=30, channel_std=1.5,
+                             sl=SL_PIPS, tp=TP_PIPS,
+                             trail_trigger=TRAIL_TRIGGER, trail_width=TRAIL_WIDTH):
+    """チャネルブレイク決済バリアントのトレードシミュレーション
+
+    channel_mode:
+      "replace_tp"      : SL残し、TPをチャネルブレイクに変更
+      "with_trailing"   : トレーリング+チャネルブレイク（早い方）
+      "only"            : チャネルブレイクのみ（SL/TPなし）
+    """
+    trades = []
+    close = df_price['Close'].values
+    high  = df_price['High'].values
+    low   = df_price['Low'].values
+    times = df_price.index
+
+    sig_rows = df_signals[df_signals['crossover'].notna()].copy()
+    sig_rows = sig_rows[sig_rows['crossover'] != sig_rows['crossover'].shift(1)]
+
+    for _, row in sig_rows.iterrows():
+        i = row['idx']
+        direction  = row['crossover']
+        entry_price = row['close']
+        entry_time  = row['time']
+        is_buy = direction == "UP_CROSS"
+
+        sl_price = (entry_price - sl) if is_buy else (entry_price + sl)
+        tp_price = (entry_price + tp) if is_buy else (entry_price - tp)
+
+        exit_price  = None
+        exit_time   = None
+        exit_reason = None
+        trail_peak  = entry_price
+        trail_sl    = None
+        breakeven_activated = False  # ブレイクイーブン移動済みフラグ
+
+        for j in range(i + 1, min(i + 200, len(close))):
+            h, l, c = high[j], low[j], close[j]
+
+            # ── チャネル計算 ──
+            ch_upper, ch_lower = calc_lr_channel(close, j, channel_period, channel_std)
+            channel_ok = ch_upper is not None
+
+            # ── トレーリング更新（with_trailingモード用） ──
+            if channel_mode == "with_trailing":
+                if is_buy:
+                    if h > trail_peak: trail_peak = h
+                    if trail_peak - entry_price >= trail_trigger:
+                        new_ts = trail_peak - trail_width
+                        if trail_sl is None or new_ts > trail_sl:
+                            trail_sl = new_ts
+                else:
+                    if l < trail_peak: trail_peak = l
+                    if entry_price - trail_peak >= trail_trigger:
+                        new_ts = trail_peak + trail_width
+                        if trail_sl is None or new_ts < trail_sl:
+                            trail_sl = new_ts
+
+            # ── ブレイクイーブン移動（breakeven_channelモード用） ──
+            if channel_mode == "breakeven_channel" and not breakeven_activated:
+                if is_buy and h - entry_price >= trail_trigger:
+                    sl_price = entry_price  # SLをエントリー価格に移動
+                    breakeven_activated = True
+                elif not is_buy and entry_price - l >= trail_trigger:
+                    sl_price = entry_price
+                    breakeven_activated = True
+
+            # ── 決済判定 ──
+            if is_buy:
+                # SL（replace_tp / with_trailing / breakeven_channelモード）
+                if channel_mode != "only":
+                    if l <= sl_price:
+                        exit_price = sl_price
+                        exit_reason = "BE" if (channel_mode == "breakeven_channel" and breakeven_activated) else "SL"
+                        exit_time = times[j]; break
+                # トレーリングSL
+                if channel_mode == "with_trailing" and trail_sl and l <= trail_sl:
+                    exit_price, exit_reason = trail_sl, "TRAIL"
+                    exit_time = times[j]; break
+                # チャネル下辺ブレイク → 上昇トレンド終了
+                if channel_ok and c < ch_lower:
+                    exit_price, exit_reason = c, "CH_BREAK"
+                    exit_time = times[j]; break
+            else:
+                # SL
+                if channel_mode != "only":
+                    if h >= sl_price:
+                        exit_price = sl_price
+                        exit_reason = "BE" if (channel_mode == "breakeven_channel" and breakeven_activated) else "SL"
+                        exit_time = times[j]; break
+                # トレーリングSL
+                if channel_mode == "with_trailing" and trail_sl and h >= trail_sl:
+                    exit_price, exit_reason = trail_sl, "TRAIL"
+                    exit_time = times[j]; break
+                # チャネル上辺ブレイク → 下降トレンド終了
+                if channel_ok and c > ch_upper:
+                    exit_price, exit_reason = c, "CH_BREAK"
+                    exit_time = times[j]; break
+
+        if exit_price is None:
+            last_j = min(i + 199, len(close) - 1)
+            exit_price = close[last_j]
+            exit_time  = times[last_j]
+            exit_reason = "TIMEOUT"
+
+
+        pnl = (exit_price - entry_price) if is_buy else (entry_price - exit_price)
+        trades.append({
+            'direction':   direction,
+            'entry_time':  entry_time,
+            'exit_time':   exit_time,
+            'entry_price': entry_price,
+            'exit_price':  exit_price,
+            'pnl':         round(pnl, 2),
+            'exit_reason': exit_reason,
+            'rsi':  row['rsi'],
+            'adx':  row['adx'],
+            'buy_score':  row['buy_score'],
+            'sell_score': row['sell_score'],
+        })
+
+    return pd.DataFrame(trades)
+
+
+def simulate_trades_dynamic_sl(df_price, df_signals, channel_period=30, channel_std=1.5,
+                                sl_buffer=5.0, use_fixed_tp=False, tp=TP_PIPS):
+    """動的SL: チャネル下辺/上辺 ± バッファ でSLを毎足更新（上昇のみ）
+
+    BUY: SL = max(current_sl, ch_lower - sl_buffer)  ← 毎足上方更新
+    SELL: SL = min(current_sl, ch_upper + sl_buffer) ← 毎足下方更新
+    """
+    trades = []
+    close = df_price['Close'].values
+    high  = df_price['High'].values
+    low   = df_price['Low'].values
+    times = df_price.index
+
+    sig_rows = df_signals[df_signals['crossover'].notna()].copy()
+    sig_rows = sig_rows[sig_rows['crossover'] != sig_rows['crossover'].shift(1)]
+
+    for _, row in sig_rows.iterrows():
+        i = row['idx']
+        direction   = row['crossover']
+        entry_price = row['close']
+        entry_time  = row['time']
+        is_buy = direction == "UP_CROSS"
+
+        # 初期SL: エントリー時のチャネル下辺/上辺 ± バッファ
+        ch_upper0, ch_lower0 = calc_lr_channel(close, i, channel_period, channel_std)
+        if ch_lower0 is not None:
+            sl_price = (ch_lower0 - sl_buffer) if is_buy else (ch_upper0 + sl_buffer)
+        else:
+            sl_price = (entry_price - sl_buffer * 2) if is_buy else (entry_price + sl_buffer * 2)
+
+        tp_price = (entry_price + tp) if is_buy else (entry_price - tp)
+
+        exit_price  = None
+        exit_time   = None
+        exit_reason = None
+
+        for j in range(i + 1, min(i + 200, len(close))):
+            h, l, c = high[j], low[j], close[j]
+
+            # チャネル計算して動的SL更新
+            ch_upper, ch_lower = calc_lr_channel(close, j, channel_period, channel_std)
+            if ch_lower is not None:
+                if is_buy:
+                    new_sl = ch_lower - sl_buffer
+                    if new_sl > sl_price:   # SLは上にしか動かない
+                        sl_price = new_sl
+                else:
+                    new_sl = ch_upper + sl_buffer
+                    if new_sl < sl_price:   # SLは下にしか動かない
+                        sl_price = new_sl
+
+            # 決済判定
+            if is_buy:
+                if l <= sl_price:
+                    exit_price = sl_price
+                    exit_reason = "DYN_SL"
+                    exit_time = times[j]; break
+                if use_fixed_tp and h >= tp_price:
+                    exit_price = tp_price
+                    exit_reason = "TP"
+                    exit_time = times[j]; break
+            else:
+                if h >= sl_price:
+                    exit_price = sl_price
+                    exit_reason = "DYN_SL"
+                    exit_time = times[j]; break
+                if use_fixed_tp and l <= tp_price:
+                    exit_price = tp_price
+                    exit_reason = "TP"
+                    exit_time = times[j]; break
+
+        if exit_price is None:
+            last_j = min(i + 199, len(close) - 1)
+            exit_price = close[last_j]
+            exit_time  = times[last_j]
+            exit_reason = "TIMEOUT"
+
+        pnl = (exit_price - entry_price) if is_buy else (entry_price - exit_price)
+        trades.append({
+            'direction':   direction,
+            'entry_time':  entry_time,
+            'exit_time':   exit_time,
+            'entry_price': entry_price,
+            'exit_price':  exit_price,
+            'pnl':         round(pnl, 2),
+            'exit_reason': exit_reason,
+            'rsi':  row['rsi'],
+            'adx':  row['adx'],
+            'buy_score':  row['buy_score'],
+            'sell_score': row['sell_score'],
+        })
+
+    return pd.DataFrame(trades)
+
+
+def simulate_trades_scalping(df_price, df_signals,
+                             trail_trigger=2.0, trail_width=1.5,
+                             adx_min=25.0, channel_period=30, channel_std=1.5,
+                             max_reentry=10):
+    """スキャルピング再エントリー戦略
+
+    トレーリング決済後、チャネル継続＋ADX>=adx_minなら即再エントリー。
+    チャネルブレイク or ADX低下で停止。
+    """
+    all_trades = []   # 全サブトレード記録
+    sessions  = []    # セッション単位（シグナル→トレンド終了）
+
+    close = df_price['Close'].values
+    high  = df_price['High'].values
+    low   = df_price['Low'].values
+    adx_arr = df_price.get('adx_pre', None)  # 事前計算ADX（なければ都度計算）
+    times = df_price.index
+
+    sig_rows = df_signals[df_signals['crossover'].notna()].copy()
+    sig_rows = sig_rows[sig_rows['crossover'] != sig_rows['crossover'].shift(1)]
+
+    for _, row in sig_rows.iterrows():
+        i0 = row['idx']
+        direction = row['crossover']
+        is_buy = direction == "UP_CROSS"
+        if row['adx'] < adx_min:
+            continue  # ADX不足でスキップ
+
+        session_pnl = 0.0
+        session_trades = 0
+        entry_idx = i0
+        entry_price = row['close']
+        reentry_count = 0
+
+        while reentry_count <= max_reentry and entry_idx < len(close) - 2:
+            # ── 1サブトレード ──
+            ep = entry_price
+            trail_peak = ep
+            trail_sl = None
+            sub_exit_price = None
+            sub_exit_reason = None
+            sub_exit_idx = None
+
+            for j in range(entry_idx + 1, min(entry_idx + 200, len(close))):
+                h, l, c = high[j], low[j], close[j]
+
+                # チャネルチェック
+                ch_upper, ch_lower = calc_lr_channel(close, j, channel_period, channel_std)
+                channel_ok = ch_upper is not None
+
+                # ADXチェック（df_signalsのADXを参照できないのでチャネルで代替）
+                # チャネルブレイク = トレンド終了
+                if channel_ok:
+                    if is_buy and c < ch_lower:
+                        sub_exit_price  = c
+                        sub_exit_reason = "CH_BREAK"
+                        sub_exit_idx    = j; break
+                    if not is_buy and c > ch_upper:
+                        sub_exit_price  = c
+                        sub_exit_reason = "CH_BREAK"
+                        sub_exit_idx    = j; break
+
+                # トレーリング更新
+                if is_buy:
+                    if h > trail_peak: trail_peak = h
+                    if trail_peak - ep >= trail_trigger:
+                        new_ts = trail_peak - trail_width
+                        if trail_sl is None or new_ts > trail_sl:
+                            trail_sl = new_ts
+                    if trail_sl and l <= trail_sl:
+                        sub_exit_price  = trail_sl
+                        sub_exit_reason = "TRAIL"
+                        sub_exit_idx    = j; break
+                else:
+                    if l < trail_peak: trail_peak = l
+                    if ep - trail_peak >= trail_trigger:
+                        new_ts = trail_peak + trail_width
+                        if trail_sl is None or new_ts < trail_sl:
+                            trail_sl = new_ts
+                    if trail_sl and h >= trail_sl:
+                        sub_exit_price  = trail_sl
+                        sub_exit_reason = "TRAIL"
+                        sub_exit_idx    = j; break
+
+            if sub_exit_price is None:
+                last_j = min(entry_idx + 199, len(close) - 1)
+                sub_exit_price  = close[last_j]
+                sub_exit_reason = "TIMEOUT"
+                sub_exit_idx    = last_j
+
+            pnl = (sub_exit_price - ep) if is_buy else (ep - sub_exit_price)
+            session_pnl += pnl
+            session_trades += 1
+            all_trades.append({
+                'direction':    direction,
+                'entry_time':   times[entry_idx],
+                'exit_time':    times[sub_exit_idx],
+                'entry_price':  ep,
+                'exit_price':   sub_exit_price,
+                'pnl':          round(pnl, 2),
+                'exit_reason':  sub_exit_reason,
+                'reentry_no':   reentry_count,
+                'rsi':  row['rsi'],
+                'adx':  row['adx'],
+            })
+
+            # チャネルブレイク or タイムアウト → セッション終了
+            if sub_exit_reason in ("CH_BREAK", "TIMEOUT"):
+                break
+
+            # TRAIL決済 → 即再エントリー判定
+            entry_idx   = sub_exit_idx
+            entry_price = sub_exit_price
+            reentry_count += 1
+
+        sessions.append({
+            'direction':      direction,
+            'session_pnl':    round(session_pnl, 2),
+            'trade_count':    session_trades,
+            'rsi':  row['rsi'],
+            'adx':  row['adx'],
+        })
+
+    df_trades   = pd.DataFrame(all_trades)   if all_trades else pd.DataFrame()
+    df_sessions = pd.DataFrame(sessions)     if sessions   else pd.DataFrame()
+    return df_trades, df_sessions
+
+
+def compute_composite(df):
+    """app.py の compute_signal_composite と同じスコアリング"""
+    close = df['Close']
+    high = df['High']
+    low = df['Low']
+
+    rsi = calculate_rsi(close)
+    macd, macd_sig = calculate_macd(close)
+    ema20 = close.ewm(span=20, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    ema200 = close.ewm(span=min(200, len(close)-1), adjust=False).mean()
+    bb_up, bb_lo = calculate_bb(close)
+    stoch_k, stoch_d = calculate_stoch(high, low, close)
+    adx, di_p, di_m = calculate_adx(high, low, close)
+
+    signals = []
+    highs_list = high.tolist()
+    lows_list = low.tolist()
+    close_list = close.tolist()
+
+    for i in range(60, len(df)):
+        buy, sell = 0, 0
+
+        # 1. EMA
+        if ema20.iloc[i] > ema50.iloc[i]: buy += 1
+        else: sell += 1
+        if close.iloc[i] > ema200.iloc[i]: buy += 1
+        else: sell += 1
+
+        # 2. MACD クロス
+        if macd.iloc[i] > macd_sig.iloc[i] and macd.iloc[i-1] <= macd_sig.iloc[i-1]: buy += 1
+        elif macd.iloc[i] < macd_sig.iloc[i] and macd.iloc[i-1] >= macd_sig.iloc[i-1]: sell += 1
+
+        # 3. RSI
+        if rsi.iloc[i] > 55: buy += 1
+        elif rsi.iloc[i] < 45: sell += 1
+
+        # 4. BB
+        if close.iloc[i] > bb_up.iloc[i]: buy += 1
+        elif close.iloc[i] < bb_lo.iloc[i]: sell += 1
+
+        # 5. Stochastic
+        if stoch_k.iloc[i] > stoch_d.iloc[i] and stoch_k.iloc[i] < 80: buy += 1
+        elif stoch_k.iloc[i] < stoch_d.iloc[i] and stoch_k.iloc[i] > 20: sell += 1
+
+        # 6. ADX/DI
+        if di_p.iloc[i] > di_m.iloc[i] and adx.iloc[i] > 20: buy += 1
+        elif di_m.iloc[i] > di_p.iloc[i] and adx.iloc[i] > 20: sell += 1
+
+        crossover = None
+        if buy >= SCORE_THRESHOLD and buy > sell + 1:
+            crossover = "UP_CROSS"
+        elif sell >= SCORE_THRESHOLD and sell > buy + 1:
+            crossover = "DOWN_CROSS"
+
+        # R/Sブレイク検出
+        is_breakout, breakout_lvl = detect_breakout(highs_list[:i+1], lows_list[:i+1], close_list[i], close_list[i-1])
+        is_breakdown, breakdown_lvl = detect_breakdown(highs_list[:i+1], lows_list[:i+1], close_list[i], close_list[i-1])
+
+        signals.append({
+            'idx': i,
+            'time': df.index[i],
+            'close': close.iloc[i],
+            'crossover': crossover,
+            'buy_score': buy,
+            'sell_score': sell,
+            'rsi': rsi.iloc[i],
+            'adx': adx.iloc[i],
+            'macd': macd.iloc[i],
+            'macd_sig': macd_sig.iloc[i],
+            'is_breakout': is_breakout,
+            'breakout_lvl': breakout_lvl,
+            'is_breakdown': is_breakdown,
+            'breakdown_lvl': breakdown_lvl,
+        })
+
+    return pd.DataFrame(signals)
+
+
+# ==================== トレードシミュレーション ====================
+def get_utc_hour(t):
+    try:
+        import pandas as pd
+        ts = pd.Timestamp(t)
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert("UTC")
+        return ts.hour
+    except:
+        return -1
+
+def apply_adx_adaptive_flip(df_sig, adx_threshold=25.0):
+    """ADX値に基づいてドテン無効化（トレンド中は逆クロスを無視）
+
+    トレンド中（ADX > threshold）：逆クロスシグナルを削除（ドテンなし）
+    レンジ中（ADX < threshold）：逆クロスシグナルを保持（ドテン有り）
+    """
+    df = df_sig.copy()
+
+    # トレンド中（ADX > threshold）の逆方向シグナルを削除
+    # 例：UP_CROSS状態でADX高時にDOWN_CROSSが出ても無視
+    current_position = None  # UP_CROSS or DOWN_CROSS or None
+
+    for i in range(len(df)):
+        if df.iloc[i]['crossover'] is None:
+            continue
+
+        # トレンド判定
+        is_trend = df.iloc[i]['adx'] > adx_threshold
+
+        if current_position is None:
+            # ポジションなし：シグナルを受け入れる
+            current_position = df.iloc[i]['crossover']
+        else:
+            # ポジションあり
+            new_signal = df.iloc[i]['crossover']
+            if new_signal != current_position:
+                # 逆方向シグナル
+                if is_trend:
+                    # トレンド中：逆クロスを無視（シグナル削除）
+                    df.at[i, 'crossover'] = None
+                else:
+                    # レンジ中：逆クロスを受け入れ（ドテン）
+                    current_position = new_signal
+            else:
+                # 同方向シグナル：無視
+                df.at[i, 'crossover'] = None
+
+    return df
+
+
+def apply_filters(df_sig, rsi_filter=False, sell_gap_filter=False, adx_filter=False,
+                  adx_threshold=ADX_FILTER_THRESHOLD, skip_sessions=None, breakout_filter=False, breakout_mode="single"):
+    """①RSIフィルター ②SELL方向スコア差フィルター ③ADXフィルター ④時間帯フィルター ⑤R/Sブレイクフィルターを適用
+
+    breakout_filter: R/Sブレイク検出を使用するか
+    breakout_mode:
+        "single": ブレイク単独でエントリー（7指標不要）
+        "and": ブレイク AND 7指標スコア3以上
+        "or": ブレイク OR 7指標スコア3以上
+
+    skip_sessions: スキップする時間帯リスト (例: ["東京", "深夜"])
+    """
+    SESSION_RANGES = {
+        "東京":   (0, 8),
+        "ロンドン": (8, 13),
+        "NY":    (13, 22),
+        "深夜":   (22, 24),
+    }
+    df = df_sig.copy()
+    df['gap'] = (df['buy_score'] - df['sell_score']).abs()
+
+    if rsi_filter:
+        df.loc[df['rsi'] < RSI_FILTER_THRESHOLD, 'crossover'] = None
+    if sell_gap_filter:
+        mask = (df['crossover'] == 'DOWN_CROSS') & (df['gap'] < SELL_MIN_GAP)
+        df.loc[mask, 'crossover'] = None
+    if adx_filter:
+        df.loc[df['adx'] < adx_threshold, 'crossover'] = None
+    if skip_sessions:
+        hours = df['time'].apply(get_utc_hour)
+        for sess in skip_sessions:
+            if sess in SESSION_RANGES:
+                h_start, h_end = SESSION_RANGES[sess]
+                df.loc[(hours >= h_start) & (hours < h_end), 'crossover'] = None
+
+    # ⑤ R/Sブレイク検出
+    if breakout_filter:
+        if breakout_mode == "single":
+            # ブレイク単独: 7指標なし、ブレイク検出のみ
+            df['crossover'] = None
+            df.loc[df['is_breakout'], 'crossover'] = "UP_CROSS"
+            df.loc[df['is_breakdown'], 'crossover'] = "DOWN_CROSS"
+        elif breakout_mode == "and":
+            # ブレイク AND 7指標: 両方満たす場合のみ
+            has_signal = df['crossover'].notna()
+            has_breakout = (df['is_breakout'] & (df['crossover'] == 'UP_CROSS')) | (df['is_breakdown'] & (df['crossover'] == 'DOWN_CROSS'))
+            df.loc[~(has_signal & has_breakout), 'crossover'] = None
+        elif breakout_mode == "or":
+            # ブレイク OR 7指標: どちらかが満たす場合
+            has_signal = df['crossover'].notna()
+            has_breakout = (df['is_breakout'] & (df['crossover'] != 'DOWN_CROSS')) | (df['is_breakdown'] & (df['crossover'] != 'UP_CROSS'))
+            # シグナルがない場合、ブレイクだけでエントリー
+            df.loc[~has_signal & df['is_breakout'], 'crossover'] = "UP_CROSS"
+            df.loc[~has_signal & df['is_breakdown'], 'crossover'] = "DOWN_CROSS"
+
+    return df
+
+
+def simulate_trades(df_price, df_signals, sl=SL_PIPS, tp=TP_PIPS,
+                    trail_trigger=TRAIL_TRIGGER, trail_width=TRAIL_WIDTH,
+                    use_trailing=True, use_adx_adaptive_tp=False, adx_trend_threshold=25.0,
+                    use_adx_adaptive_flip=False, use_trendline_exit=False):
+    """
+    use_adx_adaptive_tp: ADX値に基づいてTPを動的に設定
+    use_adx_adaptive_flip: ADX値に基づいてドテン無効化
+      - トレンド（ADX > threshold）：ドテンなし（逆クロス無視）
+      - レンジ（ADX < threshold）：ドテン有り（逆クロスで決済）
+    use_trendline_exit: トレンドライン逸脱での自動決済
+    """
+    trades = []
+    close = df_price['Close'].values
+    high = df_price['High'].values
+    low = df_price['Low'].values
+    times = df_price.index
+
+    # クロスオーバーシグナルのみ
+    sig_rows = df_signals[df_signals['crossover'].notna()].copy()
+
+    # ADX適応的ドテン無効化の場合、トレンド時の連続同方向処理をスキップ
+    if not use_adx_adaptive_flip:
+        # 連続同方向シグナルは最初だけ（方向が変わるまで再エントリーしない）
+        sig_rows = sig_rows[sig_rows['crossover'] != sig_rows['crossover'].shift(1)]
+
+    for _, row in sig_rows.iterrows():
+        i = row['idx']
+        direction = row['crossover']
+        entry_price = row['close']
+        entry_time = row['time']
+
+        is_buy = direction == "UP_CROSS"
+
+        # TPの計算（ADX適応的 or 固定）
+        if use_adx_adaptive_tp and row['adx'] > adx_trend_threshold:
+            # トレンド相場：対面側ラインまで
+            trendline_tp = calculate_trendline_tp(high[:i+1], low[:i+1], entry_price, is_buy)
+            if trendline_tp is not None:
+                tp_distance = trendline_tp
+            else:
+                tp_distance = tp
+        else:
+            # レンジ相場 or 固定TP：固定値を使用
+            tp_distance = tp
+
+        if is_buy:
+            sl_price = entry_price - sl
+            tp_price = entry_price + tp_distance
+        else:
+            sl_price = entry_price + sl
+            tp_price = entry_price - tp_distance
+
+        # 最大100本後まで追跡
+        exit_price = None
+        exit_time = None
+        exit_reason = None
+        trail_peak = entry_price
+        trail_sl = None
+
+        for j in range(i + 1, min(i + 100, len(close))):
+            h, l = high[j], low[j]
+
+            # トレーリング更新
+            if use_trailing:
+                if is_buy:
+                    if h > trail_peak:
+                        trail_peak = h
+                    profit_dist = trail_peak - entry_price
+                    if profit_dist >= trail_trigger:
+                        new_trail_sl = trail_peak - trail_width
+                        if trail_sl is None or new_trail_sl > trail_sl:
+                            trail_sl = new_trail_sl
+                else:
+                    if l < trail_peak:
+                        trail_peak = l
+                    profit_dist = entry_price - trail_peak
+                    if profit_dist >= trail_trigger:
+                        new_trail_sl = trail_peak + trail_width
+                        if trail_sl is None or new_trail_sl < trail_sl:
+                            trail_sl = new_trail_sl
+
+            # SL/TP/Trail チェック
+            if is_buy:
+                if trail_sl and l <= trail_sl:
+                    exit_price = trail_sl
+                    exit_reason = "TRAIL"
+                    exit_time = times[j]
+                    break
+                if l <= sl_price:
+                    exit_price = sl_price
+                    exit_reason = "SL"
+                    exit_time = times[j]
+                    break
+                if h >= tp_price:
+                    exit_price = tp_price
+                    exit_reason = "TP"
+                    exit_time = times[j]
+                    break
+            else:
+                if trail_sl and h >= trail_sl:
+                    exit_price = trail_sl
+                    exit_reason = "TRAIL"
+                    exit_time = times[j]
+                    break
+                if h >= sl_price:
+                    exit_price = sl_price
+                    exit_reason = "SL"
+                    exit_time = times[j]
+                    break
+                if l <= tp_price:
+                    exit_price = tp_price
+                    exit_reason = "TP"
+                    exit_time = times[j]
+                    break
+
+        if exit_price is None:
+            # 100本後も未決済 → 時間切れで現在値決済
+            last_j = min(i + 99, len(close) - 1)
+            exit_price = close[last_j]
+            exit_time = times[last_j]
+            exit_reason = "TIMEOUT"
+
+        pnl = (exit_price - entry_price) if is_buy else (entry_price - exit_price)
+        trades.append({
+            'direction': direction,
+            'entry_time': entry_time,
+            'exit_time': exit_time,
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'pnl': round(pnl, 2),
+            'exit_reason': exit_reason,
+            'rsi': row['rsi'],
+            'adx': row['adx'],
+            'buy_score': row['buy_score'],
+            'sell_score': row['sell_score'],
+        })
+
+    return pd.DataFrame(trades)
+
+
+# ==================== 統計表示 ====================
+def print_stats(label, trades):
+    if len(trades) == 0:
+        print(f"  {label}: データなし")
+        return
+    wins = trades[trades['pnl'] > 0]
+    losses = trades[trades['pnl'] <= 0]
+    win_rate = len(wins) / len(trades) * 100
+    avg_win = wins['pnl'].mean() if len(wins) > 0 else 0
+    avg_loss = losses['pnl'].mean() if len(losses) > 0 else 0
+    total_pnl = trades['pnl'].sum()
+    rr = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+
+    bar_w = int(win_rate / 5)
+    bar_l = 20 - bar_w
+    bar = "█" * bar_w + "░" * bar_l
+
+    print(f"  {label:<22} [{bar}] {win_rate:5.1f}%  "
+          f"取引:{len(trades):3d}  合計:{total_pnl:+7.1f}$/oz  "
+          f"平均勝:{avg_win:+.1f} 平均負:{avg_loss:+.1f}  RR:{rr:.2f}")
+
+
+def get_session(t):
+    """UTCで時間帯判定"""
+    try:
+        h = t.hour if hasattr(t, 'hour') else pd.Timestamp(t).hour
+    except:
+        return "不明"
+    if 0 <= h < 8:   return "東京(0-8UTC)"
+    if 8 <= h < 13:  return "ロンドン(8-13UTC)"
+    if 13 <= h < 22: return "NY(13-22UTC)"
+    return "深夜(22-24UTC)"
+
+
+def get_adx_zone(adx):
+    if adx < 20:   return "レンジ(<20)"
+    if adx < 25:   return "移行(20-25)"
+    return "トレンド(>25)"
+
+
+def calc_max_drawdown(trades):
+    cumulative = trades['pnl'].cumsum()
+    peak = cumulative.cummax()
+    dd = cumulative - peak
+    return dd.min()
+
+
+# ==================== メイン ====================
+def main():
+    print("=" * 72)
+    print("  GOLD AI Trader バックテスト")
+    print(f"  期間: 過去{PERIOD} / 足種: {TIMEFRAME} / SL:{SL_PIPS}$/oz TP:{TP_PIPS}$/oz")
+    print(f"  トレーリング: 開始{TRAIL_TRIGGER}$/oz 幅{TRAIL_WIDTH}$/oz")
+    print("=" * 72)
+
+    # データ取得
+    print("\n📥 データ取得中...")
+    df = yf.download(SYMBOL, period=PERIOD, interval=TIMEFRAME, progress=False)
+    if df.empty:
+        print("❌ データ取得失敗")
+        return
+
+    # MultiIndex対応
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.droplevel(1)
+
+    print(f"  取得: {len(df)}本  {df.index[0]} 〜 {df.index[-1]}")
+
+    # シグナル計算
+    print("\n📊 シグナル計算中...")
+    df_sig = compute_composite(df)
+    cross_count = df_sig['crossover'].notna().sum()
+    print(f"  総シグナル数: {cross_count}件")
+
+    # トレードシミュレーション（トレーリングあり）
+    print("\n⚙️  トレードシミュレーション中...")
+    trades = simulate_trades(df, df_sig, use_trailing=True)
+
+    if len(trades) == 0:
+        print("❌ トレードデータなし")
+        return
+
+    # セッション・ADXゾーン追加
+    trades['session'] = trades['entry_time'].apply(get_session)
+    trades['adx_zone'] = trades['adx'].apply(get_adx_zone)
+
+    wins = trades[trades['pnl'] > 0]
+    losses = trades[trades['pnl'] <= 0]
+    total_pnl = trades['pnl'].sum()
+    win_rate = len(wins) / len(trades) * 100
+    max_dd = calc_max_drawdown(trades)
+
+    print(f"\n{'=' * 72}")
+    print(f"  【総合成績】")
+    print(f"  総取引数: {len(trades)}  勝率: {win_rate:.1f}%  合計損益: {total_pnl:+.1f}$/oz")
+    print(f"  最大ドローダウン: {max_dd:.1f}$/oz")
+    avg_win = wins['pnl'].mean() if len(wins) > 0 else 0
+    avg_loss = losses['pnl'].mean() if len(losses) > 0 else 0
+    rr = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+    print(f"  平均利益: {avg_win:+.2f}$/oz  平均損失: {avg_loss:+.2f}$/oz  RR比: {rr:.2f}")
+
+    # 決済理由内訳
+    reasons = trades['exit_reason'].value_counts()
+    print(f"  決済内訳: " + "  ".join([f"{k}:{v}" for k, v in reasons.items()]))
+
+    # ──── 方向別 ────
+    print(f"\n{'─' * 72}")
+    print("  【方向別】")
+    for d in ["UP_CROSS", "DOWN_CROSS"]:
+        label = "🔴 BUY  (UP_CROSS)" if d == "UP_CROSS" else "🔵 SELL (DOWN_CROSS)"
+        print_stats(label, trades[trades['direction'] == d])
+
+    # ──── 時間帯別 ────
+    print(f"\n{'─' * 72}")
+    print("  【時間帯別】（UTC）")
+    for sess in ["東京(0-8UTC)", "ロンドン(8-13UTC)", "NY(13-22UTC)", "深夜(22-24UTC)"]:
+        print_stats(sess, trades[trades['session'] == sess])
+
+    # ──── ADX別 ────
+    print(f"\n{'─' * 72}")
+    print("  【市場タイプ別（ADX）】")
+    for zone in ["レンジ(<20)", "移行(20-25)", "トレンド(>25)"]:
+        print_stats(zone, trades[trades['adx_zone'] == zone])
+
+    # ──── RSI水準別 ────
+    print(f"\n{'─' * 72}")
+    print("  【RSI水準別】（シグナル時点）")
+    trades['rsi_zone'] = pd.cut(trades['rsi'],
+        bins=[0, 35, 45, 55, 65, 100],
+        labels=["過売り(<35)", "弱め(35-45)", "中立(45-55)", "強め(55-65)", "過買い(>65)"])
+    for zone in ["過売り(<35)", "弱め(35-45)", "中立(45-55)", "強め(55-65)", "過買い(>65)"]:
+        t = trades[trades['rsi_zone'] == zone]
+        if len(t) > 0:
+            print_stats(zone, t)
+
+    # ──── スコアギャップ別（Gemini代替フィルター） ────
+    print(f"\n{'─' * 72}")
+    print("  【スコアギャップ別（大→信号が強い）】")
+    trades['score_gap'] = trades.apply(
+        lambda r: abs(r['buy_score'] - r['sell_score']), axis=1)
+    for gap_label, gap_min, gap_max in [
+        ("スコア差2(最低)", 2, 2),
+        ("スコア差3", 3, 3),
+        ("スコア差4以上(強)", 4, 99),
+    ]:
+        t = trades[(trades['score_gap'] >= gap_min) & (trades['score_gap'] <= gap_max)]
+        if len(t) > 0:
+            print_stats(gap_label, t)
+
+    # ──── 曜日別 ────
+    print(f"\n{'─' * 72}")
+    print("  【曜日別】")
+    day_names = ["月", "火", "水", "木", "金", "土", "日"]
+    trades['weekday'] = trades['entry_time'].apply(
+        lambda t: day_names[t.weekday()] if hasattr(t, 'weekday') else "?")
+    for d in ["月", "火", "水", "木", "金"]:
+        t = trades[trades['weekday'] == d]
+        if len(t) > 0:
+            print_stats(d + "曜日", t)
+
+    # ──── トレーリングあり vs なし比較 ────
+    print(f"\n{'─' * 72}")
+    print("  【トレーリングSL あり vs なし 比較】")
+    trades_no_trail = simulate_trades(df, df_sig, use_trailing=False)
+    print_stats("トレーリングあり", trades)
+    print_stats("トレーリングなし", trades_no_trail)
+
+    # ──── スコア差フィルター別シミュレーション ────
+    print(f"\n{'─' * 72}")
+    print("  【Gemini強化後を想定: スコア差フィルター別シミュレーション】")
+    print("  （差4以上のみエントリー = Geminiが弱シグナルを却下した場合の想定）")
+    df_sig_gap = df_sig.copy()
+    df_sig_gap['gap'] = (df_sig_gap['buy_score'] - df_sig_gap['sell_score']).abs()
+    for min_gap, label in [(2, "全シグナル(差2以上)"), (3, "差3以上"), (4, "差4以上★"), (5, "差5以上")]:
+        filtered = df_sig_gap.copy()
+        filtered.loc[filtered['gap'] < min_gap, 'crossover'] = None
+        t = simulate_trades(df, filtered, use_trailing=True)
+        print_stats(label, t)
+
+    # ──── ①②フィルター比較 ────
+    print(f"\n{'─' * 72}")
+    print("  【①RSIフィルター + ②SELL閾値強化 比較】")
+    print(f"  ①RSI<{RSI_FILTER_THRESHOLD:.0f}のシグナルをスキップ")
+    print(f"  ②SELLはスコア差{SELL_MIN_GAP}以上でないとスキップ（BUYは差2以上でOK）")
+    combos = [
+        (False, False, "フィルターなし（現状）"),
+        (True,  False, "①RSIフィルターのみ"),
+        (False, True,  "②SELL閾値強化のみ"),
+        (True,  True,  "①+② 組み合わせ★"),
+    ]
+    for rsi_f, sell_f, label in combos:
+        filtered = apply_filters(df_sig, rsi_filter=rsi_f, sell_gap_filter=sell_f)
+        t = simulate_trades(df, filtered, use_trailing=True)
+        print_stats(label, t)
+
+    # ──── ③ADXフィルター比較 ────
+    print(f"\n{'─' * 72}")
+    print("  【③ADXフィルター比較】")
+    print(f"  ③ADX<閾値（レンジ相場）のシグナルをスキップ")
+    adx_combos = [
+        (False, False, False,  0,  "フィルターなし（現状）"),
+        (True,  False, False,  0,  "①RSIのみ（採用済み）"),
+        (False, False, True,  20,  "③ADX<20のみ"),
+        (False, False, True,  25,  "③ADX<25のみ"),
+        (True,  False, True,  20,  "①RSI + ③ADX<20"),
+        (True,  False, True,  25,  "①RSI + ③ADX<25"),
+    ]
+    for rsi_f, sell_f, adx_f, adx_th, label in adx_combos:
+        filtered = apply_filters(df_sig, rsi_filter=rsi_f, sell_gap_filter=sell_f,
+                                 adx_filter=adx_f, adx_threshold=adx_th if adx_th > 0 else ADX_FILTER_THRESHOLD)
+        t = simulate_trades(df, filtered, use_trailing=True)
+        print_stats(label, t)
+
+    # ──── ④時間帯フィルター比較 ────
+    print(f"\n{'─' * 72}")
+    print("  【④時間帯フィルター比較】（UTC基準）")
+    print("  東京:0-8h  ロンドン:8-13h  NY:13-22h  深夜:22-24h")
+    sess_combos = [
+        (None,                      "全時間帯（現状）"),
+        (["深夜"],                   "深夜スキップ"),
+        (["ロンドン"],               "ロンドンスキップ"),
+        (["NY"],                    "NYスキップ"),
+        (["東京"],                   "東京スキップ"),
+        (["深夜", "東京"],           "深夜+東京スキップ"),
+        (["深夜", "ロンドン"],       "深夜+ロンドンスキップ"),
+        (["深夜", "NY"],            "深夜+NYスキップ"),
+    ]
+    for skip, label in sess_combos:
+        filtered = apply_filters(df_sig, rsi_filter=True, skip_sessions=skip)
+        t = simulate_trades(df, filtered, use_trailing=True)
+        print_stats(f"①RSI+{label}", t)
+
+    # ──── 連敗分析 ────
+    print(f"\n{'─' * 72}")
+    print("  【連敗分析】")
+    streak = 0
+    max_streak = 0
+    for _, r in trades.iterrows():
+        if r['pnl'] <= 0:
+            streak += 1
+            max_streak = max(max_streak, streak)
+        else:
+            streak = 0
+    print(f"  最大連敗数: {max_streak}連敗")
+
+    # ──── 苦手・得意まとめ ────
+    print(f"\n{'=' * 72}")
+    print("  【まとめ: 得意な局面 vs 苦手な局面】")
+
+    # セッション最高・最低
+    sess_stats = trades.groupby('session')['pnl'].sum()
+    best_sess = sess_stats.idxmax() if len(sess_stats) > 0 else "-"
+    worst_sess = sess_stats.idxmin() if len(sess_stats) > 0 else "-"
+
+    # ADX最高・最低
+    adx_stats = trades.groupby('adx_zone')['pnl'].sum()
+    best_adx = adx_stats.idxmax() if len(adx_stats) > 0 else "-"
+    worst_adx = adx_stats.idxmin() if len(adx_stats) > 0 else "-"
+
+    # 方向
+    dir_stats = trades.groupby('direction').apply(
+        lambda x: len(x[x['pnl']>0])/len(x)*100)
+    best_dir = dir_stats.idxmax() if len(dir_stats) > 0 else "-"
+
+    print(f"  ✅ 得意: {best_sess} | {best_adx} | {'BUY' if best_dir=='UP_CROSS' else 'SELL'}方向")
+    print(f"  ❌ 苦手: {worst_sess} | {worst_adx}")
+    print()
+
+    # ──── 全トレード一覧（最新20件） ────
+    print(f"\n{'─' * 72}")
+    print("  【直近20件のトレード】")
+    print(f"  {'時刻':<20} {'方向':<12} {'エントリー':>8} {'決済':>8} {'損益':>8} {'理由':<8} {'ADX':>6}")
+    for _, r in trades.tail(20).iterrows():
+        direction_label = "🔴 BUY" if r['direction'] == "UP_CROSS" else "🔵 SELL"
+        pnl_str = f"+{r['pnl']:.1f}" if r['pnl'] > 0 else f"{r['pnl']:.1f}"
+        t_str = str(r['entry_time'])[:16]
+        print(f"  {t_str:<20} {direction_label:<12} {r['entry_price']:>8.2f} {r['exit_price']:>8.2f} {pnl_str:>7}  {r['exit_reason']:<8} {r['adx']:>5.1f}")
+
+    # ──── チャネルブレイク決済 比較 ────
+    print(f"\n{'=' * 72}")
+    print("  【チャネルブレイク決済 比較】（①RSIフィルター適用）")
+    print("  エントリーはCOMPOSITEシグナル、決済方法のみ変更")
+    print(f"  {'モード':<30} {'期間':>6}  結果")
+    print("─" * 72)
+
+    df_sig_rsi = apply_filters(df_sig, rsi_filter=True)
+
+    # ベースライン
+    t_base = simulate_trades(df, df_sig_rsi, use_trailing=True)
+    print_stats("①現状（SL+トレーリング）      ", t_base)
+    print()
+
+    for period in [20, 30, 50]:
+        for mode, label in [
+            ("replace_tp",        f"②SL残し+チャネルTP              (期間{period})"),
+            ("breakeven_channel",  f"⑤BE移動後チャネルTP             (期間{period})"),
+            ("with_trailing",      f"③トレーリング+チャネル併用      (期間{period})"),
+            ("only",               f"④チャネルのみ（SLなし）         (期間{period})"),
+        ]:
+            t = simulate_trades_channel(
+                df, df_sig_rsi,
+                channel_mode=mode, channel_period=period, channel_std=1.5,
+                sl=SL_PIPS, tp=TP_PIPS,
+                trail_trigger=TRAIL_TRIGGER, trail_width=TRAIL_WIDTH,
+            )
+            if len(t) > 0:
+                wins = t[t['pnl'] > 0]
+                losses = t[t['pnl'] <= 0]
+                wr = len(wins) / len(t) * 100
+                total = t['pnl'].sum()
+                avg_w = wins['pnl'].mean() if len(wins) > 0 else 0
+                avg_l = losses['pnl'].mean() if len(losses) > 0 else 0
+                rr = abs(avg_w / avg_l) if avg_l != 0 else 0
+                reasons = t['exit_reason'].value_counts().to_dict()
+                reason_str = " ".join([f"{k}:{v}" for k, v in reasons.items()])
+                bar_w = int(wr / 5)
+                bar = "█" * bar_w + "░" * (20 - bar_w)
+                print(f"  {label:<35} [{bar}] {wr:5.1f}%  取引:{len(t):3d}  合計:{total:+7.1f}$/oz  "
+                      f"平均勝:{avg_w:+.1f} 平均負:{avg_l:+.1f}  RR:{rr:.2f}  [{reason_str}]")
+            else:
+                print(f"  {label:<35} データなし")
+        print()
+
+    # ──── ⑥動的SL比較 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑥動的SL比較】チャネル下辺/上辺 ± バッファ でSLを毎足追随")
+    print("  ※SLは有利方向にしか動かない（逆行時はその時点のSLで決済）")
+    print("─" * 72)
+
+    # ベースライン再掲
+    print_stats("①現状（固定SL5$+トレーリング）  ", t_base)
+    print_stats("②チャネルTP期間30（最良）        ",
+                simulate_trades_channel(df, df_sig_rsi, channel_mode="replace_tp",
+                                        channel_period=30, sl=SL_PIPS, tp=TP_PIPS,
+                                        trail_trigger=TRAIL_TRIGGER, trail_width=TRAIL_WIDTH))
+    print()
+
+    for period in [20, 30, 50]:
+        for buf in [2.0, 5.0, 8.0]:
+            for use_tp, tp_label in [(False, "TPなし"), (True, f"TP{int(TP_PIPS)}$")]:
+                label = f"⑥動的SL buf{int(buf)}$ {tp_label} (期間{period})"
+                t = simulate_trades_dynamic_sl(
+                    df, df_sig_rsi,
+                    channel_period=period, channel_std=1.5,
+                    sl_buffer=buf, use_fixed_tp=use_tp, tp=TP_PIPS,
+                )
+                if len(t) > 0:
+                    wins = t[t['pnl'] > 0]
+                    losses = t[t['pnl'] <= 0]
+                    wr = len(wins) / len(t) * 100
+                    total = t['pnl'].sum()
+                    avg_w = wins['pnl'].mean() if len(wins) > 0 else 0
+                    avg_l = losses['pnl'].mean() if len(losses) > 0 else 0
+                    rr = abs(avg_w / avg_l) if avg_l != 0 else 0
+                    reasons = t['exit_reason'].value_counts().to_dict()
+                    reason_str = " ".join([f"{k}:{v}" for k, v in reasons.items()])
+                    bar_w = int(wr / 5)
+                    bar = "█" * bar_w + "░" * (20 - bar_w)
+                    print(f"  {label:<40} [{bar}] {wr:5.1f}%  取引:{len(t):3d}  "
+                          f"合計:{total:+7.1f}$/oz  平均勝:{avg_w:+.1f} 平均負:{avg_l:+.1f}  "
+                          f"RR:{rr:.2f}  [{reason_str}]")
+        print()
+
+    # ──── 1年テスト（1h足） ────
+    print(f"\n{'=' * 72}")
+    print("  【1年バックテスト】1時間足 × 過去365日")
+    print("  ※15分足は60日上限のため1時間足を使用。ロジックは同一。")
+    print("=" * 72)
+    df1y = yf.download("GC=F", period="365d", interval="1h", progress=False)
+    if isinstance(df1y.columns, pd.MultiIndex):
+        df1y.columns = df1y.columns.droplevel(1)
+    print(f"  取得: {len(df1y)}本  {df1y.index[0]} 〜 {df1y.index[-1]}")
+    df_sig1y = compute_composite(df1y)
+    cross1y = df_sig1y['crossover'].notna().sum()
+    print(f"  総シグナル数: {cross1y}件\n")
+
+    # 1h足はSL/TPを広めに（1時間足はボラが大きい）
+    SL1H, TP1H, TR1H, TW1H = 8.0, 25.0, 7.0, 5.0
+    print(f"  SL:{SL1H}$/oz  TP:{TP1H}$/oz  トレイル開始:{TR1H}$/oz  幅:{TW1H}$/oz")
+    print()
+
+    combos1y = [
+        (False, False, "フィルターなし（現状）"),
+        (True,  True,  "①+② 組み合わせ★"),
+    ]
+    for rsi_f, sell_f, label in combos1y:
+        filtered1y = apply_filters(df_sig1y, rsi_filter=rsi_f, sell_gap_filter=sell_f)
+        t1y = simulate_trades(df1y, filtered1y, sl=SL1H, tp=TP1H,
+                              trail_trigger=TR1H, trail_width=TW1H, use_trailing=True)
+        if len(t1y) > 0:
+            t1y['session'] = t1y['entry_time'].apply(get_session)
+            t1y['adx_zone'] = t1y['adx'].apply(get_adx_zone)
+            print_stats(label, t1y)
+
+    # フィルターありで詳細分析
+    print()
+    filtered1y_best = apply_filters(df_sig1y, rsi_filter=True, sell_gap_filter=True)
+    t1y_best = simulate_trades(df1y, filtered1y_best, sl=SL1H, tp=TP1H,
+                               trail_trigger=TR1H, trail_width=TW1H, use_trailing=True)
+    if len(t1y_best) > 0:
+        t1y_best['session'] = t1y_best['entry_time'].apply(get_session)
+        t1y_best['adx_zone'] = t1y_best['adx'].apply(get_adx_zone)
+        t1y_best['weekday'] = t1y_best['entry_time'].apply(
+            lambda t: ["月","火","水","木","金","土","日"][t.weekday()] if hasattr(t,'weekday') else "?")
+        max_dd1y = calc_max_drawdown(t1y_best)
+        wins1y = t1y_best[t1y_best['pnl'] > 0]
+        losses1y = t1y_best[t1y_best['pnl'] <= 0]
+        print(f"  ─ ①+②フィルターあり 詳細 ─")
+        print(f"  最大DD: {max_dd1y:.1f}$/oz  平均利益:{wins1y['pnl'].mean():+.1f}  平均損失:{losses1y['pnl'].mean():+.1f}")
+        print()
+        print("  時間帯別:")
+        for sess in ["東京(0-8UTC)", "ロンドン(8-13UTC)", "NY(13-22UTC)", "深夜(22-24UTC)"]:
+            t = t1y_best[t1y_best['session'] == sess]
+            if len(t) > 0: print_stats(sess, t)
+        print()
+        print("  ADX別:")
+        for zone in ["レンジ(<20)", "移行(20-25)", "トレンド(>25)"]:
+            t = t1y_best[t1y_best['adx_zone'] == zone]
+            if len(t) > 0: print_stats(zone, t)
+        print()
+        print("  方向別:")
+        for d, lbl in [("UP_CROSS","🔴 BUY"), ("DOWN_CROSS","🔵 SELL")]:
+            t = t1y_best[t1y_best['direction'] == d]
+            if len(t) > 0: print_stats(lbl, t)
+        print()
+        print("  曜日別:")
+        for d in ["月","火","水","木","金"]:
+            t = t1y_best[t1y_best['weekday'] == d]
+            if len(t) > 0: print_stats(d+"曜日", t)
+
+    # ──── 1時間足 × 動的SL比較 ────
+    print(f"\n{'=' * 72}")
+    print("  【1時間足 × ⑥動的SL比較】（①RSIフィルター適用）")
+    print("  ※1時間足はボラが大きいためSL/TPパラメータを広め設定")
+    print("─" * 72)
+
+    SL1H, TP1H, TR1H, TW1H = 8.0, 25.0, 7.0, 5.0
+    df_sig1y_rsi = apply_filters(df_sig1y, rsi_filter=True)
+
+    # ベースライン（1h足）
+    t1y_base = simulate_trades(df1y, df_sig1y_rsi, sl=SL1H, tp=TP1H,
+                               trail_trigger=TR1H, trail_width=TW1H, use_trailing=True)
+    print_stats("①現状1h（SL8$+トレーリング）    ", t1y_base)
+    print()
+
+    for period in [20, 30, 50]:
+        for buf in [3.0, 6.0, 10.0]:
+            for use_tp, tp_label in [(False, "TPなし"), (True, f"TP{int(TP1H)}$")]:
+                label = f"⑥動的SL buf{int(buf)}$ {tp_label} (期間{period})"
+                t = simulate_trades_dynamic_sl(
+                    df1y, df_sig1y_rsi,
+                    channel_period=period, channel_std=1.5,
+                    sl_buffer=buf, use_fixed_tp=use_tp, tp=TP1H,
+                )
+                if len(t) > 0:
+                    wins = t[t['pnl'] > 0]
+                    losses = t[t['pnl'] <= 0]
+                    wr = len(wins) / len(t) * 100
+                    total = t['pnl'].sum()
+                    avg_w = wins['pnl'].mean() if len(wins) > 0 else 0
+                    avg_l = losses['pnl'].mean() if len(losses) > 0 else 0
+                    rr = abs(avg_w / avg_l) if avg_l != 0 else 0
+                    reasons = t['exit_reason'].value_counts().to_dict()
+                    reason_str = " ".join([f"{k}:{v}" for k, v in reasons.items()])
+                    bar_w = int(wr / 5)
+                    bar = "█" * bar_w + "░" * (20 - bar_w)
+                    print(f"  {label:<40} [{bar}] {wr:5.1f}%  取引:{len(t):3d}  "
+                          f"合計:{total:+8.1f}$/oz  平均勝:{avg_w:+.1f} 平均負:{avg_l:+.1f}  "
+                          f"RR:{rr:.2f}  [{reason_str}]")
+        print()
+
+    # ──── R/Sブレイク分析（重複確認） ────
+    print(f"\n{'=' * 72}")
+    print("  【R/Sブレイク検出 × 7指標 重複分析】")
+    print("=" * 72)
+
+    # ブレイク検出されたシグナルを数える
+    breakout_signals = df_sig[df_sig['is_breakout'] | df_sig['is_breakdown']].copy()
+    composite_signals = df_sig[df_sig['crossover'].notna()].copy()
+
+    # ブレイク検出のうち、7指標シグナルと重複している割合
+    breakout_with_composite = breakout_signals[breakout_signals['crossover'].notna()]
+    breakout_without_composite = breakout_signals[breakout_signals['crossover'].isna()]
+
+    print(f"\n  📊 シグナル検出数:")
+    print(f"    7指標スコア3以上: {len(composite_signals)}件")
+    print(f"    R/Sブレイク検出: {len(breakout_signals)}件")
+    print(f"    両方で検出: {len(breakout_with_composite)}件（ブレイクの{len(breakout_with_composite)/len(breakout_signals)*100:.1f}%）")
+    print(f"    ブレイクのみ: {len(breakout_without_composite)}件（ブレイクの{len(breakout_without_composite)/len(breakout_signals)*100:.1f}%）")
+    print(f"\n  💡 解釈:")
+    if len(breakout_without_composite) == 0:
+        print(f"    ⚠️  ブレイク検出は7指標に完全に含まれています")
+        print(f"       → ブレイク検出は新しい情報を追加していない可能性")
+    else:
+        print(f"    ✅ ブレイク検出のうち {len(breakout_without_composite)} 件は7指標にはない")
+        print(f"       → ブレイク検出は新しい信号を補捉している")
+
+    # ──── R/Sブレイク比較テスト ────
+    print(f"\n{'=' * 72}")
+    print("  【R/Sブレイク検出 比較テスト】")
+    print("  期間: 過去60日（15分足）")
+    print("=" * 72)
+
+    breakout_scenarios = [
+        (False, False, False, "none", "現在（RSIフィルターのみ）★"),
+        (False, False, True, "single", "①ブレイク単独でエントリー"),
+        (False, False, True, "and", "②ブレイク AND 7指標（両方）"),
+        (False, False, True, "or", "③ブレイク OR 7指標（どちらか）"),
+        (True, False, True, "single", "④ブレイク単独 + RSIフィルター"),
+        (True, False, True, "and", "⑤ブレイク AND 7指標 + RSIフィルター"),
+    ]
+
+    breakout_results = []
+    for rsi_f, sell_f, breakout_f, b_mode, label in breakout_scenarios:
+        filtered = apply_filters(df_sig, rsi_filter=rsi_f, sell_gap_filter=sell_f,
+                                breakout_filter=breakout_f, breakout_mode=b_mode)
+        t = simulate_trades(df, filtered, use_trailing=True)
+
+        if len(t) > 0:
+            wins = t[t['pnl'] > 0]
+            losses = t[t['pnl'] <= 0]
+            win_rate = len(wins) / len(t) * 100 if len(t) > 0 else 0
+            total_pnl = t['pnl'].sum()
+            avg_pnl = t['pnl'].mean()
+            max_dd = calc_max_drawdown(t)
+
+            breakout_results.append({
+                'scenario': label,
+                'win_rate': win_rate,
+                'num_trades': len(t),
+                'total_pnl': total_pnl,
+                'avg_pnl': avg_pnl,
+                'max_drawdown': max_dd,
+            })
+            print_stats(label, t)
+        else:
+            print(f"  {label:<40}: シグナルなし")
+            breakout_results.append({
+                'scenario': label,
+                'win_rate': 0,
+                'num_trades': 0,
+                'total_pnl': 0,
+                'avg_pnl': 0,
+                'max_drawdown': 0,
+            })
+
+    # 結果をCSVで保存
+    print(f"\n{'─' * 72}")
+    print("  【結果をCSV保存中...】")
+    import csv
+    results_df = pd.DataFrame(breakout_results)
+    csv_filename = "backtest_results_breakout.csv"
+    results_df.to_csv(csv_filename, index=False, encoding='utf-8-sig')
+    print(f"  ✅ {csv_filename} に保存しました")
+    print(f"  結果サマリー:")
+    for _, row in results_df.iterrows():
+        print(f"    {row['scenario']:<40} | 勝率:{row['win_rate']:5.1f}% | 取引:{row['num_trades']:3.0f} | P&L:{row['total_pnl']:+7.1f}$/oz | DD:{row['max_drawdown']:+7.1f}$/oz")
+
+    # ──── 決済タイミング最適化テスト（ADX適応的TP） ────
+    print(f"\n{'=' * 72}")
+    print("  【決済タイミング最適化：ADX適応的TP】")
+    print("  トレンド時（ADX>25）：対面側R/Sラインまで保有")
+    print("  レンジ時（ADX<25）：固定TP（15$/oz）で決済")
+    print("=" * 72)
+
+    # RSIフィルター版で比較
+    df_sig_rsi = apply_filters(df_sig, rsi_filter=True, sell_gap_filter=False)
+
+    tp_scenarios = [
+        (False, "【現在】固定TP（15$/oz）"),
+        (True,  "【改善】ADX適応的TP（トレンド/レンジ自動切替）"),
+    ]
+
+    tp_results = []
+    for use_adaptive, label in tp_scenarios:
+        t = simulate_trades(df, df_sig_rsi, use_trailing=True,
+                          use_adx_adaptive_tp=use_adaptive, adx_trend_threshold=25.0)
+
+        if len(t) > 0:
+            wins = t[t['pnl'] > 0]
+            losses = t[t['pnl'] <= 0]
+            win_rate = len(wins) / len(t) * 100 if len(t) > 0 else 0
+            total_pnl = t['pnl'].sum()
+            avg_pnl = t['pnl'].mean()
+            max_dd = calc_max_drawdown(t)
+
+            tp_results.append({
+                'scenario': label,
+                'win_rate': win_rate,
+                'num_trades': len(t),
+                'total_pnl': total_pnl,
+                'avg_pnl': avg_pnl,
+                'max_drawdown': max_dd,
+            })
+            print_stats(label, t)
+        else:
+            print(f"  {label:<50}: シグナルなし")
+
+    # 結果をCSVで保存
+    print(f"\n{'─' * 72}")
+    print("  【決済タイミング最適化結果をCSV保存中...】")
+    tp_results_df = pd.DataFrame(tp_results)
+    csv_filename2 = "backtest_results_tp_optimization.csv"
+    tp_results_df.to_csv(csv_filename2, index=False, encoding='utf-8-sig')
+    print(f"  ✅ {csv_filename2} に保存しました")
+    print(f"  結果サマリー:")
+    for _, row in tp_results_df.iterrows():
+        print(f"    {row['scenario']:<50} | 勝率:{row['win_rate']:5.1f}% | 取引:{row['num_trades']:3.0f} | P&L:{row['total_pnl']:+7.1f}$/oz | DD:{row['max_drawdown']:+7.1f}$/oz")
+
+    # ──── 決済タイミング最適化テスト（ADX適応的ドテン） ────
+    print(f"\n{'=' * 72}")
+    print("  【決済タイミング最適化テスト】")
+    print("  ADX適応的ドテン無効化の効果測定")
+    print("=" * 72)
+
+    df_sig_rsi_base = apply_filters(df_sig, rsi_filter=True, sell_gap_filter=False)
+
+    exit_timing_results = []
+
+    # シナリオ1：現在（常にドテン）
+    print(f"\n  ① 【現在】常にドテン + 固定TP（15$/oz）")
+    t_curr = simulate_trades(df, df_sig_rsi_base, use_trailing=True)
+    if len(t_curr) > 0:
+        wins = t_curr[t_curr['pnl'] > 0]
+        win_rate = len(wins) / len(t_curr) * 100
+        total_pnl = t_curr['pnl'].sum()
+        max_dd = calc_max_drawdown(t_curr)
+
+        exit_timing_results.append({
+            'scenario': '① 【現在】常にドテン',
+            'win_rate': win_rate,
+            'num_trades': len(t_curr),
+            'total_pnl': total_pnl,
+            'avg_pnl': t_curr['pnl'].mean(),
+            'max_drawdown': max_dd,
+        })
+        print_stats("常にドテン", t_curr)
+
+    # シナリオ2：ADX適応的ドテン無効化
+    print(f"\n  ② 【改善】ADX適応的ドテン無効化 + 固定TP（15$/oz）")
+    df_sig_rsi_adx = apply_adx_adaptive_flip(df_sig_rsi_base, adx_threshold=25.0)
+    t_adx = simulate_trades(df, df_sig_rsi_adx, use_trailing=True)
+    if len(t_adx) > 0:
+        wins = t_adx[t_adx['pnl'] > 0]
+        win_rate = len(wins) / len(t_adx) * 100
+        total_pnl = t_adx['pnl'].sum()
+        max_dd = calc_max_drawdown(t_adx)
+
+        exit_timing_results.append({
+            'scenario': '② 【改善】ADX適応的ドテン無効化',
+            'win_rate': win_rate,
+            'num_trades': len(t_adx),
+            'total_pnl': total_pnl,
+            'avg_pnl': t_adx['pnl'].mean(),
+            'max_drawdown': max_dd,
+        })
+        print_stats("ADX適応的ドテン無効化", t_adx)
+
+    # 結果をCSV保存
+    print(f"\n{'─' * 72}")
+    print("  【結果をCSV保存中...】")
+    exit_timing_df = pd.DataFrame(exit_timing_results)
+    csv_exit = "backtest_results_exit_timing.csv"
+    exit_timing_df.to_csv(csv_exit, index=False, encoding='utf-8-sig')
+    print(f"  ✅ {csv_exit} に保存しました")
+    print(f"\n  結果サマリー:")
+    for _, row in exit_timing_df.iterrows():
+        improvement = ""
+        if row['scenario'].startswith('②'):
+            if len(exit_timing_results) > 0:
+                prev_pnl = exit_timing_results[0]['total_pnl']
+                diff = row['total_pnl'] - prev_pnl
+                improvement = f"  (前比: {diff:+.1f}$/oz)"
+        print(f"    {row['scenario']:<40} | 勝率:{row['win_rate']:5.1f}% | 取引:{row['num_trades']:3.0f} | P&L:{row['total_pnl']:+7.1f}$/oz{improvement}")
+
+    # ──── ⑦ スキャルピング再エントリー戦略 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑦ スキャルピング再エントリー戦略】（15分足 × RSIフィルター）")
+    print("  トレーリング決済後、チャネル継続+ADX≥閾値なら即再エントリー")
+    print("─" * 72)
+
+    df_sig_rsi_scalp = apply_filters(df_sig, rsi_filter=True)
+
+    # ベースライン（現状 RSI+トレーリング）
+    t_base = simulate_trades(df, df_sig_rsi_scalp, use_trailing=True)
+    wins_b = t_base[t_base['pnl'] > 0]
+    base_total = t_base['pnl'].sum()
+    base_wr    = len(wins_b) / len(t_base) * 100 if len(t_base) > 0 else 0
+    print(f"\n  ① ベースライン（現状RSI+トレーリング）")
+    print_stats("  現状", t_base)
+
+    print(f"\n  ━ スキャルピング再エントリー比較 ━")
+    scalp_results = []
+    for adx_min in [20.0, 25.0]:
+        for trail_trigger, trail_width in [(1.5, 1.0), (2.0, 1.5), (3.0, 2.0)]:
+            for period in [20, 30, 50]:
+                df_tr, df_sess = simulate_trades_scalping(
+                    df, df_sig_rsi_scalp,
+                    trail_trigger=trail_trigger, trail_width=trail_width,
+                    adx_min=adx_min, channel_period=period,
+                    max_reentry=10,
+                )
+                if len(df_tr) == 0:
+                    continue
+                wins = df_tr[df_tr['pnl'] > 0]
+                losses = df_tr[df_tr['pnl'] <= 0]
+                wr    = len(wins) / len(df_tr) * 100
+                total = df_tr['pnl'].sum()
+                avg_w = wins['pnl'].mean()   if len(wins)   > 0 else 0
+                avg_l = losses['pnl'].mean() if len(losses) > 0 else 0
+                rr    = abs(avg_w / avg_l)   if avg_l != 0 else 0
+                n_sess  = len(df_sess)
+                n_reent = len(df_tr[df_tr['reentry_no'] > 0])
+                reasons = df_tr['exit_reason'].value_counts().to_dict()
+                reason_str = " ".join([f"{k}:{v}" for k, v in reasons.items()])
+                diff_vs_base = total - base_total
+                diff_pct = diff_vs_base / abs(base_total) * 100 if base_total != 0 else 0
+                label = f"TT{trail_trigger:.1f} TW{trail_width:.1f} P{period} ADX{int(adx_min)}"
+                bar_w = int(wr / 5)
+                bar   = "█" * bar_w + "░" * (20 - bar_w)
+                print(f"  {label:<28} [{bar}] {wr:5.1f}%  取引:{len(df_tr):3d}(再:{n_reent:2d}) "
+                      f"セッション:{n_sess:3d}  合計:{total:+8.1f}$/oz({diff_pct:+.0f}%)  "
+                      f"RR:{rr:.2f}  [{reason_str}]")
+                scalp_results.append({
+                    'label': label, 'adx_min': adx_min,
+                    'trail_trigger': trail_trigger, 'trail_width': trail_width,
+                    'channel_period': period,
+                    'win_rate': round(wr, 1), 'num_trades': len(df_tr),
+                    'num_reentry': n_reent, 'num_sessions': n_sess,
+                    'total_pnl': round(total, 2), 'diff_vs_base': round(diff_vs_base, 2),
+                    'avg_win': round(avg_w, 2), 'avg_loss': round(avg_l, 2), 'rr': round(rr, 2),
+                })
+        print()
+
+    # ベスト表示
+    if scalp_results:
+        best = max(scalp_results, key=lambda x: x['total_pnl'])
+        print(f"\n  🏆 スキャルピングベスト: {best['label']}")
+        print(f"     勝率:{best['win_rate']}%  取引:{best['num_trades']}  "
+              f"合計:{best['total_pnl']:+.1f}$/oz  ベース比:{best['diff_vs_base']:+.1f}$/oz")
+        print(f"\n  📊 ベース比較:")
+        print(f"     ベースライン: 勝率{base_wr:.1f}%  取引{len(t_base)}  合計{base_total:+.1f}$/oz")
+        print(f"     スキャルピング最良: 勝率{best['win_rate']}%  取引{best['num_trades']}  "
+              f"合計{best['total_pnl']:+.1f}$/oz  差:{best['diff_vs_base']:+.1f}$/oz "
+              f"({best['diff_vs_base']/abs(base_total)*100:+.0f}%)")
+
+    print(f"\n{'=' * 72}")
+    print("  バックテスト完了")
+    print("=" * 72)
+
+
+if __name__ == "__main__":
+    main()
