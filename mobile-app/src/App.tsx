@@ -111,9 +111,51 @@ interface GeminiStats {
   close_rate: number;
 }
 
+interface DailyPF {
+  date: string;
+  pf: number | null;
+  trades: number;
+  win_rate: number;
+  pnl: number;
+}
+
+interface PerformanceBaseline {
+  date: string;
+  description: string;
+  win_rate: number;
+  num_trades: number;
+  total_pnl_usd: number;
+  avg_pnl_usd: number;
+  max_drawdown_usd: number;
+  est_pf: number;
+  sl_usd: number;
+  tp_usd: number;
+  risk_reward: number;
+}
+
+interface PerformanceActual {
+  period_days: number;
+  total_trades: number;
+  win_rate: number;
+  pf: number | null;
+  gross_profit: number;
+  gross_loss: number;
+  net_profit: number;
+  avg_win: number;
+  avg_loss: number;
+  expectancy: number;
+  max_drawdown: number;
+}
+
+interface PerformanceStats {
+  baseline: PerformanceBaseline;
+  actual: PerformanceActual | null;
+  daily_pf: DailyPF[];
+}
+
 // ==================== 設定 ====================
 // v3B-rebuild
-const APP_VERSION = "1.30";
+const APP_VERSION = "1.31";
 const RENDER_URL = import.meta.env.VITE_RENDER_URL ?? "https://ai-trading-system-81jb.onrender.com";
 const TIMEFRAMES = [1, 5, 15, 30, 60] as const;
 
@@ -137,6 +179,7 @@ export default function App() {
   const [todayStats, setTodayStats] = useState<TodayStats | null>(null);
   const [monthlyStats, setMonthlyStats] = useState<MonthlyStats | null>(null);
   const [geminiStats, setGeminiStats] = useState<GeminiStats | null>(null);
+  const [performanceStats, setPerformanceStats] = useState<PerformanceStats | null>(null);
   const [actionLogs, setActionLogs] = useState<ActionLog[]>([]);
   const [entryModalOpen, setEntryModalOpen] = useState(false);
   const [closeModalTrade, setCloseModalTrade] = useState<Trade | null>(null);
@@ -234,6 +277,13 @@ export default function App() {
     try {
       const r = await fetch(`${RENDER_URL}/api/gemini-stats`);
       if (r.ok) setGeminiStats(await r.json());
+    } catch (_) {}
+  };
+
+  const fetchPerformanceStats = async () => {
+    try {
+      const r = await fetch(`${RENDER_URL}/api/stats/performance?days=30`);
+      if (r.ok) setPerformanceStats(await r.json());
     } catch (_) {}
   };
 
@@ -468,6 +518,7 @@ export default function App() {
       fetchMonthlyStats();
       fetchGeminiStats();
       fetchActionLog();
+      fetchPerformanceStats();
     }
   }, [activeTab]);
 
@@ -888,6 +939,109 @@ export default function App() {
       {/* ===== アナリティクスタブ ===== */}
       {activeTab === "analytics" && (
         <>
+          {/* パフォーマンス分析（バックテスト基準値 vs 実績） */}
+          {performanceStats && (() => {
+            const bl = performanceStats.baseline;
+            const ac = performanceStats.actual;
+            const daily = performanceStats.daily_pf;
+            // 日次PFチャート用スケール
+            const maxPF = Math.max(5, ...daily.filter(d => d.pf != null).map(d => d.pf as number));
+            return (
+              <div style={styles.card}>
+                <div style={styles.cardHeader}>
+                  <h2 style={styles.cardTitle}>📐 パフォーマンス分析</h2>
+                  <button style={styles.refreshBtn} onClick={fetchPerformanceStats}>🔄</button>
+                </div>
+
+                {/* バックテスト基準値 */}
+                <div style={{ fontSize: 11, color: "#64748b", marginBottom: 4 }}>
+                  🧪 バックテスト基準値 ({bl.date})
+                </div>
+                <div style={{ fontSize: 10, color: "#475569", marginBottom: 8 }}>{bl.description}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 12 }}>
+                  {[
+                    { label: "推定PF", value: String(bl.est_pf), color: "#818cf8" },
+                    { label: "勝率", value: `${bl.win_rate}%`, color: "#22c55e" },
+                    { label: "取引数", value: String(bl.num_trades), color: "#94a3b8" },
+                    { label: "SL", value: `$${bl.sl_usd}`, color: "#ef4444" },
+                    { label: "TP", value: `$${bl.tp_usd}`, color: "#22c55e" },
+                    { label: "RR比", value: `1:${bl.risk_reward}`, color: "#f59e0b" },
+                  ].map(item => (
+                    <div key={item.label} style={{ background: "#1e293b", borderRadius: 6, padding: "6px 8px", textAlign: "center" as const }}>
+                      <div style={{ fontSize: 10, color: "#64748b" }}>{item.label}</div>
+                      <div style={{ fontSize: 13, fontWeight: "bold", color: item.color }}>{item.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* 実績との比較 */}
+                <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>
+                  📊 実績 ({ac ? `直近${ac.period_days}日 / ${ac.total_trades}件` : "データなし"})
+                </div>
+                {ac ? (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 12 }}>
+                      {[
+                        { label: "実績PF", value: ac.pf != null ? String(ac.pf) : "—",
+                          color: ac.pf == null ? "#64748b" : ac.pf >= bl.est_pf * 0.7 ? "#22c55e" : ac.pf >= 1.0 ? "#f59e0b" : "#ef4444" },
+                        { label: "勝率", value: `${ac.win_rate}%`,
+                          color: ac.win_rate >= bl.win_rate * 0.9 ? "#22c55e" : "#f59e0b" },
+                        { label: "期待値", value: `$${ac.expectancy}`,
+                          color: ac.expectancy >= 0 ? "#22c55e" : "#ef4444" },
+                        { label: "平均勝", value: `$${ac.avg_win}`, color: "#22c55e" },
+                        { label: "平均負", value: `$${ac.avg_loss}`, color: "#ef4444" },
+                        { label: "最大DD", value: `$${ac.max_drawdown}`, color: "#f59e0b" },
+                      ].map(item => (
+                        <div key={item.label} style={{ background: "#1e293b", borderRadius: 6, padding: "6px 8px", textAlign: "center" as const }}>
+                          <div style={{ fontSize: 10, color: "#64748b" }}>{item.label}</div>
+                          <div style={{ fontSize: 13, fontWeight: "bold", color: item.color }}>{item.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 12, fontSize: 11, marginBottom: 12 }}>
+                      <span style={{ color: "#22c55e" }}>総利益: +${ac.gross_profit}</span>
+                      <span style={{ color: "#ef4444" }}>総損失: -${ac.gross_loss}</span>
+                      <span style={{ color: ac.net_profit >= 0 ? "#22c55e" : "#ef4444", fontWeight: "bold" }}>
+                        純益: {ac.net_profit >= 0 ? "+" : ""}${ac.net_profit}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ fontSize: 12, color: "#475569", marginBottom: 12 }}>取引データが蓄積されると実績と比較表示されます</div>
+                )}
+
+                {/* 日次PF推移バーチャート */}
+                {daily.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>📈 日次PF推移</div>
+                    <div style={{ display: "flex", alignItems: "flex-end", gap: 3, height: 60, overflow: "hidden" }}>
+                      {daily.slice(-20).map((d, i) => {
+                        const pf = d.pf ?? 0;
+                        const barH = Math.min(100, (pf / maxPF) * 100);
+                        const barColor = pf >= 2.0 ? "#22c55e" : pf >= 1.0 ? "#f59e0b" : "#ef4444";
+                        return (
+                          <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column" as const, alignItems: "center", justifyContent: "flex-end", height: "100%" }}>
+                            <div style={{ width: "100%", height: `${barH}%`, background: barColor, borderRadius: "2px 2px 0 0", minHeight: d.pf != null ? 2 : 0 }} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#475569", marginTop: 2 }}>
+                      <span>{daily.slice(-20)[0]?.date?.slice(5)}</span>
+                      <span style={{ color: "#64748b" }}>PF推移（最大{maxPF.toFixed(1)}）</span>
+                      <span>{daily.slice(-1)[0]?.date?.slice(5)}</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 10, marginTop: 4, fontSize: 10 }}>
+                      <span style={{ color: "#22c55e" }}>■ PF≥2.0</span>
+                      <span style={{ color: "#f59e0b" }}>■ PF≥1.0</span>
+                      <span style={{ color: "#ef4444" }}>■ PF{"<"}1.0</span>
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })()}
+
           {/* 月次目標プログレス */}
           {monthlyStats && (() => {
             const TARGET_USD = 65; // $65 ≈ ¥10,000（デモは×100）

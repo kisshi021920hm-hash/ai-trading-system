@@ -87,6 +87,21 @@ _server_start_time = time.time()
 _ea_last_heartbeat = 0.0
 _ea_last_heartbeat_str = ""
 _ea_trades: list = []  # 直近50件のEA取引レポート
+
+# バックテスト基準値（2026-10-03 実施・COMPOSITE信号+ハイブリッドSL+固定TP15）
+BACKTEST_BASELINE = {
+    "date": "2026-10-03",
+    "description": "COMPOSITE信号 / 固定TP(15$/oz) / ハイブリッドSL(5$/oz)",
+    "win_rate": 65.82,
+    "num_trades": 158,
+    "total_pnl_usd": 255.80,
+    "avg_pnl_usd": 1.619,
+    "max_drawdown_usd": -22.5,
+    "est_pf": 5.78,   # (勝率×TP比) / (負率×SL比) = (0.6582×15)/(0.3418×5)
+    "sl_usd": 5.0,
+    "tp_usd": 15.0,
+    "risk_reward": 3.0,
+}
 _position_monitor_last = 0.0  # ポジション監視最終実行時刻
 _last_ea_signal_time = 0.0   # EAから/ea-signalを最後に受信した時刻（signal_loopスキップ判定用）
 _ea_latest_scores: dict = {}  # EAから受信した最新スコア（ハートビート経由）
@@ -2879,6 +2894,94 @@ def gemini_stats_endpoint():
         "close_executed": _gemini_stats["close_executed"],
         "close_rate": close_rate,
     })
+
+@app.route("/api/stats/performance", methods=["GET"])
+def stats_performance():
+    """実績パフォーマンス指標（PF・期待値・最大DD・日次推移）"""
+    try:
+        days = int(request.args.get("days", 30))
+        from datetime import timedelta
+        from collections import defaultdict
+        start = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        trades_resp = req.get(
+            f"{SUPABASE_URL}/rest/v1/trades",
+            params={"select": "status,profit_loss,entry_time,direction",
+                    "entry_time": f"gte.{start}", "order": "entry_time.asc"},
+            headers=supabase_headers(), timeout=10
+        )
+        trades = trades_resp.json() if trades_resp.ok else []
+        closed = [t for t in trades if t.get('status') in ('CLOSED_PROFIT', 'CLOSED_LOSS')]
+
+        actual = None
+        daily_pf = []
+
+        if closed:
+            profits = [float(t.get('profit_loss') or 0) for t in closed]
+            gross_profit = sum(p for p in profits if p > 0)
+            gross_loss = abs(sum(p for p in profits if p < 0))
+            pf = round(gross_profit / gross_loss, 2) if gross_loss > 0 else None
+
+            wins = [p for p in profits if p > 0]
+            losses = [p for p in profits if p < 0]
+            win_rate = round(len(wins) / len(profits) * 100, 1)
+            avg_win = round(sum(wins) / len(wins), 2) if wins else 0
+            avg_loss = round(sum(losses) / len(losses), 2) if losses else 0
+            expectancy = round((win_rate / 100 * avg_win) + ((1 - win_rate / 100) * avg_loss), 2)
+
+            # 最大ドローダウン計算（エクイティカーブ）
+            equity = 0.0
+            peak = 0.0
+            max_dd = 0.0
+            for p in profits:
+                equity += p
+                peak = max(peak, equity)
+                dd = equity - peak
+                max_dd = min(max_dd, dd)
+
+            actual = {
+                "period_days": days,
+                "total_trades": len(closed),
+                "win_rate": win_rate,
+                "pf": pf,
+                "gross_profit": round(gross_profit, 2),
+                "gross_loss": round(gross_loss, 2),
+                "net_profit": round(gross_profit - gross_loss, 2),
+                "avg_win": avg_win,
+                "avg_loss": avg_loss,
+                "expectancy": expectancy,
+                "max_drawdown": round(max_dd, 2),
+            }
+
+            # 日別PF集計
+            daily: dict = defaultdict(lambda: {"g_profit": 0.0, "g_loss": 0.0, "trades": 0, "wins": 0})
+            for t in closed:
+                day = (t.get('entry_time') or "")[:10]
+                p = float(t.get('profit_loss') or 0)
+                daily[day]["trades"] += 1
+                if p > 0:
+                    daily[day]["g_profit"] += p
+                    daily[day]["wins"] += 1
+                else:
+                    daily[day]["g_loss"] += abs(p)
+
+            for day in sorted(daily.keys()):
+                d = daily[day]
+                day_pf = round(d["g_profit"] / d["g_loss"], 2) if d["g_loss"] > 0 else None
+                daily_pf.append({
+                    "date": day,
+                    "pf": day_pf,
+                    "trades": d["trades"],
+                    "win_rate": round(d["wins"] / d["trades"] * 100, 1) if d["trades"] > 0 else 0,
+                    "pnl": round(d["g_profit"] - d["g_loss"], 2),
+                })
+
+        return jsonify({
+            "baseline": BACKTEST_BASELINE,
+            "actual": actual,
+            "daily_pf": daily_pf,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/analysis/correlation", methods=["GET"])
 def correlation_analysis():
