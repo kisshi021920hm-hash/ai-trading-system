@@ -2122,6 +2122,87 @@ def main():
 
     print(f"\n  🏆 = 負け<85件かつP&L>545（ベースライン超え）  ✅ = どちらか改善")
 
+    # ──── ⑤b-5 負けトレードのSL到達タイミング分析 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑤b-5 負けトレードのSL到達タイミング分析】")
+    print("  クロス転換 × スコア差≥3 × DI方向一致 の負け85件を詳細分析")
+    print("─" * 72)
+
+    # sig_di3は上で定義済み。トレード詳細を再取得（bar数付き）
+    close_arr = df['Close'].values
+    high_arr  = df['High'].values
+    low_arr   = df['Low'].values
+    times_arr = df.index
+
+    sl_timing = []
+    sig_rows_di3 = sig_di3[sig_di3['crossover'].notna()].copy()
+    sig_rows_di3 = sig_rows_di3[sig_rows_di3['crossover'] != sig_rows_di3['crossover'].shift(1)]
+
+    for _, row in sig_rows_di3.iterrows():
+        i       = int(row['idx'])
+        is_buy  = row['crossover'] == 'UP_CROSS'
+        ep      = row['close']
+        sl_p    = ep - SL_PIPS if is_buy else ep + SL_PIPS
+        hit_bar = None
+        max_fav = 0.0  # エントリー後の最大有利方向への動き
+
+        for j in range(i + 1, min(i + 200, len(close_arr))):
+            h, l = high_arr[j], low_arr[j]
+            # 最大有利幅を記録
+            fav = (h - ep) if is_buy else (ep - l)
+            if fav > max_fav:
+                max_fav = fav
+            # SL到達チェック
+            if is_buy and l <= sl_p:
+                hit_bar = j - i
+                break
+            if not is_buy and h >= sl_p:
+                hit_bar = j - i
+                break
+
+        if hit_bar is not None:
+            sl_timing.append({'bars_to_sl': hit_bar, 'max_fav': round(max_fav, 2)})
+
+    if sl_timing:
+        df_sl = pd.DataFrame(sl_timing)
+        print(f"\n  負けトレード総数: {len(df_sl)}件")
+        print(f"  SL到達までの平均本数: {df_sl['bars_to_sl'].mean():.1f}本")
+        print(f"  SL到達までの中央値:   {df_sl['bars_to_sl'].median():.1f}本")
+        print(f"\n  ── SL到達タイミング分布 ──")
+        bins = [(1,1),(2,2),(3,3),(4,5),(6,10),(11,20),(21,50),(51,200)]
+        for lo, hi in bins:
+            cnt = len(df_sl[(df_sl['bars_to_sl'] >= lo) & (df_sl['bars_to_sl'] <= hi)])
+            bar = "█" * cnt
+            label = f"{lo}本" if lo == hi else f"{lo}〜{hi}本"
+            print(f"    {label:<10}: {cnt:3d}件  {bar}")
+
+        print(f"\n  ── エントリー後の最大有利幅（負けトレードのみ） ──")
+        fav_bins = [(0,0.5),(0.5,1.0),(1.0,2.0),(2.0,3.0),(3.0,5.0),(5.0,99)]
+        for lo, hi in fav_bins:
+            cnt = len(df_sl[(df_sl['max_fav'] >= lo) & (df_sl['max_fav'] < hi)])
+            bar = "█" * cnt
+            label = f"<{hi}$" if lo == 0 else (f"≥{lo}$" if hi == 99 else f"{lo}〜{hi}$")
+            print(f"    {label:<12}: {cnt:3d}件  {bar}")
+
+        # 即逆行（1〜2本でSL）の割合
+        instant = len(df_sl[df_sl['bars_to_sl'] <= 2])
+        early   = len(df_sl[df_sl['bars_to_sl'] <= 5])
+        never_fav = len(df_sl[df_sl['max_fav'] < 1.0])
+        print(f"\n  ── 重要指標 ──")
+        print(f"    即逆行（1〜2本でSL）: {instant}件 ({instant/len(df_sl)*100:.1f}%) ← 遅らせても防げない")
+        print(f"    早期SL（5本以内）:    {early}件 ({early/len(df_sl)*100:.1f}%)")
+        print(f"    最大有利<1$の負け:    {never_fav}件 ({never_fav/len(df_sl)*100:.1f}%) ← 最初からほぼ逆行")
+        print(f"\n  ── 解釈 ──")
+        if instant / len(df_sl) > 0.4:
+            print("  → 即逆行が多い。エントリー遅延の効果は限定的。")
+            print("  → シグナル品質の問題（DI/ADX追加フィルターが有効な可能性）")
+        else:
+            print("  → 即逆行は少ない。エントリー遅延や確認足でいくつか防げる可能性あり。")
+        if never_fav / len(df_sl) > 0.5:
+            print("  → 「最初から逆行」が半数超。エントリータイミングより方向判断の問題。")
+        else:
+            print("  → 一度は有利に動いてから失速するケースが多い。決済改善（チャネル等）が有効。")
+
     # ──── ⑥a トレンド/レンジ別勝率 ────
     print(f"\n{'=' * 72}")
     print("  【⑥a トレンド/レンジ別 詳細分析】（①RSIフィルター適用）")
