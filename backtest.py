@@ -1542,10 +1542,16 @@ def main():
     print(f"\n  ① ベースライン（現状RSI+トレーリング）")
     print_stats("  現状", t_base)
 
-    print(f"\n  ━ スキャルピング再エントリー比較 ━")
+    SPREAD = 0.5  # XAUUSD往復スプレッド（$/oz）
+    base_spread_cost = len(t_base) * SPREAD
+    print(f"  ※スプレッド考慮: {SPREAD}$/oz × {len(t_base)}取引 = -{base_spread_cost:.1f}$/oz")
+    print(f"  ※ベースライン（スプレッドなし）: {base_total:+.1f}$/oz → "
+          f"（スプレッドあり）: {base_total - base_spread_cost:+.1f}$/oz\n")
+
+    print(f"  ━ スキャルピング再エントリー比較 ━")
     scalp_results = []
     for adx_min in [20.0, 25.0]:
-        for trail_trigger, trail_width in [(1.5, 1.0), (2.0, 1.5), (3.0, 2.0)]:
+        for trail_trigger, trail_width in [(2.0, 1.5), (2.5, 1.5), (3.0, 2.0), (4.0, 2.5)]:
             for period in [20, 30, 50]:
                 df_tr, df_sess = simulate_trades_scalping(
                     df, df_sig_rsi_scalp,
@@ -1566,13 +1572,15 @@ def main():
                 n_reent = len(df_tr[df_tr['reentry_no'] > 0])
                 reasons = df_tr['exit_reason'].value_counts().to_dict()
                 reason_str = " ".join([f"{k}:{v}" for k, v in reasons.items()])
-                diff_vs_base = total - base_total
-                diff_pct = diff_vs_base / abs(base_total) * 100 if base_total != 0 else 0
+                spread_cost  = len(df_tr) * SPREAD
+                total_net    = total - spread_cost
+                diff_vs_base = total_net - (base_total - base_spread_cost)
+                diff_pct = diff_vs_base / abs(base_total - base_spread_cost) * 100 if base_total != base_spread_cost else 0
                 label = f"TT{trail_trigger:.1f} TW{trail_width:.1f} P{period} ADX{int(adx_min)}"
                 bar_w = int(wr / 5)
                 bar   = "█" * bar_w + "░" * (20 - bar_w)
                 print(f"  {label:<28} [{bar}] {wr:5.1f}%  取引:{len(df_tr):3d}(再:{n_reent:2d}) "
-                      f"セッション:{n_sess:3d}  合計:{total:+8.1f}$/oz({diff_pct:+.0f}%)  "
+                      f"スプレッドなし:{total:+7.1f}  スプレッドあり:{total_net:+7.1f}$/oz({diff_pct:+.0f}%)  "
                       f"RR:{rr:.2f}  [{reason_str}]")
                 scalp_results.append({
                     'label': label, 'adx_min': adx_min,
@@ -1580,22 +1588,25 @@ def main():
                     'channel_period': period,
                     'win_rate': round(wr, 1), 'num_trades': len(df_tr),
                     'num_reentry': n_reent, 'num_sessions': n_sess,
-                    'total_pnl': round(total, 2), 'diff_vs_base': round(diff_vs_base, 2),
+                    'total_pnl': round(total, 2),
+                    'total_net': round(total_net, 2),
+                    'diff_vs_base': round(diff_vs_base, 2),
                     'avg_win': round(avg_w, 2), 'avg_loss': round(avg_l, 2), 'rr': round(rr, 2),
                 })
         print()
 
     # ベスト表示
     if scalp_results:
-        best = max(scalp_results, key=lambda x: x['total_pnl'])
-        print(f"\n  🏆 スキャルピングベスト: {best['label']}")
+        best = max(scalp_results, key=lambda x: x['total_net'])
+        base_net = base_total - base_spread_cost
+        print(f"\n  🏆 スキャルピングベスト（スプレッド込み）: {best['label']}")
         print(f"     勝率:{best['win_rate']}%  取引:{best['num_trades']}  "
-              f"合計:{best['total_pnl']:+.1f}$/oz  ベース比:{best['diff_vs_base']:+.1f}$/oz")
-        print(f"\n  📊 ベース比較:")
-        print(f"     ベースライン: 勝率{base_wr:.1f}%  取引{len(t_base)}  合計{base_total:+.1f}$/oz")
+              f"スプレッドなし:{best['total_pnl']:+.1f}$/oz  スプレッドあり:{best['total_net']:+.1f}$/oz")
+        print(f"\n  📊 ベース比較（スプレッド0.5$/oz込み）:")
+        print(f"     ベースライン: 勝率{base_wr:.1f}%  取引{len(t_base)}  "
+              f"スプレッドなし:{base_total:+.1f}$/oz  スプレッドあり:{base_net:+.1f}$/oz")
         print(f"     スキャルピング最良: 勝率{best['win_rate']}%  取引{best['num_trades']}  "
-              f"合計{best['total_pnl']:+.1f}$/oz  差:{best['diff_vs_base']:+.1f}$/oz "
-              f"({best['diff_vs_base']/abs(base_total)*100:+.0f}%)")
+              f"スプレッドあり:{best['total_net']:+.1f}$/oz  差:{best['diff_vs_base']:+.1f}$/oz")
 
     print(f"\n{'=' * 72}")
     print("  バックテスト完了")
