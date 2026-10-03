@@ -395,6 +395,109 @@ def simulate_trades_dynamic_sl(df_price, df_signals, channel_period=30, channel_
     return pd.DataFrame(trades)
 
 
+def simulate_trades_hybrid_flip(df_price, df_signals,
+                                sl=SL_PIPS, be_trigger=None,
+                                adx_min=None, min_score_gap=None):
+    """クロス転換決済 ハイブリッド戦略
+
+    be_trigger  : この利益($/oz)に達したらSLをBEに移動し、以後クロス転換まで保有
+                  None = BEなし（純粋クロス転換）
+    adx_min     : この値以上のシグナルのみ適用（Noneで無効）
+    min_score_gap: スコア差がこの値以上のシグナルのみ（Noneで無効）
+    """
+    close = df_price['Close'].values
+    high  = df_price['High'].values
+    low   = df_price['Low'].values
+    times = df_price.index
+
+    # バーごとにアクティブクロス方向を記録
+    active_cross = [None] * len(close)
+    sig_rows_all = df_signals[df_signals['crossover'].notna()].sort_values('idx')
+    current_cross = None
+    sig_iter = iter(sig_rows_all.iterrows())
+    next_sig = next(sig_iter, None)
+    for i in range(len(close)):
+        while next_sig is not None and next_sig[1]['idx'] <= i:
+            current_cross = next_sig[1]['crossover']
+            next_sig = next(sig_iter, None)
+        active_cross[i] = current_cross
+
+    # シグナルを方向変化のみに絞る
+    sig_rows = sig_rows_all.copy()
+    sig_rows = sig_rows[sig_rows['crossover'] != sig_rows['crossover'].shift(1)]
+
+    trades = []
+    for _, row in sig_rows.iterrows():
+        i0       = int(row['idx'])
+        direction = row['crossover']
+        is_buy   = direction == 'UP_CROSS'
+        ep       = row['close']
+        adx_val  = row['adx']
+        score_gap = abs(row['buy_score'] - row['sell_score'])
+
+        # フィルター
+        if adx_min is not None and adx_val < adx_min:
+            continue
+        if min_score_gap is not None and score_gap < min_score_gap:
+            continue
+
+        sl_price    = ep - sl if is_buy else ep + sl
+        be_reached  = False
+        exit_price  = None
+        exit_reason = None
+        exit_idx    = None
+
+        for j in range(i0 + 1, min(i0 + 800, len(close))):
+            h, l, c = high[j], low[j], close[j]
+
+            # 反対クロス → 決済
+            if active_cross[j] is not None and active_cross[j] != direction:
+                exit_price  = c
+                exit_reason = 'CROSS_FLIP'
+                exit_idx    = j; break
+
+            # BEトリガー到達でSLをBEへ移動
+            if be_trigger is not None and not be_reached:
+                if is_buy  and h >= ep + be_trigger:
+                    sl_price   = ep        # SLをエントリー価格（BE）へ
+                    be_reached = True
+                if not is_buy and l <= ep - be_trigger:
+                    sl_price   = ep
+                    be_reached = True
+
+            # SL判定
+            if is_buy  and l <= sl_price:
+                exit_price  = sl_price
+                exit_reason = 'BE' if be_reached else 'SL'
+                exit_idx    = j; break
+            if not is_buy and h >= sl_price:
+                exit_price  = sl_price
+                exit_reason = 'BE' if be_reached else 'SL'
+                exit_idx    = j; break
+
+        if exit_price is None:
+            last_j      = min(i0 + 799, len(close) - 1)
+            exit_price  = close[last_j]
+            exit_reason = 'TIMEOUT'
+            exit_idx    = last_j
+
+        pnl = (exit_price - ep) if is_buy else (ep - exit_price)
+        trades.append({
+            'direction':   direction,
+            'entry_time':  times[i0],
+            'exit_time':   times[exit_idx],
+            'entry_price': ep,
+            'exit_price':  exit_price,
+            'pnl':         round(pnl, 2),
+            'exit_reason': exit_reason,
+            'adx':         adx_val,
+            'score_gap':   score_gap,
+            'be_reached':  be_reached,
+        })
+
+    return pd.DataFrame(trades) if trades else pd.DataFrame()
+
+
 def simulate_trades_active_reentry(df_price, df_signals,
                                    sl=SL_PIPS, tp=TP_PIPS,
                                    trail_trigger=TRAIL_TRIGGER, trail_width=TRAIL_WIDTH,
@@ -1741,6 +1844,96 @@ def main():
             wd = td[td['pnl'] > 0]
             print(f"  {lbl}: 勝率{len(wd)/len(td)*100:.1f}%  取引{len(td)}件  "
                   f"合計{td['pnl'].sum():+.1f}$/oz  平均保有{td['hold_bars'].mean():.1f}本")
+
+    # ──── ⑤c クロス転換ハイブリッド 全比較 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑤c クロス転換ハイブリッド 全比較】")
+    print("  BE=ブレイクイーブン移動後クロス保有 / ADX=ADX≥25のみ / Gap=スコア差≥4")
+    print("─" * 72)
+
+    df_sig_h = apply_filters(df_sig, rsi_filter=True)
+
+    # (label, be_trigger, adx_min, min_score_gap)
+    hybrid_scenarios = [
+        # ── ベースライン ──
+        ("①現状（トレーリング）",          None,  None, None,  True ),
+        ("純粋クロス転換 SL5$",            None,  None, None,  False),
+        # ── 単体ハイブリッド ──
+        ("A. BE後クロス保有（trigger4$）",  4.0,   None, None,  False),
+        ("A. BE後クロス保有（trigger5$）",  5.0,   None, None,  False),
+        ("A. BE後クロス保有（trigger6$）",  6.0,   None, None,  False),
+        ("B. ADX≥25のみ クロス転換",        None,  25.0, None,  False),
+        ("B. ADX≥20のみ クロス転換",        None,  20.0, None,  False),
+        ("C. スコア差≥3 クロス転換",        None,  None, 3,     False),
+        ("C. スコア差≥4 クロス転換",        None,  None, 4,     False),
+        # ── 2段ハイブリッド ──
+        ("A+B. BE後+ADX≥25",              4.0,   25.0, None,  False),
+        ("A+B. BE後+ADX≥20",              4.0,   20.0, None,  False),
+        ("A+C. BE後+スコア差≥3",           4.0,   None, 3,     False),
+        ("A+C. BE後+スコア差≥4",           4.0,   None, 4,     False),
+        ("B+C. ADX≥25+スコア差≥3",        None,  25.0, 3,     False),
+        ("B+C. ADX≥25+スコア差≥4",        None,  25.0, 4,     False),
+        # ── 3段ハイブリッド ──
+        ("A+B+C. BE+ADX≥25+差≥3",        4.0,   25.0, 3,     False),
+        ("A+B+C. BE+ADX≥25+差≥4",        4.0,   25.0, 4,     False),
+    ]
+
+    # ベースライン値を取得
+    t_base_h = simulate_trades(df, df_sig_h, use_trailing=True)
+    base_h_total = t_base_h['pnl'].sum()
+
+    print(f"\n  {'ラベル':<34} {'勝率':>6} {'取引':>5} {'合計P&L':>10} {'差':>7} {'DD':>7} {'RR':>5} {'決済内訳'}")
+    print(f"  {'─'*34} {'─'*6} {'─'*5} {'─'*10} {'─'*7} {'─'*7} {'─'*5}")
+
+    best_total = base_h_total
+    results_h = []
+    for lbl_h, be_t, adx_t, gap_t, use_tr in hybrid_scenarios:
+        if use_tr:
+            t_h = t_base_h
+        else:
+            t_h = simulate_trades_hybrid_flip(
+                df, df_sig_h,
+                sl=SL_PIPS, be_trigger=be_t,
+                adx_min=adx_t, min_score_gap=gap_t,
+            )
+        if len(t_h) == 0:
+            print(f"  ❓ {lbl_h:<34}: シグナルなし")
+            continue
+        wins_h   = t_h[t_h['pnl'] > 0]
+        losses_h = t_h[t_h['pnl'] <= 0]
+        wr_h     = len(wins_h) / len(t_h) * 100
+        total_h  = t_h['pnl'].sum()
+        avg_w_h  = wins_h['pnl'].mean()   if len(wins_h)   > 0 else 0
+        avg_l_h  = losses_h['pnl'].mean() if len(losses_h) > 0 else 0
+        rr_h     = abs(avg_w_h / avg_l_h) if avg_l_h != 0 else 0
+        dd_h     = calc_max_drawdown(t_h)
+        diff_h   = total_h - base_h_total
+        reasons_h = t_h['exit_reason'].value_counts().to_dict() if 'exit_reason' in t_h.columns else {}
+        reason_str_h = " ".join([f"{k}:{v}" for k, v in sorted(reasons_h.items())])
+        mark_h   = "✅" if total_h > base_h_total else ("──" if use_tr else "❌")
+        if total_h > best_total:
+            best_total = total_h
+            mark_h = "🏆"
+        print(f"  {mark_h} {lbl_h:<34} {wr_h:6.1f}% {len(t_h):5d} {total_h:+10.1f} {diff_h:+7.1f} {dd_h:+7.1f} {rr_h:5.2f}  {reason_str_h}")
+        results_h.append({
+            'label': lbl_h, 'win_rate': round(wr_h,1), 'num_trades': len(t_h),
+            'total': round(total_h,2), 'diff': round(diff_h,2),
+            'avg_win': round(avg_w_h,2), 'avg_loss': round(avg_l_h,2),
+            'rr': round(rr_h,2), 'max_dd': round(dd_h,2),
+        })
+
+    winners_h = [r for r in results_h if r['diff'] > 0]
+    print(f"\n  改善あり: {len(winners_h)}/{len(results_h)-1}件（ベースライン除く）")
+    if winners_h:
+        best_h = max(winners_h, key=lambda x: x['total'])
+        print(f"  🏆 総合最良: {best_h['label']}")
+        print(f"     勝率:{best_h['win_rate']}%  取引:{best_h['num_trades']}  "
+              f"合計:{best_h['total']:+.1f}$/oz  ベース差:{best_h['diff']:+.1f}$/oz  "
+              f"RR:{best_h['rr']:.2f}  DD:{best_h['max_dd']:+.1f}$/oz")
+        print(f"\n  📊 現状 vs 最良比較:")
+        print(f"     現状:  勝率65.8%  取引158  合計+255.8$/oz  DD-22.5$/oz")
+        print(f"     最良:  勝率{best_h['win_rate']}%  取引{best_h['num_trades']}  "
+              f"合計{best_h['total']:+.1f}$/oz  DD{best_h['max_dd']:+.1f}$/oz")
 
     # ──── ⑥a トレンド/レンジ別勝率 ────
     print(f"\n{'=' * 72}")
