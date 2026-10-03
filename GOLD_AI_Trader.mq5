@@ -765,7 +765,7 @@ void SendHeartbeat()
 
 void ReportTrade(string action, string direction, double price,
                  double sl, double tp, double lot, ulong ticket,
-                 long magic = MAGIC_NUMBER)
+                 long magic = 20260929)
 {
     string json = "{\"action\":\"" + action + "\""
                 + ",\"direction\":\"" + direction + "\""
@@ -789,7 +789,7 @@ void ReportTrade(string action, string direction, double price,
 
 // SL/TP/手動決済をサーバーに報告
 void ReportTradeClose(ulong ticket, string direction, double close_price,
-                      double profit, string close_reason, long magic = MAGIC_NUMBER)
+                      double profit, string close_reason, long magic = 20260929)
 {
     string json = "{\"action\":\"CLOSE\""
                 + ",\"ticket\":"       + IntegerToString((long)ticket)
