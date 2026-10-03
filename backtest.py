@@ -1684,6 +1684,72 @@ def main():
                 improvement = f"  (前比: {diff:+.1f}$/oz)"
         print(f"    {row['scenario']:<40} | 勝率:{row['win_rate']:5.1f}% | 取引:{row['num_trades']:3.0f} | P&L:{row['total_pnl']:+7.1f}$/oz{improvement}")
 
+    # ──── ⑥a トレンド/レンジ別勝率 ────
+    print(f"\n{'=' * 72}")
+    print("  【⑥a トレンド/レンジ別 詳細分析】（①RSIフィルター適用）")
+    print("─" * 72)
+
+    t_rsi = simulate_trades(df, apply_filters(df_sig, rsi_filter=True), use_trailing=True)
+    t_rsi['adx_zone'] = t_rsi['adx'].apply(get_adx_zone)
+    t_rsi['direction_lbl'] = t_rsi['direction'].map({'UP_CROSS':'BUY','DOWN_CROSS':'SELL'})
+
+    zones = [
+        ("レンジ(<20)",   "レンジ(<20)"),
+        ("移行(20-25)",   "移行(20-25)"),
+        ("トレンド(>25)", "トレンド(>25)"),
+    ]
+    dirs = [("BUY","BUY"), ("SELL","SELL")]
+
+    print(f"\n  {'区分':<20}  {'勝率':>6}  {'取引':>5}  {'合計P&L':>10}  {'平均勝':>7}  {'平均負':>7}  {'RR':>5}")
+    print(f"  {'─'*20}  {'─'*6}  {'─'*5}  {'─'*10}  {'─'*7}  {'─'*7}  {'─'*5}")
+
+    for zone_key, zone_lbl in zones:
+        tz = t_rsi[t_rsi['adx_zone'] == zone_key]
+        if len(tz) == 0: continue
+        w = tz[tz['pnl'] > 0]; l = tz[tz['pnl'] <= 0]
+        wr = len(w)/len(tz)*100
+        tot = tz['pnl'].sum()
+        aw = w['pnl'].mean() if len(w)>0 else 0
+        al = l['pnl'].mean() if len(l)>0 else 0
+        rr = abs(aw/al) if al!=0 else 0
+        mark = "✅" if wr >= 65 else ("⚠️ " if wr >= 55 else "❌")
+        print(f"  {mark}{zone_lbl:<18}  {wr:6.1f}%  {len(tz):5d}  {tot:+10.1f}  {aw:+7.2f}  {al:+7.2f}  {rr:5.2f}")
+
+        for dir_key, dir_lbl in dirs:
+            td = tz[tz['direction_lbl'] == dir_key]
+            if len(td) == 0: continue
+            wd = td[td['pnl'] > 0]; ld = td[td['pnl'] <= 0]
+            wrd = len(wd)/len(td)*100
+            totd = td['pnl'].sum()
+            awd = wd['pnl'].mean() if len(wd)>0 else 0
+            ald = ld['pnl'].mean() if len(ld)>0 else 0
+            rrd = abs(awd/ald) if ald!=0 else 0
+            markd = "  ✅" if wrd >= 65 else ("  ⚠️ " if wrd >= 55 else "  ❌")
+            print(f"  {markd}  └{dir_lbl} ({zone_lbl}){'':<6}  {wrd:6.1f}%  {len(td):5d}  {totd:+10.1f}  {awd:+7.2f}  {ald:+7.2f}  {rrd:5.2f}")
+
+    print(f"\n  ── 方向別まとめ ──")
+    for dir_key, dir_lbl in dirs:
+        td = t_rsi[t_rsi['direction_lbl'] == dir_key]
+        if len(td) == 0: continue
+        wd = td[td['pnl'] > 0]; ld = td[td['pnl'] <= 0]
+        wrd = len(wd)/len(td)*100
+        print(f"  {dir_lbl:<6}  勝率:{wrd:5.1f}%  取引:{len(td):3d}  合計:{td['pnl'].sum():+8.1f}$/oz  "
+              f"平均勝:{wd['pnl'].mean() if len(wd)>0 else 0:+.2f}  平均負:{ld['pnl'].mean() if len(ld)>0 else 0:+.2f}")
+
+    print(f"\n  ── 解釈 ──")
+    rng = t_rsi[t_rsi['adx_zone']=="レンジ(<20)"]
+    trd = t_rsi[t_rsi['adx_zone']=="トレンド(>25)"]
+    if len(rng)>0 and len(trd)>0:
+        wr_rng = len(rng[rng['pnl']>0])/len(rng)*100
+        wr_trd = len(trd[trd['pnl']>0])/len(trd)*100
+        print(f"  レンジ勝率: {wr_rng:.1f}%  /  トレンド勝率: {wr_trd:.1f}%  →  差: {wr_trd-wr_rng:+.1f}pt")
+        if wr_trd > wr_rng + 5:
+            print(f"  → トレンド相場が得意。ADXフィルターで絞ると勝率上がるが取引数が減る。")
+        elif wr_rng > wr_trd + 5:
+            print(f"  → レンジ相場が得意。逆張り的な動きに強い可能性。")
+        else:
+            print(f"  → トレンド/レンジで大きな差なし。ADXフィルターの効果は限定的。")
+
     # ──── ⑥b ADX/DI フィルター比較 ────
     print(f"\n{'=' * 72}")
     print("  【⑥b ADX/DI フィルター比較】（15分足 × 過去60日）")
